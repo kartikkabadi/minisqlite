@@ -172,10 +172,10 @@ impl DataFile {
     pub fn truncate(&mut self, len: u64) -> Result<(), Error> {
         self.file.set_len(len)?;
         self.file.seek(SeekFrom::Start(len))?;
-        self.len = len;
         if self.durability.requires_sync() {
             self.file.sync_all()?;
         }
+        self.len = len;
         Ok(())
     }
 }

@@ -30,6 +30,7 @@ Commands:
 
 Options:
   -j, --json                       Emit machine-readable JSON output.
+  -p, --show-payloads              Show full payloads/values in events, jobs, and projections.
   -d, --durability strict|memory   Durability mode (default: strict).
   -l, --lock <PATH>                Custom lock-file path.
   -h, --help                       Print this help.
@@ -75,6 +76,7 @@ fn run() -> Result<(), Error> {
     let mut durability = Durability::Strict;
     let mut lock_path: Option<String> = None;
     let mut json = false;
+    let mut show_payloads = false;
 
     while let Some(arg) = parser.next().map_err(|e| Error::Usage(e.to_string()))? {
         match arg {
@@ -83,6 +85,7 @@ fn run() -> Result<(), Error> {
                 return Ok(());
             }
             Short('j') | Long("json") => json = true,
+            Short('p') | Long("show-payloads") => show_payloads = true,
             Short('d') | Long("durability") => {
                 let value = parser.value().map_err(|e| Error::Usage(e.to_string()))?;
                 durability =
@@ -110,9 +113,30 @@ fn run() -> Result<(), Error> {
         "doctor" => doctor(&path, durability, lock_path.as_deref(), json),
         "verify" => verify(&path, durability, lock_path.as_deref(), json),
         "stats" => stats(&path, durability, lock_path.as_deref(), json),
-        "events" => events(&mut parser, &path, durability, lock_path.as_deref(), json),
-        "projections" => projections(&mut parser, &path, durability, lock_path.as_deref(), json),
-        "jobs" => jobs(&mut parser, &path, durability, lock_path.as_deref(), json),
+        "events" => events(
+            &mut parser,
+            &path,
+            durability,
+            lock_path.as_deref(),
+            json,
+            show_payloads,
+        ),
+        "projections" => projections(
+            &mut parser,
+            &path,
+            durability,
+            lock_path.as_deref(),
+            json,
+            show_payloads,
+        ),
+        "jobs" => jobs(
+            &mut parser,
+            &path,
+            durability,
+            lock_path.as_deref(),
+            json,
+            show_payloads,
+        ),
         "export" => export(&path, durability, lock_path.as_deref()),
         "backup" => backup(&mut parser, &path, durability, lock_path.as_deref(), json),
         _ => Err(Error::Usage(format!("unknown command: {cmd}"))),
@@ -249,6 +273,7 @@ fn events(
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
+    show_payloads: bool,
 ) -> Result<(), Error> {
     let sub = parser
         .value()
@@ -266,9 +291,9 @@ fn events(
             let events = store.events_after(0, limit);
             for e in events {
                 if json {
-                    writeln!(&mut stdout, "{}", event_json(&e))?;
+                    writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
                 } else {
-                    writeln_event(&mut stdout, &e)?;
+                    writeln_event(&mut stdout, &e, show_payloads)?;
                 }
             }
         }
@@ -282,9 +307,9 @@ fn events(
             let events = store.stream_events(&stream_id, 0, limit);
             for e in events {
                 if json {
-                    writeln!(&mut stdout, "{}", event_json(&e))?;
+                    writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
                 } else {
-                    writeln_event(&mut stdout, &e)?;
+                    writeln_event(&mut stdout, &e, show_payloads)?;
                 }
             }
         }
@@ -299,6 +324,7 @@ fn projections(
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
+    show_payloads: bool,
 ) -> Result<(), Error> {
     let sub = parser
         .value()
@@ -371,13 +397,18 @@ fn projections(
             let entries = store.scan_projection_prefix(&name, prefix.as_bytes())?;
             for entry in entries {
                 if json {
+                    let value = if show_payloads {
+                        serde_json::Value::String(hex(&entry.value))
+                    } else {
+                        serde_json::Value::Null
+                    };
                     writeln!(
                         &mut stdout,
                         "{}",
                         serde_json::json!({
                             "projection": name,
                             "key": String::from_utf8_lossy(&entry.key),
-                            "value": hex(&entry.value),
+                            "value": value,
                         })
                     )?;
                 } else {
@@ -385,8 +416,8 @@ fn projections(
                         stdout,
                         "{} {} {}",
                         name,
-                        bytes_repr(&entry.key),
-                        bytes_repr(&entry.value)
+                        bytes_repr(&entry.key, show_payloads),
+                        bytes_repr(&entry.value, show_payloads)
                     )?;
                 }
             }
@@ -406,6 +437,7 @@ fn jobs(
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
+    show_payloads: bool,
 ) -> Result<(), Error> {
     let mut state: Option<JobState> = None;
     let mut queue: Option<String> = None;
@@ -429,6 +461,11 @@ fn jobs(
     let now_ms = current_time_ms();
     let records = store.jobs(now_ms, queue.clone(), state);
     for (job_id, spec, job_state) in records {
+        let payload = if show_payloads {
+            serde_json::Value::String(hex(&spec.payload))
+        } else {
+            serde_json::Value::Null
+        };
         if json {
             println!(
                 "{}",
@@ -437,7 +474,7 @@ fn jobs(
                     "state": job_state_str(job_state),
                     "queue": spec.queue,
                     "partition": spec.partition,
-                    "payload": hex(&spec.payload),
+                    "payload": payload,
                     "max_attempts": spec.max_attempts,
                     "effect_mode": effect_mode_str(spec.effect_mode),
                     "not_before_ms": spec.not_before_ms,
@@ -451,7 +488,7 @@ fn jobs(
                 job_state,
                 spec.queue,
                 spec.partition,
-                bytes_repr(&spec.payload)
+                bytes_repr(&spec.payload, show_payloads)
             );
         }
     }
@@ -581,7 +618,11 @@ fn effect_mode_str(mode: minisqlite::EffectMode) -> &'static str {
     }
 }
 
-fn writeln_event<W: Write>(out: &mut W, e: &minisqlite::PersistedEvent) -> Result<(), Error> {
+fn writeln_event<W: Write>(
+    out: &mut W,
+    e: &minisqlite::PersistedEvent,
+    show_payloads: bool,
+) -> Result<(), Error> {
     writeln!(
         out,
         "{} {} {} {} {} {} {}",
@@ -591,12 +632,22 @@ fn writeln_event<W: Write>(out: &mut W, e: &minisqlite::PersistedEvent) -> Resul
         e.event.stream_id,
         e.event.schema_version,
         e.event.occurred_at_ms,
-        bytes_repr(&e.event.payload)
+        bytes_repr(&e.event.payload, show_payloads)
     )?;
     Ok(())
 }
 
-fn event_json(e: &minisqlite::PersistedEvent) -> String {
+fn event_json(e: &minisqlite::PersistedEvent, show_payloads: bool) -> String {
+    let payload = if show_payloads {
+        serde_json::Value::String(hex(&e.event.payload))
+    } else {
+        serde_json::Value::Null
+    };
+    let metadata = if show_payloads {
+        serde_json::Value::String(hex(&e.event.metadata))
+    } else {
+        serde_json::Value::Null
+    };
     serde_json::json!({
         "global_sequence": e.global_sequence,
         "stream_version": e.stream_version,
@@ -610,14 +661,17 @@ fn event_json(e: &minisqlite::PersistedEvent) -> String {
             "occurred_at_ms": e.event.occurred_at_ms,
             "causation_id": e.event.causation_id.map(|id| id.to_hex()),
             "correlation_id": e.event.correlation_id.map(|id| id.to_hex()),
-            "payload": hex(&e.event.payload),
-            "metadata": hex(&e.event.metadata),
+            "payload": payload,
+            "metadata": metadata,
         }
     })
     .to_string()
 }
 
-fn bytes_repr(v: &[u8]) -> String {
+fn bytes_repr(v: &[u8], show_payloads: bool) -> String {
+    if !show_payloads {
+        return format!("<{} bytes>", v.len());
+    }
     match std::str::from_utf8(v) {
         Ok(s) if s.chars().all(|c| !c.is_control()) => s.to_string(),
         _ => hex(v),

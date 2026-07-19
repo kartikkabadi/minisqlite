@@ -107,6 +107,7 @@ pub struct ClaimedJob {
     pub queue: String,
     pub partition: String,
     pub payload: Vec<u8>,
+    pub worker_id: String,
     pub lease_token: Id,
     pub attempt: u32,
     pub lease_expires_at_ms: i64,

@@ -540,3 +540,128 @@ fn synara_shaped_flows() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn transaction_id_is_idempotent_across_reopen() {
+    let path = tmp_path("idempotency.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let tx = Id::new();
+    let event = Event::new(
+        Id::new(),
+        "stream",
+        "e",
+        1,
+        now_ms(),
+        None,
+        None,
+        b"{}",
+        b"",
+    );
+    let batch = CommitBatch::new(tx, now_ms()).append_event(event.clone());
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    let receipt1 = store.commit(batch.clone()).unwrap();
+    let receipt2 = store.commit(batch.clone()).unwrap();
+    assert_eq!(receipt1, receipt2);
+
+    drop(store);
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    let receipt3 = store.commit(batch).unwrap();
+    assert_eq!(receipt1, receipt3);
+    assert_eq!(store.high_water_sequence(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn transaction_id_conflicts_on_different_content() {
+    let path = tmp_path("idempotency_conflict.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let tx = Id::new();
+    let event1 = Event::new(Id::new(), "s", "e", 1, now_ms(), None, None, b"1", b"");
+    let event2 = Event::new(Id::new(), "s", "e", 1, now_ms(), None, None, b"2", b"");
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    store
+        .commit(CommitBatch::new(tx, now_ms()).append_event(event1))
+        .unwrap();
+    let result = store.commit(CommitBatch::new(tx, now_ms()).append_event(event2));
+    assert!(matches!(
+        result,
+        Err(minisqlite::Error::DuplicateIdWithDifferentContent { .. })
+    ));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn projection_prefix_with_all_ff_bytes() {
+    let path = tmp_path("prefix_ff.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let key1 = vec![0xff, 0x01];
+    let key2 = vec![0xff, 0xff];
+    let key3 = vec![0xff, 0xff, 0x00];
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now_ms())
+                .projection_put("p", 1, key1.clone(), b"1".to_vec())
+                .projection_put("p", 2, key2.clone(), b"2".to_vec())
+                .projection_put("p", 3, key3.clone(), b"3".to_vec()),
+        )
+        .unwrap();
+
+    let prefix = vec![0xff];
+    let found = store.scan_projection_prefix("p", &prefix).unwrap();
+    assert_eq!(found.len(), 3);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn claimed_job_includes_worker_id() {
+    let path = tmp_path("worker_id.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let job = JobSpec::new(Id::new(), "q", "p", b"work".to_vec());
+    let job_id = job.job_id;
+    store
+        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "worker-42".into(),
+            now_ms: now_ms(),
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, job_id);
+    assert_eq!(claimed[0].worker_id, "worker-42");
+
+    let _ = std::fs::remove_file(&path);
+}

@@ -82,7 +82,7 @@ struct StoreInner {
     high_water_sequence: u64,
     events: Vec<PersistedEvent>,
     event_ids: HashMap<Id, u64>,
-    transaction_payloads: HashMap<Id, Vec<u8>>,
+    transaction_batches: HashMap<Id, CommitBatch>,
     transaction_receipts: HashMap<Id, CommitReceipt>,
     stream_versions: HashMap<String, u64>,
     stream_sequences: HashMap<String, Vec<u64>>,
@@ -115,7 +115,7 @@ impl Store {
             high_water_sequence: 0,
             events: Vec::new(),
             event_ids: HashMap::new(),
-            transaction_payloads: HashMap::new(),
+            transaction_batches: HashMap::new(),
             transaction_receipts: HashMap::new(),
             stream_versions: HashMap::new(),
             stream_sequences: HashMap::new(),
@@ -126,8 +126,10 @@ impl Store {
             recovered_tail: scan.tail_truncated,
         };
 
+        let mut frame_offset = crate::codec::frame::FILE_HEADER_SIZE as u64;
         for frame in &scan.frames {
-            inner.replay_frame(frame)?;
+            inner.replay_frame(frame, frame_offset)?;
+            frame_offset += frame.header.total_frame_length;
         }
 
         if scan.tail_truncated {
@@ -320,19 +322,18 @@ impl Store {
                 .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
                 .collect());
         }
-        let mut upper = prefix.to_vec();
-        if let Some(last) = upper.last_mut() {
-            if *last < 0xff {
-                *last += 1;
-            } else {
-                upper.push(0);
-            }
+        match prefix_upper_bound(prefix) {
+            Some(upper) => Ok(state
+                .data
+                .range(prefix.to_vec()..upper)
+                .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
+                .collect()),
+            None => Ok(state
+                .data
+                .range(prefix.to_vec()..)
+                .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
+                .collect()),
         }
-        Ok(state
-            .data
-            .range(prefix.to_vec()..upper)
-            .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-            .collect())
     }
 
     /// Scan a projection over a key range.
@@ -464,7 +465,7 @@ impl Store {
 }
 
 impl StoreInner {
-    fn replay_frame(&mut self, frame: &Frame) -> Result<(), Error> {
+    fn replay_frame(&mut self, frame: &Frame, frame_offset: u64) -> Result<(), Error> {
         if frame.header.transaction_sequence != self.transaction_seq + 1 {
             return Err(Error::Corruption {
                 message: "transaction sequence regression or gap".into(),
@@ -472,7 +473,7 @@ impl StoreInner {
             });
         }
         if self
-            .transaction_payloads
+            .transaction_batches
             .contains_key(&frame.header.transaction_id)
         {
             return Err(Error::Corruption {
@@ -480,8 +481,28 @@ impl StoreInner {
                 offset: 0,
             });
         }
+
         let records = record::decode_records(&frame.payload)?;
-        self.apply_records(&records, frame.header.transaction_id, 0)?;
+
+        // Reconstruct the original commit batch and re-validate every operation against
+        // the state rebuilt so far. This catches corrupted frames that pass checksums.
+        let batch = CommitBatch::from_records(
+            frame.header.transaction_id,
+            frame.header.commit_timestamp_ms,
+            records.clone(),
+        )?;
+        self.validate_batch(&batch)?;
+        self.validate_projection_ops(&batch)?;
+        self.validate_job_ops(&batch)?;
+        let expected = self.ops_to_records(&batch)?;
+        if expected != records {
+            return Err(Error::Corruption {
+                message: "frame records do not match re-validated commit".into(),
+                offset: 0,
+            });
+        }
+
+        self.apply_records(&records, frame.header.transaction_id, frame_offset)?;
         self.transaction_seq = frame.header.transaction_sequence;
 
         // Reconstruct receipt.
@@ -489,10 +510,10 @@ impl StoreInner {
             &records,
             frame.header.transaction_id,
             frame.header.transaction_sequence,
-            0,
+            frame_offset,
         );
-        self.transaction_payloads
-            .insert(frame.header.transaction_id, frame.payload.clone());
+        self.transaction_batches
+            .insert(frame.header.transaction_id, batch);
         self.transaction_receipts
             .insert(frame.header.transaction_id, receipt);
         Ok(())
@@ -709,28 +730,28 @@ impl StoreInner {
             });
         }
 
-        self.validate_batch(&batch)?;
-
-        // Compute the proposed payload for idempotency comparison and commit.
-        let records = self.ops_to_records(&batch)?;
-        let proposed_payload = encode_records(&records);
-
-        if let Some(prev) = self.transaction_payloads.get(&batch.transaction_id) {
-            if prev == &proposed_payload {
+        // Idempotency is checked first so a resubmitted transaction returns its original
+        // receipt without re-running validation that would fail on already-committed event IDs.
+        if let Some(prev) = self.transaction_batches.get(&batch.transaction_id) {
+            if batch.logical_eq(prev) {
                 return Ok(self
                     .transaction_receipts
                     .get(&batch.transaction_id)
                     .cloned()
                     .unwrap());
-            } else {
-                return Err(Error::DuplicateIdWithDifferentContent {
-                    kind: "transaction",
-                    id: batch.transaction_id,
-                });
             }
+            return Err(Error::DuplicateIdWithDifferentContent {
+                kind: "transaction",
+                id: batch.transaction_id,
+            });
         }
 
-        if proposed_payload.len()
+        self.validate_batch(&batch)?;
+
+        let records = self.ops_to_records(&batch)?;
+        let payload_bytes = encode_records(&records);
+
+        if payload_bytes.len()
             > self
                 .limits
                 .max_frame_size
@@ -738,7 +759,7 @@ impl StoreInner {
         {
             return Err(Error::PayloadTooLarge {
                 kind: "transaction frame",
-                size: proposed_payload.len(),
+                size: payload_bytes.len(),
                 limit: self.limits.max_frame_size,
             });
         }
@@ -753,9 +774,9 @@ impl StoreInner {
             transaction_id: batch.transaction_id,
             commit_timestamp_ms: batch.now_ms,
             record_count: records.len() as u32,
-            payload_length: proposed_payload.len() as u32,
+            payload_length: payload_bytes.len() as u32,
         };
-        let mut frame = Frame::new(frame_header, proposed_payload);
+        let mut frame = Frame::new(frame_header, payload_bytes);
         frame.header.record_count = records.len() as u32;
         let frame_offset = self.data_file.file_len();
         let frame_bytes = frame.encode();
@@ -766,18 +787,23 @@ impl StoreInner {
             .data_file
             .append_frame(&frame_bytes, frame.header.payload_length as u64)
         {
-            let _ = self.data_file.truncate(original_file_len);
-            let current_len = self.data_file.file_len();
-            if current_len == original_file_len {
+            // Attempt to roll back the partial append. If the rollback cannot be
+            // confirmed (truncate or its sync fails), the outcome is uncertain:
+            // some or all of the frame may be on disk.
+            let rollback_ok = self
+                .data_file
+                .truncate(original_file_len)
+                .map(|()| self.data_file.file_len() == original_file_len)
+                .unwrap_or(false);
+            if rollback_ok {
                 return Err(Error::Io(e.to_string()));
-            } else {
-                self.poisoned = true;
-                return Err(Error::CommitOutcomeUncertain {
-                    transaction_id: batch.transaction_id,
-                    original_file_len,
-                    source: e.to_string(),
-                });
             }
+            self.poisoned = true;
+            return Err(Error::CommitOutcomeUncertain {
+                transaction_id: batch.transaction_id,
+                original_file_len,
+                source: e.to_string(),
+            });
         }
 
         // Failpoint: before memory apply.
@@ -812,10 +838,8 @@ impl StoreInner {
         frame_offset: u64,
         records: Vec<Record>,
     ) -> Result<CommitReceipt, Error> {
-        let payload_bytes = encode_records(&records);
-        self.transaction_payloads
-            .insert(batch.transaction_id, payload_bytes);
-
+        self.transaction_batches
+            .insert(batch.transaction_id, batch.clone());
         self.apply_records(&records, batch.transaction_id, frame_offset)?;
         self.transaction_seq += 1;
 
@@ -1374,6 +1398,7 @@ impl StoreInner {
                 queue: spec.queue,
                 partition: spec.partition,
                 payload: spec.payload,
+                worker_id: request.worker_id.clone(),
                 lease_token,
                 attempt,
                 lease_expires_at_ms,
@@ -1382,6 +1407,24 @@ impl StoreInner {
         }
         Ok(claimed)
     }
+}
+
+/// Return the smallest byte string strictly greater than every string that starts with `prefix`.
+/// Returns `None` when `prefix` is empty or consists entirely of `0xff` bytes, meaning the scan
+/// is unbounded above.
+fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let mut upper = prefix.to_vec();
+    for i in (0..upper.len()).rev() {
+        if upper[i] < 0xff {
+            upper[i] += 1;
+            upper.truncate(i + 1);
+            return Some(upper);
+        }
+    }
+    None
 }
 
 fn build_receipt(

@@ -42,7 +42,7 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
                         tail_truncated = true;
                         break;
                     }
-                    return Err(e);
+                    return Err(with_offset(e, offset));
                 }
             };
 
@@ -68,7 +68,10 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
 
         // Read the complete frame (header + payload + trailer) and decode it.
         let frame_bytes = data_file.read_at(offset, header.total_frame_length as usize)?;
-        let frame = Frame::decode(&frame_bytes)?;
+        let frame = match Frame::decode(&frame_bytes) {
+            Ok(f) => f,
+            Err(e) => return Err(with_offset(e, offset)),
+        };
         frames.push(frame);
         offset += header.total_frame_length;
         last_valid = offset;
@@ -79,6 +82,13 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
         tail_truncated,
         last_valid_offset: last_valid,
     })
+}
+
+fn with_offset(error: Error, offset: u64) -> Error {
+    match error {
+        Error::Corruption { message, .. } => Error::Corruption { message, offset },
+        other => other,
+    }
 }
 
 #[cfg(test)]
