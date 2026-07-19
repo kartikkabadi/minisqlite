@@ -85,7 +85,7 @@ fn main() {
                                 "INSERT INTO {} VALUES ({});",
                                 tbl,
                                 row.iter()
-                                    .map(|v| format!("{}", v))
+                                    .map(sql_literal)
                                     .collect::<Vec<_>>()
                                     .join(", ")
                             );
@@ -168,6 +168,16 @@ fn main() {
     println!("Bye!");
 }
 
+fn sql_literal(v: &Value) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Real(f) => f.to_string(),
+        Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Blob(b) => format!("x'{}'", b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+    }
+}
+
 fn print_table(header: &[String], rows: &[Vec<Value>]) {
     if rows.is_empty() {
         println!("(empty set)");
@@ -186,7 +196,7 @@ fn print_table(header: &[String], rows: &[Vec<Value>]) {
     let hl: Vec<String> = header
         .iter()
         .enumerate()
-        .map(|(i, h)| format!(" {:<width$}", h, width = widths[i]))
+        .map(|(i, h)| format!(" {:<width$} ", h, width = widths[i]))
         .collect();
     println!("│{}│", hl.join("│"));
     println!("├{}┤", sep.join("┼"));
@@ -194,7 +204,7 @@ fn print_table(header: &[String], rows: &[Vec<Value>]) {
         let cells: Vec<String> = row
             .iter()
             .enumerate()
-            .map(|(i, v)| format!(" {:>width$}", v, width = widths[i]))
+            .map(|(i, v)| format!(" {:>width$} ", v, width = widths[i]))
             .collect();
         println!("│{}│", cells.join("│"));
     }
