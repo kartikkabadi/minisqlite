@@ -1,15 +1,15 @@
 [package]
 name = "minisqlite"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 edition = "2021"
 authors = ["Kartik Kabadi <kartik@kartikkabadi.com>"]
-description = "A minimal, from-scratch SQLite-like relational database engine in Rust"
+description = "An embedded append-only control-plane state engine for local-first AI applications"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/kartikkabadi/minisqlite"
 homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
-keywords = ["sqlite", "database", "embedded", "sql", "rust"]
+keywords = ["database", "embedded", "eventsourcing", "control-plane", "local-first"]
 categories = ["database-implementations"]
 
 [[bin]]
@@ -17,3 +17,20 @@ name = "minisqlite"
 path = "src/main.rs"
 
 [dependencies]
+crc32fast = "1.4.2"
+fs2 = "0.4.3"
+lexopt = "0.3"
+
+[dependencies.serde]
+version = "1.0"
+optional = true
+features = ["derive"]
+
+[dev-dependencies]
+proptest = "=1.5.0"
+tempfile = "=3.14.0"
+
+[features]
+default = []
+serde = ["dep:serde"]
+failpoint = []

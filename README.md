@@ -4,14 +4,53 @@
 [![Docs.rs](https://img.shields.io/docsrs/minisqlite?logo=rust&label=docs.rs)](https://docs.rs/minisqlite)
 [![CI](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml)
 
-A minimal, from-scratch SQLite-like relational database engine written in Rust.
+> **A from-scratch embedded state engine for local AI control planes.**
+>
+> Atomically record events, materialize current state, and queue durable work in one append-only local file—without SQL or a database server.
 
-`minisqlite` is intentionally tiny: **zero external dependencies**, **pure safe Rust**, and a page-based storage engine with a custom file format. It is built for situations where linking to C SQLite is overkill or impossible:
+## What it is
 
-- **WASM / browser targets** – no `libsqlite3-sys` to emscripten.
-- **Embedded / IoT** – easy to audit, easy to cross-compile.
-- **Education and prototyping** – the whole engine fits in a few thousand lines and a single crate.
-- **Serverless edge functions** – self-contained file storage with no native shared library.
+`minisqlite` is a tiny Rust library and CLI for local-first AI control-plane state.
+It stores ordered events, materialized projections, and durable jobs in a single `.mini` file.
+
+## Who it is for
+
+Developers building desktop, CLI, or single-node edge applications that need:
+
+* durable event history,
+* derived read models,
+* asynchronous work with leases and retries,
+* clean crash recovery,
+* no separate database server.
+
+## What problem it solves
+
+Control-plane applications usually assemble persistence from many pieces:
+an event log, a state store, a job queue, idempotency keys, retry logic, recovery scripts, and migration tooling.
+
+`minisqlite` replaces that with one append-only transaction model:
+
+```text
+events + projected state + durable work
+```
+
+A single `CommitBatch` can append a domain event, update a projection, and enqueue a job atomically.
+A single reopen replays committed frames and restores the same state.
+
+## What it deliberately does not do
+
+* SQL queries or query planning.
+* Multi-process writers.
+* Distributed replication or consensus.
+* Vector search, workflow DSLs, dashboards, or background schedulers.
+* Automatic snapshots or compaction in the first version.
+* Encryption at rest.
+
+## Current status
+
+`v0.3.0-alpha.1` is a correctness-first rewrite.
+The old SQL engine has been removed and replaced by the append-only control-plane kernel.
+The API and file format may change.
 
 ## Install
 
@@ -19,71 +58,99 @@ A minimal, from-scratch SQLite-like relational database engine written in Rust.
 cargo install minisqlite
 ```
 
-Or add it as a library dependency:
+Or add as a library dependency:
 
 ```toml
 [dependencies]
-minisqlite = "0.2.1"
+minisqlite = "0.3.0-alpha.1"
 ```
 
-## Features
+## Quick example
 
-- 4096-byte page-based storage with a custom file format (`MiniSQL2`)
-- In-memory B+tree-like tables serialized to linked pages
-- Custom recursive-descent SQL tokenizer and parser
-- DDL: `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, `DROP TABLE`, `DROP INDEX`
-- DML: `INSERT`, `UPDATE`, `DELETE` with `OR REPLACE`
-- Queries: `SELECT` with joins, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, aggregates, `CASE`, `CAST`, `BETWEEN`, `LIKE`, `IN`
-- Transactions: `BEGIN`, `COMMIT`, `ROLLBACK`
-- Dot commands: `.tables`, `.schema`, `.indexes`, `.dump`, `.stats`, `.help`, `.quit`
-- `PRAGMA table_info(name)` and `VACUUM`
-- No external dependencies (Rust standard library only)
+```rust
+use minisqlite::{CommitBatch, Durability, Event, Id, StoreBuilder};
+
+fn main() {
+    let store = StoreBuilder::new("app.mini")
+        .durability(Durability::Strict)
+        .open()
+        .unwrap();
+
+    let event = Event::with_json_payload(
+        Id::new(),
+        "user:42",
+        "user.created",
+        br#"{"name":"Ada"}"#,
+    );
+
+    store
+        .commit(
+            CommitBatch::new(Id::new(), 0)
+                .append_event(event)
+                .projection_put("users", 1, b"user:42".to_vec(), br#"{"name":"Ada"}"#.to_vec()),
+        )
+        .unwrap();
+
+    let users = store.scan_projection_prefix("users", b"").unwrap();
+    println!("{:?}", users);
+}
+```
+
+See [`examples/synara_control_plane.rs`](examples/synara_control_plane.rs) for a complete reference application showing threads, provider turns, loop scheduling, and projection rebuilding.
 
 ## CLI
 
 ```bash
-minisqlite mydb.db
+minisqlite app.mini doctor
+minisqlite app.mini stats
+minisqlite app.mini events tail 50
+minisqlite app.mini events stream user:42
+minisqlite app.mini projections list
+minisqlite app.mini projections scan users
+minisqlite app.mini jobs list
+minisqlite app.mini export --format jsonl > snapshot.jsonl
+minisqlite app.mini backup app-backup.mini
 ```
 
-Or from source:
+## Crash recovery guarantee
 
-```bash
-cargo run -- mydb.db
-```
+* The durable representation is an append-only sequence of self-checksummed transaction frames.
+* Normal commits never overwrite old state.
+* A torn final frame is safely truncated on reopen.
+* Mid-file corruption is reported as a hard error.
+* `Strict` mode calls `fsync` before returning success.
 
-## Library
+## Limitations
 
-```rust
-use minisqlite::{Database, ExecuteResult};
+* Single process owns the store.
+* No SQL or ad-hoc queries.
+* One `.mini` file grows append-only.
+* No encryption at rest; file permissions are set to `0o600` on Unix.
 
-let mut db = Database::open("mydb.db").unwrap();
-db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-    .unwrap();
-db.execute_sql("INSERT INTO users (name) VALUES ('Alice')")
-    .unwrap();
+See [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) and [`docs/SECURITY.md`](docs/SECURITY.md) for details.
 
-if let ExecuteResult::Rows { header, rows } =
-    db.execute_sql("SELECT * FROM users").unwrap()
-{
-    println!("{:?}", header);
-    for row in rows {
-        println!("{:?}", row);
-    }
-}
-```
+## Documentation
 
-See [`examples/embed.rs`](examples/embed.rs) for a runnable example.
+* [`docs/PRODUCT.md`](docs/PRODUCT.md) — product definition.
+* [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module and concurrency model.
+* [`docs/FORMAT.md`](docs/FORMAT.md) — on-disk file format.
+* [`docs/INVARIANTS.md`](docs/INVARIANTS.md) — core guarantees.
+* [`docs/RECOVERY.md`](docs/RECOVERY.md) — recovery behavior.
+* [`docs/JOBS.md`](docs/JOBS.md) — durable jobs.
+* [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and known limits.
+* [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) — dependency budget.
+* [`docs/SYNARA_CASE_STUDY.md`](docs/SYNARA_CASE_STUDY.md) — reference workload walkthrough.
+* [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) — explicit deletions and limitations.
 
 ## Test
 
 ```bash
-cargo test
-cargo run -- test.db < test.sql
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+cargo test --doc --all-features
+cargo package --allow-dirty
 ```
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
