@@ -112,6 +112,9 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | CLI end-to-end smoke test (`tests/cli.rs`) | Passed |
 | Projection operation tests (`tests/projection_ops.rs`) | Passed |
 | Invalid job-transition tests (`tests/invalid_job_transitions.rs`) | Passed |
+| Bounds and limit validation (`tests/limits.rs`) | Passed |
+| Symlink rejection and file permissions (`tests/security.rs`) | Passed |
+| Partition-ordered job claiming (`tests/integration.rs`) | Passed |
 
 ## `cargo fuzz` targets
 
@@ -119,10 +122,10 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 
 | Target | Result (80-second smoke run) |
 |---|---|
-| `header_decode` | Passed |
-| `frame_decode` | Passed |
-| `record_decode` | Passed (after fixing unbounded `ProjectionReplace` capacity) |
-| `recovery_scan` | Passed |
+| `header_decode` | Passed (19.8M runs, no crashes) |
+| `frame_decode` | Passed (12.1M runs, no crashes) |
+| `record_decode` | Passed (4.1M runs, no crashes) |
+| `recovery_scan` | Passed (1.5M runs, no crashes) |
 
 ## Complexity
 
@@ -131,7 +134,7 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 * Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the default lock-file path uses a `.mini.lock` suffix, and `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the default lock-file path uses a `.mini.lock` suffix, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, and `Store::backup` fsyncs the destination parent directory on Unix.
 
 ## Synara-shaped demonstration
 
