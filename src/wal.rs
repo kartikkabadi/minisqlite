@@ -51,21 +51,6 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    pub fn log_write(&mut self, page_num: u32, data: &[u8; PAGE_SIZE]) -> io::Result<()> {
-        if !self.active {
-            return Ok(());
-        }
-        self.entries.push(WalEntry {
-            page_num,
-            data: *data,
-        });
-        if let Some(f) = &mut self.file {
-            f.write_all(&page_num.to_be_bytes())?;
-            f.write_all(data)?;
-        }
-        Ok(())
-    }
-
     pub fn commit(&mut self) -> io::Result<()> {
         if !self.active {
             return Ok(());

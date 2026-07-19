@@ -25,7 +25,6 @@ pub struct Database {
     in_transaction: bool,
     transaction_backup: Option<DatabaseState>,
     pub last_insert_rowid: i64,
-    db_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +78,6 @@ impl Database {
             in_transaction: false,
             transaction_backup: None,
             last_insert_rowid: 0,
-            db_path: path.to_string(),
         };
 
         if db.pager.page_count == 1 {
@@ -195,7 +193,7 @@ impl Database {
             root_page: 0,
             autoinc_counter: 1,
         };
-        let mut btree = BTree::create(&mut self.pager).map_err(|e| e.to_string())?;
+        let btree = BTree::create(&mut self.pager).map_err(|e| e.to_string())?;
         schema.root_page = btree.root();
         for tc in table_constraints {
             match tc {
@@ -777,10 +775,6 @@ fn make_key(prefix: &[u8], name: &str) -> Vec<u8> {
     let mut k = prefix.to_vec();
     k.extend_from_slice(name.as_bytes());
     k
-}
-
-fn find_col(cols: &[ColumnDef], name: &str) -> Option<usize> {
-    cols.iter().position(|c| c.name.eq_ignore_ascii_case(name))
 }
 
 fn decode_rowid_key(key: &[u8]) -> i64 {
@@ -1530,7 +1524,7 @@ fn bin_op_str(op: &BinOp) -> &'static str {
     }
 }
 
-fn compare_result_rows(db: &mut Database, order_by: &[(Expr, Order)], a: &[Value], al_a: &HashMap<String, Value>, b: &[Value], al_b: &HashMap<String, Value>) -> Ordering {
+fn compare_result_rows(db: &mut Database, order_by: &[(Expr, Order)], _a: &[Value], al_a: &HashMap<String, Value>, _b: &[Value], al_b: &HashMap<String, Value>) -> Ordering {
     for (expr, order) in order_by {
         let ctx_a = EvalContext::new(&[], al_a);
         let va = eval_expr(db, expr, &ctx_a, None).unwrap_or(Value::Null);

@@ -1,4 +1,4 @@
-use crate::types::{ColumnDef, IndexSchema, TableSchema, TypeAffinity, Value, decode_value, encode_value};
+use crate::types::{ColumnDef, IndexSchema, TableSchema, TypeAffinity, decode_value, encode_value};
 
 pub fn encode_table_schema(schema: &TableSchema) -> Vec<u8> {
     let mut out = Vec::new();

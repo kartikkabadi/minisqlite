@@ -50,13 +50,6 @@ impl Value {
         }
     }
 
-    pub fn as_blob(&self) -> Option<&[u8]> {
-        match self {
-            Value::Blob(b) => Some(b),
-            _ => None,
-        }
-    }
-
     pub fn is_truthy(&self) -> bool {
         match self {
             Value::Null => false,
@@ -321,18 +314,6 @@ impl TableSchema {
         self.columns
             .iter()
             .position(|c| c.name.eq_ignore_ascii_case(name))
-    }
-
-    pub fn pk_index(&self) -> Option<usize> {
-        self.columns.iter().position(|c| c.primary_key)
-    }
-
-    pub fn is_autoinc_pk(&self) -> bool {
-        if let Some(idx) = self.pk_index() {
-            self.columns[idx].autoincrement
-        } else {
-            false
-        }
     }
 }
 

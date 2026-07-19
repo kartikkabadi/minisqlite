@@ -121,44 +121,17 @@ impl BTree {
         self.data.insert(key, payload);
     }
 
-    pub fn search(&self, key: i64) -> Option<&[u8]> {
-        let k = key.to_be_bytes().to_vec();
-        self.data.get(&k).map(|v| v.as_slice())
-    }
-
-    pub fn search_kv(&self, key: &[u8]) -> Option<&[u8]> {
-        self.data.get(key).map(|v| v.as_slice())
-    }
-
     pub fn delete(&mut self, key: i64) -> Option<Vec<u8>> {
         let k = key.to_be_bytes().to_vec();
         self.data.remove(&k)
-    }
-
-    pub fn delete_kv(&mut self, key: &[u8]) -> Option<Vec<u8>> {
-        self.data.remove(key)
     }
 
     pub fn scan(&self) -> impl Iterator<Item = (&Vec<u8>, &Vec<u8>)> {
         self.data.iter()
     }
 
-    pub fn scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> impl Iterator<Item = (&'a Vec<u8>, &'a Vec<u8>)> + 'a {
-        self.data
-            .range(prefix.to_vec()..)
-            .take_while(move |(k, _)| k.starts_with(prefix))
-    }
-
     pub fn root(&self) -> u32 {
         self.root
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
     }
 }
 

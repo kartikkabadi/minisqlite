@@ -3,7 +3,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub const PAGE_SIZE: usize = 4096;
 pub const MAGIC: &[u8; 16] = b"MiniSQL2\0\0\0\0\0\0\0\0";
-pub const CATALOG_ROOT_OFFSET: usize = 26;
 
 #[derive(Debug)]
 pub struct Pager {
@@ -11,7 +10,6 @@ pub struct Pager {
     pub page_count: u32,
     pub catalog_root: u32,
     pub freelist: Vec<u32>,
-    path: String,
     dirty_pages: Vec<(u32, [u8; PAGE_SIZE])>,
 }
 
@@ -33,7 +31,6 @@ impl Pager {
             page_count,
             catalog_root: 0,
             freelist: Vec::new(),
-            path: path.to_string(),
             dirty_pages: Vec::new(),
         };
         if page_count == 0 {
@@ -139,9 +136,5 @@ impl Pager {
 
     pub fn free_page(&mut self, _page_num: u32) {
         // Pages are not reused for simplicity.
-    }
-
-    pub fn sync(&mut self) -> io::Result<()> {
-        self.flush()
     }
 }
