@@ -2,6 +2,8 @@
 
 ## Outcome
 
+Complete.
+
 `minisqlite` has been rebuilt as a from-scratch, append-only control-plane state engine for local-first AI applications. The legacy SQL engine has been deleted and replaced by an original single-file, CRC32-framed journal with atomic transactions, materialized projections, durable jobs with leases/retries/uncertain outcomes, explicit crash recovery, and an operational CLI.
 
 ## Branch
@@ -23,6 +25,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Recovery scanner that validates frames, truncates torn tails, and fails closed on mid-file corruption.
 * Operational CLI: `doctor`, `verify`, `stats`, `events`, `projections`, `jobs`, `export`, `backup`.
 * Cross-platform advisory file locking through `fs2`.
+* `examples/synara_control_plane.rs` demonstrating the six required Synara-shaped flows.
 
 ## Major deletions
 
@@ -34,7 +37,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 ## Architecture
 
 * **File format**: 64-byte file header + 64-byte frame header + encoded records + 32-byte trailer. Checksums cover header, payload, and trailer. Hard `MAX_FRAME_SIZE = 64 MiB`.
-* **Commit path**: validate batch → encode records → append frame → sync (Strict) → apply to in-memory state atomically.
+* **Commit path**: validate batch → check idempotency and stream versions → encode records → append frame → sync (Strict) → apply to in-memory state atomically.
 * **Recovery path**: validate header → scan frames sequentially → decode and re-validate each `CommitBatch` → rebuild transaction/event/projection/job indexes → truncate incomplete tail.
 * **Projection model**: in-memory `BTreeMap` keyed by projection name, each holding an ordered `BTreeMap` of keys to values. Versions are monotonic.
 * **Job model**: `JobStateRecord` tracks spec, internal state, lease token, attempt, expiry, and retry time. Public `JobState` is derived at query time.
@@ -42,68 +45,73 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 
 ## Guarantees proved
 
-* Atomic visibility of a `CommitBatch`.
-* Monotonic global event sequence and per-stream versions.
-* Event and transaction ID uniqueness with same-content idempotency.
-* Frame-level checksum integrity and torn-tail truncation.
-* Mid-file corruption fails closed.
-* Projection version conflicts fail fast.
-* At most one active lease per job; stale tokens cannot ack/fail newer leases.
-* Partition-ordered job claiming.
-* Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain.
+* A `CommitBatch` is visible entirely or not at all.
+* Global event sequence and per-stream versions are monotonic.
+* Event and transaction IDs are unique; same logical content is idempotent, different content returns a typed conflict.
+* Frame-level checksum integrity is enforced; torn trailing frames are truncated; mid-file corruption fails closed.
+* Projection version conflicts fail fast and atomic put/delete/clear/replace is visible with its transaction.
+* At most one active lease per job; stale tokens cannot ack/fail a newer lease.
+* Partition-ordered job claiming survives concurrent callers.
+* Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain and are not silently retried.
 * Uncertain outcomes are reported and can be resolved durably.
 * Reopen reconstructs identical in-memory state from durable frames.
+* Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected.
 
 ## Guarantees not yet proved
 
-* Power-loss durability is bounded by OS and storage device behavior (documented).
-* Encryption at rest is not provided.
-* No exactly-once external effects; the engine only records outcomes.
-* No distributed/multi-process write coordination.
+* Power-loss durability beyond what the OS, file system, and storage device provide.
+* Encryption at rest.
+* Exactly-once external side effects; the engine records outcomes and requires idempotency keys or explicit resolution.
+* Distributed or multi-process write coordination.
+* Correctness under arbitrary large clock jumps (timestamps are caller-supplied).
 
 ## Verification
 
-All quality gates pass:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo test --doc --all-features
-cargo package --allow-dirty
-```
+| Command | Result |
+|---|---|
+| `cargo fmt --all -- --check` | Passed |
+| `cargo clippy --all-targets --all-features -- -D warnings` | Passed |
+| `cargo test --all-targets --all-features` | Passed |
+| `cargo test --doc --all-features` | Passed |
+| `cargo package --allow-dirty` | Passed |
 
 CI matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`.
 
 ## Crash matrix
 
-Process-level failpoint tests in `tests/crash.rs` cover:
+Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recovered state is always a valid committed prefix; no partial transaction is visible; earlier committed state is never lost.
 
-| Failpoint | Test |
-|-----------|------|
-| before-append | `crash_before_append_recovers` |
-| partial-header | `crash_partial_header_recovers` |
-| during-payload | `crash_during_payload_recovers` |
-| after-payload | `crash_after_payload_recovers` |
-| after-trailer | `crash_after_trailer_recovers` |
-| before-sync | `crash_before_sync_recovers` |
-| after-sync | `crash_after_sync_recovers` |
-| before-memory-apply | `crash_before_memory_apply_recovers` |
-| after-memory-apply | `crash_after_memory_apply_recovers` |
+| Failpoint | Expected recovered state | Result |
+|---|---|---|
+| before append | old state | Passed |
+| partial header | old state | Passed |
+| during payload | old state | Passed |
+| after payload | old state | Passed |
+| after trailer | old state | Passed |
+| before sync | old state | Passed |
+| after sync | new state after reopen | Passed |
+| before memory apply | new state after reopen | Passed |
+| after memory apply | new state after reopen | Passed |
+| disk-full short write | old state, commit returns Io error | Passed |
+| sync failure | old state, commit returns Io error | Passed |
+| rollback failure | old state, commit returns CommitOutcomeUncertain | Passed |
 
 ## Fuzzing and property tests
 
-* `codec::frame` proptests for arbitrary file-header and frame bytes.
-* `codec::record` proptest for arbitrary record payload bytes.
-* `storage::recovery` proptest for arbitrary trailing bytes after a valid header.
-* `tests/property.rs` model-based test comparing store behavior to an in-memory reference.
-* `tests/job_property.rs` proptest covering enqueue/claim/acknowledge.
+| Target | Result |
+|---|---|
+| File header decoding (`codec::frame` proptest) | Passed |
+| Frame decoding (`codec::frame` proptest) | Passed |
+| Record decoding (`codec::record` proptest) | Passed |
+| Recovery scanning with random trailing bytes (`storage::recovery` proptest) | Passed |
+| Model-based store comparison (`tests/property.rs`) | Passed |
+| Job lifecycle property test (`tests/job_property.rs`) | Passed |
 
 ## Complexity
 
-* `src/` change: **+5,427 / -4,858** lines.
-* Public API surface: approximately **66** exported types/methods.
-* Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional), `serde_json` (optional, default).
+* Production lines added / deleted in `src/`: approximately **+5,427 / -4,858**.
+* Public API items: approximately **66** exported types/methods.
+* Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
 
@@ -111,14 +119,16 @@ Process-level failpoint tests in `tests/crash.rs` cover:
 
 `examples/synara_control_plane.rs` demonstrates:
 
-* **Flow A**: Create a thread and project its initial state.
-* **Flow B**: Request a provider turn, append an event, update the projection, and enqueue a provider job in one transaction.
-* **Flow C**: Claim the job, then acknowledge it after completing the provider work.
-* **Flow D**: Enqueue a non-idempotent job, let its lease expire, observe the uncertain state, and resolve it as succeeded.
-* **Flow E**: Schedule a future-dated loop job, close and reopen the store, then claim it only after `not_before_ms`.
-* **Flow F**: Rebuild the `threads` projection from the event stream and atomically replace it.
+* **Flow A**: Create a thread and project its initial state; receive global sequence and stream version.
+* **Flow B**: Request a provider turn, append `thread.turn-requested`, update the projection to `queued`, and enqueue one provider job partitioned by thread ID in one transaction.
+* **Flow C**: Claim the provider job, perform the work, then atomically append `thread.turn-completed`, set the projection to `idle`, and acknowledge the job. Stale lease tokens are rejected.
+* **Flow D**:
+  * Idempotent effect: a job with an external idempotency key is reclaimed after lease expiry and acknowledged.
+  * Non-idempotent effect: a job with `EffectMode::UncertainOnLeaseExpiry` becomes `Uncertain` after expiry, is not silently retried, and is explicitly resolved as succeeded.
+* **Flow E**: Schedule a future-dated loop job with `not_before_ms`, close and reopen the store, and claim the job only after `not_before_ms` passes.
+* **Flow F**: Read the `thread:abc` event stream, rebuild the `threads` projection from those events, and atomically replace its current contents without a SQL migration.
 
-## Limitations
+## Known limitations
 
 * Alpha format; `v0.3.0-alpha.1`.
 * Single owning process.
@@ -126,10 +136,10 @@ Process-level failpoint tests in `tests/crash.rs` cover:
 * No cloud sync, replication, or distributed consensus.
 * No multi-process writes.
 * No automatic snapshots or compaction.
-* No exactly-once external effects.
+* No exactly-once external effects; idempotency keys and explicit resolution are required.
 * Bounded control-plane data workload; not a general-purpose blob store.
 * Not production-ready.
 
-## Follow-ups
+## Next evidence-producing step
 
-Based on measured evidence from `examples/benchmark.rs`, 100k event commit/reopen stays well under one second on reference hardware, so snapshots/compaction are deferred until real workloads exceed startup budgets. Future work can add `cargo fuzz` harnesses, more failure-mode property tests, and optional compression if measured file size becomes the bottleneck.
+Run `cargo fuzz` harnesses for header/frame/record decoding and recovery scanning on representative inputs to catch decoder edge cases that the proptests and crash matrix do not cover.

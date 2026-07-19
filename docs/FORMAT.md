@@ -71,7 +71,7 @@ Each record starts with:
 | Field | Size |
 |-------|------|
 | kind | 1 byte |
-| version | 2 bytes |
+| version | 1 byte |
 | flags | 1 byte |
 | body length | 4 bytes |
 | body | variable |

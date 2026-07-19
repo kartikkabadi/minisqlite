@@ -16,7 +16,6 @@ This audit classifies every major component in the pre-pivot `minisqlite` reposi
 | `src/main.rs` | rewrite | Replace SQL REPL with an operational CLI: `doctor`, `verify`, `stats`, `events`, `projections`, `jobs`, `export`, `backup`. |
 | `Cargo.toml` | update | Bump to `0.3.0-alpha.1`, update description, keywords, categories, add justified dependencies. |
 | `tests/integration.rs` | rewrite | New integration tests for commit, recovery, projections, jobs, and the Synara-shaped flow. |
-| `examples/embed.rs` | rewrite | Demonstrate the new control-plane API. |
 | `README.md` | rewrite | State the pivot and the new use case. |
 | `CHANGELOG.md` | update | Record the breaking pivot. |
 
