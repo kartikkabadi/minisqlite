@@ -107,6 +107,17 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | Model-based store comparison (`tests/property.rs`) | Passed |
 | Job lifecycle property test (`tests/job_property.rs`) | Passed |
 
+## `cargo fuzz` targets
+
+Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
+
+| Target | Result (10-second smoke run) |
+|---|---|
+| `header_decode` | Passed |
+| `frame_decode` | Passed |
+| `record_decode` | Passed (after fixing unbounded `ProjectionReplace` capacity) |
+| `recovery_scan` | Passed |
+
 ## Complexity
 
 * Production lines added / deleted in `src/`: approximately **+5,427 / -4,858**.
