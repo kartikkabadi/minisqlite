@@ -14,6 +14,10 @@
 - Added `tests/invalid_job_transitions.rs` and `tests/projection_ops.rs`.
 - `Event::with_json_payload` now requires caller-supplied `occurred_at_ms`; no hidden clock.
 - `Store` flushes on `Drop`; removed dead `JobInternalState::Uncertain` variant; optimized projection replace no-op detection.
+- `Store` uses `RwLock` so reads can run concurrently while writes remain serialized.
+- Lease tokens are generated with `Id::new()` so they are not reused across process restarts.
+- Recovery replay no longer re-runs `Limits` validation against configured values; the hard frame-size bound is the recovery guard.
+- `DataFile::sync` now respects the `Memory` durability mode.
 
 ## 0.2.1
 

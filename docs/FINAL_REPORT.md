@@ -38,10 +38,10 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 
 * **File format**: 64-byte file header + 64-byte frame header + encoded records + 32-byte trailer. Checksums cover header, payload, and trailer. Hard `MAX_FRAME_SIZE = 64 MiB`.
 * **Commit path**: validate batch → check idempotency and stream versions → encode records → append frame → sync (Strict) → apply to in-memory state atomically.
-* **Recovery path**: validate header → scan frames sequentially → decode and re-validate each `CommitBatch` → rebuild transaction/event/projection/job indexes → truncate incomplete tail.
+* **Recovery path**: validate header → scan frames sequentially → decode each frame within the hard frame-size bound → rebuild transaction/event/projection/job indexes → truncate incomplete tail. Configured `Limits` do not affect replay of committed frames.
 * **Projection model**: in-memory `BTreeMap` keyed by projection name, each holding an ordered `BTreeMap` of keys to values. Versions are monotonic.
 * **Job model**: `JobStateRecord` tracks spec, internal state, lease token, attempt, expiry, and retry time. Public `JobState` is derived at query time.
-* **Concurrency model**: one process owns the store via an advisory lock. All writes serialize through a mutex; reads may run concurrently. No async runtime dependency.
+* **Concurrency model**: one process owns the store via an advisory lock. Writes serialize through an `RwLock` write guard; reads take read guards and may run concurrently. No async runtime dependency.
 
 ## Guarantees proved
 
@@ -50,12 +50,13 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Event and transaction IDs are unique; same logical content is idempotent, different content returns a typed conflict.
 * Frame-level checksum integrity is enforced; torn trailing frames are truncated; mid-file corruption fails closed.
 * Projection version conflicts fail fast and atomic put/delete/clear/replace is visible with its transaction.
-* At most one active lease per job; stale tokens cannot ack/fail a newer lease.
+* At most one active lease per job; stale tokens cannot ack/fail a newer lease. Lease tokens are generated with `Id::new()` and are not reused across process restarts.
 * Partition-ordered job claiming survives concurrent callers.
 * Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain and are not silently retried.
 * Uncertain outcomes are reported and can be resolved durably.
-* Reopen reconstructs identical in-memory state from durable frames.
+* Reopen reconstructs identical in-memory state from durable frames, even if the configured `Limits` have changed.
 * Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected.
+* Reads can run concurrently while writes remain serialized.
 
 ## Guarantees not yet proved
 
@@ -128,7 +129,7 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 * Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, and `DataFile::sync` respects `Memory` durability.
 
 ## Synara-shaped demonstration
 

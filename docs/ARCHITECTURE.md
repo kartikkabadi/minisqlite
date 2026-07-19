@@ -39,8 +39,8 @@
 ## Concurrency model
 
 One process owns the store.
-A single `Mutex<StoreInner>` serializes writes.
-Readers take the mutex briefly and clone data.
+A `RwLock<StoreInner>` serializes writes and allows concurrent readers.
+Readers take a read lock briefly and clone data; writers take a write lock.
 A separate `.lock` file provides advisory single-owner locking via `fs2`.
 
 ## Durability path

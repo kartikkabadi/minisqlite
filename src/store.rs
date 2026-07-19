@@ -1,7 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use crate::codec::encode_records;
 use crate::codec::frame::{Frame, FrameHeader, FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE};
@@ -67,7 +67,7 @@ impl StoreBuilder {
 
 /// The public handle to an open MiniSQLite store.
 pub struct Store {
-    inner: Mutex<StoreInner>,
+    inner: RwLock<StoreInner>,
 }
 
 #[derive(Debug)]
@@ -89,7 +89,6 @@ struct StoreInner {
     projections: HashMap<String, ProjectionState>,
     jobs: HashMap<Id, JobStateRecord>,
     queue_partitions: HashMap<(String, String), Vec<Id>>,
-    nonce: u128,
     recovered_tail: bool,
 }
 
@@ -122,7 +121,6 @@ impl Store {
             projections: HashMap::new(),
             jobs: HashMap::new(),
             queue_partitions: HashMap::new(),
-            nonce: 1,
             recovered_tail: scan.tail_truncated,
         };
 
@@ -137,19 +135,19 @@ impl Store {
         }
 
         Ok(Self {
-            inner: Mutex::new(inner),
+            inner: RwLock::new(inner),
         })
     }
 
     /// Atomically commit a batch of events, projection mutations, and job operations.
     pub fn commit(&self, batch: CommitBatch) -> Result<CommitReceipt, Error> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.write().unwrap();
         guard.commit(batch)
     }
 
     /// Claim ready jobs from a queue.
     pub fn claim_jobs(&self, request: ClaimRequest) -> Result<Vec<ClaimedJob>, Error> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.write().unwrap();
         guard.claim_jobs(request)
     }
 
@@ -208,7 +206,7 @@ impl Store {
 
     /// Read events after a global sequence, ordered by sequence.
     pub fn events_after(&self, sequence_exclusive: u64, limit: usize) -> Vec<PersistedEvent> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard
             .events
             .iter()
@@ -225,7 +223,7 @@ impl Store {
         version_exclusive: u64,
         limit: usize,
     ) -> Vec<PersistedEvent> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let stream_id = stream_id.as_ref();
         guard
             .events
@@ -238,7 +236,7 @@ impl Store {
 
     /// Get a single event by ID.
     pub fn get_event(&self, event_id: Id) -> Result<PersistedEvent, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let seq = guard
             .event_ids
             .get(&event_id)
@@ -254,7 +252,7 @@ impl Store {
 
     /// Get the receipt for a committed transaction.
     pub fn get_transaction(&self, transaction_id: Id) -> Result<CommitReceipt, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard
             .transaction_receipts
             .get(&transaction_id)
@@ -264,13 +262,13 @@ impl Store {
 
     /// Return the highest committed global event sequence.
     pub fn high_water_sequence(&self) -> u64 {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard.high_water_sequence
     }
 
     /// Return the current version of a stream, if it exists.
     pub fn stream_version(&self, stream_id: impl AsRef<str>) -> Option<u64> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard.stream_versions.get(stream_id.as_ref()).copied()
     }
 
@@ -280,7 +278,7 @@ impl Store {
         projection: impl AsRef<str>,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let state = guard
             .projections
             .get(projection.as_ref())
@@ -290,13 +288,13 @@ impl Store {
 
     /// Return the names of all projections.
     pub fn projection_names(&self) -> Vec<String> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard.projections.keys().cloned().collect()
     }
 
     /// Return the current version of a projection.
     pub fn projection_version(&self, projection: impl AsRef<str>) -> Result<u64, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let state = guard
             .projections
             .get(projection.as_ref())
@@ -310,7 +308,7 @@ impl Store {
         projection: impl AsRef<str>,
         prefix: &[u8],
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let state = guard
             .projections
             .get(projection.as_ref())
@@ -343,7 +341,7 @@ impl Store {
         start: &[u8],
         end: &[u8],
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let state = guard
             .projections
             .get(projection.as_ref())
@@ -356,27 +354,25 @@ impl Store {
     }
 
     /// Return job records filtered by optional queue and state as of `now_ms`.
-    #[allow(unknown_lints)]
-    #[allow(clippy::unnecessary_map_or)]
     pub fn jobs(
         &self,
         now_ms: i64,
         queue: Option<String>,
         state: Option<JobState>,
     ) -> Vec<(Id, JobSpec, JobState)> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard
             .jobs
             .values()
-            .filter(|j| queue.as_ref().map_or(true, |q| &j.spec.queue == q))
-            .filter(|j| state.map_or(true, |s| j.state_at(now_ms) == s))
+            .filter(|j| queue.as_ref().map(|q| &j.spec.queue == q).unwrap_or(true))
+            .filter(|j| state.map(|s| j.state_at(now_ms) == s).unwrap_or(true))
             .map(|j| (j.spec.job_id, j.spec.clone(), j.state_at(now_ms)))
             .collect()
     }
 
     /// Return the job state for a single job at `now_ms`.
     pub fn job_state(&self, job_id: Id, now_ms: i64) -> Result<JobState, Error> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard
             .jobs
             .get(&job_id)
@@ -386,7 +382,7 @@ impl Store {
 
     /// Return current store diagnostics.
     pub fn stats(&self) -> StoreStats {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         let now_ms = current_time_ms();
         let mut job_counts: HashMap<JobState, usize> = HashMap::new();
         for j in guard.jobs.values() {
@@ -412,7 +408,7 @@ impl Store {
 
     /// Re-read and verify the entire file. Returns `Ok(())` if every frame is intact.
     pub fn verify(&self) -> Result<(), Error> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.write().unwrap();
         let _scan = recovery::scan(&mut guard.data_file)?;
         Ok(())
     }
@@ -423,7 +419,7 @@ impl Store {
     /// `destination`. On any failure the temporary file is removed. The destination is then
     /// reopened and scanned to prove it is a consistent copy.
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.write().unwrap();
         guard.data_file.sync()?;
         let src_path = guard.path.clone();
         let dest = destination.as_ref().to_path_buf();
@@ -453,19 +449,19 @@ impl Store {
 
     /// Return the file path.
     pub fn path(&self) -> PathBuf {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard.path.clone()
     }
 
     /// Returns true if the store is poisoned and must be reopened.
     pub fn is_poisoned(&self) -> bool {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.read().unwrap();
         guard.poisoned
     }
 
     /// Close the store, flushing any pending writes and releasing the file lock.
     pub fn close(self) -> Result<(), Error> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.write().unwrap();
         guard.data_file.sync()?;
         Ok(())
     }
@@ -473,7 +469,7 @@ impl Store {
 
 impl Drop for Store {
     fn drop(&mut self) {
-        let _ = self.inner.lock().map(|mut g| g.data_file.sync());
+        let _ = self.inner.write().map(|mut g| g.data_file.sync());
     }
 }
 
@@ -499,12 +495,14 @@ impl StoreInner {
 
         // Reconstruct the original commit batch and re-validate every operation against
         // the state rebuilt so far. This catches corrupted frames that pass checksums.
+        // We do not re-run `validate_batch` here because configured `Limits` can change
+        // between runs; committed frames are bounded by the hard frame-size limit and are
+        // decoded safely without allocating from untrusted lengths.
         let batch = CommitBatch::from_records(
             frame.header.transaction_id,
             frame.header.commit_timestamp_ms,
             records.clone(),
         )?;
-        self.validate_batch(&batch)?;
         self.validate_projection_ops(&batch)?;
         self.validate_job_ops(&batch)?;
         let expected = self.ops_to_records(&batch)?;
@@ -1379,8 +1377,7 @@ impl StoreInner {
                     break;
                 }
 
-                let lease_token = Id::from(self.nonce);
-                self.nonce += 1;
+                let lease_token = Id::new();
                 let attempt = job.attempt + 1;
                 let lease_expires_at_ms = request.now_ms + request.lease_ms;
                 candidates.push((

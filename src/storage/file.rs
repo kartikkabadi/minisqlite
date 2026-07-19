@@ -198,7 +198,11 @@ impl DataFile {
     }
 
     pub fn sync(&mut self) -> Result<(), Error> {
-        self.file.sync_all()?;
+        if self.durability.requires_sync() {
+            self.file.sync_all()?;
+        } else {
+            self.file.flush()?;
+        }
         Ok(())
     }
 

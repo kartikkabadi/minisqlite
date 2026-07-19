@@ -35,6 +35,8 @@ After scanning, `StoreInner::replay_frame` applies each record to memory:
 * Job operations update job state, lease tokens, and queue-partition ordering.
 
 The file is the source of truth; memory is a derived view.
+Committed frames are decoded using the hard frame-size bound, so replay does not
+reject older records just because the configured `Limits` have changed.
 
 ## Durability modes
 
