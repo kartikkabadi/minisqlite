@@ -786,11 +786,14 @@ impl StoreInner {
         // receipt without re-running validation that would fail on already-committed event IDs.
         if let Some(prev) = self.transaction_batches.get(&batch.transaction_id) {
             if batch.logical_eq(prev) {
-                return Ok(self
+                return self
                     .transaction_receipts
                     .get(&batch.transaction_id)
                     .cloned()
-                    .unwrap());
+                    .ok_or_else(|| Error::Corruption {
+                        message: "missing receipt for committed transaction".into(),
+                        offset: 0,
+                    });
             }
             return Err(Error::DuplicateIdWithDifferentContent {
                 kind: "transaction",
