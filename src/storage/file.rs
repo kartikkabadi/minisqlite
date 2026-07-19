@@ -208,9 +208,9 @@ impl DataFile {
 
     /// Best-effort fsync of the parent directory on Unix. This makes the atomic rename
     /// of a backup or recovery file durable on typical POSIX file systems.
-    pub fn sync_parent_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
+    pub fn sync_parent_dir(_path: impl AsRef<Path>) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(parent) = path.as_ref().parent() {
+        if let Some(parent) = _path.as_ref().parent() {
             if parent.as_os_str().is_empty() {
                 return Ok(());
             }
