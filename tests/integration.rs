@@ -24,7 +24,10 @@ fn create_insert_select() {
         ExecuteResult::Rows { header, rows } => {
             assert_eq!(header, vec!["id", "name"]);
             assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0], vec![Value::Integer(1), Value::Text("Alice".into())]);
+            assert_eq!(
+                rows[0],
+                vec![Value::Integer(1), Value::Text("Alice".into())]
+            );
             assert_eq!(rows[1], vec![Value::Integer(2), Value::Text("Bob".into())]);
         }
         _ => panic!("expected rows"),
@@ -69,7 +72,8 @@ fn persistence_round_trip() {
         let mut db = Database::open(&path).expect("open");
         db.execute_sql("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
             .unwrap();
-        db.execute_sql("INSERT INTO t (v) VALUES ('hello')").unwrap();
+        db.execute_sql("INSERT INTO t (v) VALUES ('hello')")
+            .unwrap();
     }
 
     {

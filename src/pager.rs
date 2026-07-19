@@ -19,6 +19,7 @@ impl Pager {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)?;
         let meta = file.metadata()?;
         let page_count = if meta.len() == 0 {

@@ -1,13 +1,29 @@
 # minisqlite
 
+[![Crates.io](https://img.shields.io/crates/v/minisqlite.svg)](https://crates.io/crates/minisqlite)
+[![CI](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml)
+
 A minimal, from-scratch SQLite-like relational database engine written in Rust.
 
-`minisqlite` is intentionally tiny: zero external dependencies, pure safe Rust, and a page-based storage engine with a custom file format. It is built for situations where pulling in C SQLite is overkill or impossible:
+`minisqlite` is intentionally tiny: **zero external dependencies**, **pure safe Rust**, and a page-based storage engine with a custom file format. It is built for situations where linking to C SQLite is overkill or impossible:
 
 - **WASM / browser targets** – no `libsqlite3-sys` to emscripten.
 - **Embedded / IoT** – easy to audit, easy to cross-compile.
 - **Education and prototyping** – the whole engine fits in a few thousand lines and a single crate.
 - **Serverless edge functions** – self-contained file storage with no native shared library.
+
+## Install
+
+```bash
+cargo install minisqlite
+```
+
+Or add it as a library dependency:
+
+```toml
+[dependencies]
+minisqlite = "0.2.1"
+```
 
 ## Features
 
@@ -22,13 +38,13 @@ A minimal, from-scratch SQLite-like relational database engine written in Rust.
 - `PRAGMA table_info(name)` and `VACUUM`
 - No external dependencies (Rust standard library only)
 
-## Build
+## CLI
 
 ```bash
-cargo build
+minisqlite mydb.db
 ```
 
-## CLI
+Or from source:
 
 ```bash
 cargo run -- mydb.db
@@ -63,6 +79,10 @@ See [`examples/embed.rs`](examples/embed.rs) for a runnable example.
 cargo test
 cargo run -- test.db < test.sql
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -1,4 +1,4 @@
-use crate::types::{ColumnDef, IndexSchema, TableSchema, TypeAffinity, decode_value, encode_value};
+use crate::types::{decode_value, encode_value, ColumnDef, IndexSchema, TableSchema, TypeAffinity};
 
 pub fn encode_table_schema(schema: &TableSchema) -> Vec<u8> {
     let mut out = Vec::new();
@@ -90,10 +90,18 @@ pub fn decode_index_schema(bytes: &[u8]) -> Option<IndexSchema> {
 
 fn pack_flags(col: &ColumnDef) -> u8 {
     let mut f = 0u8;
-    if col.primary_key { f |= 0x01; }
-    if col.autoincrement { f |= 0x02; }
-    if col.not_null { f |= 0x04; }
-    if col.unique { f |= 0x08; }
+    if col.primary_key {
+        f |= 0x01;
+    }
+    if col.autoincrement {
+        f |= 0x02;
+    }
+    if col.not_null {
+        f |= 0x04;
+    }
+    if col.unique {
+        f |= 0x08;
+    }
     f
 }
 
@@ -121,24 +129,41 @@ fn write_string(out: &mut Vec<u8>, s: &str) {
 
 fn read_string(bytes: &[u8], off: &mut usize) -> Option<String> {
     let len = read_u32(bytes, off)? as usize;
-    if *off + len > bytes.len() { return None; }
+    if *off + len > bytes.len() {
+        return None;
+    }
     let s = String::from_utf8_lossy(&bytes[*off..*off + len]).to_string();
     *off += len;
     Some(s)
 }
 
 fn read_u32(bytes: &[u8], off: &mut usize) -> Option<u32> {
-    if *off + 4 > bytes.len() { return None; }
-    let v = u32::from_be_bytes([bytes[*off], bytes[*off + 1], bytes[*off + 2], bytes[*off + 3]]);
+    if *off + 4 > bytes.len() {
+        return None;
+    }
+    let v = u32::from_be_bytes([
+        bytes[*off],
+        bytes[*off + 1],
+        bytes[*off + 2],
+        bytes[*off + 3],
+    ]);
     *off += 4;
     Some(v)
 }
 
 fn read_i64(bytes: &[u8], off: &mut usize) -> Option<i64> {
-    if *off + 8 > bytes.len() { return None; }
+    if *off + 8 > bytes.len() {
+        return None;
+    }
     let v = i64::from_be_bytes([
-        bytes[*off], bytes[*off + 1], bytes[*off + 2], bytes[*off + 3],
-        bytes[*off + 4], bytes[*off + 5], bytes[*off + 6], bytes[*off + 7],
+        bytes[*off],
+        bytes[*off + 1],
+        bytes[*off + 2],
+        bytes[*off + 3],
+        bytes[*off + 4],
+        bytes[*off + 5],
+        bytes[*off + 6],
+        bytes[*off + 7],
     ]);
     *off += 8;
     Some(v)

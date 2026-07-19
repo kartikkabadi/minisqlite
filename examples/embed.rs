@@ -11,13 +11,19 @@ fn main() {
     db.execute_sql("INSERT INTO users (name, active) VALUES ('Alice', 1), ('Bob', 0)")
         .unwrap();
 
-    match db.execute_sql("SELECT * FROM users WHERE active = 1").unwrap() {
+    match db
+        .execute_sql("SELECT * FROM users WHERE active = 1")
+        .unwrap()
+    {
         ExecuteResult::Rows { header, rows } => {
             println!("{}", header.join(", "));
             for row in rows {
                 println!(
                     "{}",
-                    row.iter().map(Value::to_string).collect::<Vec<_>>().join(", ")
+                    row.iter()
+                        .map(Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
         }

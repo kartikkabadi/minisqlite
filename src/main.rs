@@ -24,7 +24,11 @@ fn main() {
     let mut in_transaction = false;
 
     loop {
-        let prompt = if in_transaction { "   ...> " } else { "minisql> " };
+        let prompt = if in_transaction {
+            "   ...> "
+        } else {
+            "minisql> "
+        };
         print!("{}", prompt);
         io::stdout().flush().unwrap();
 
@@ -73,10 +77,7 @@ fn main() {
                             println!(
                                 "INSERT INTO {} VALUES ({});",
                                 tbl,
-                                row.iter()
-                                    .map(sql_literal)
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
+                                row.iter().map(sql_literal).collect::<Vec<_>>().join(", ")
                             );
                         }
                     }
@@ -122,9 +123,7 @@ fn main() {
         if upper.starts_with("BEGIN") {
             in_transaction = true;
         }
-        if upper.starts_with("COMMIT")
-            || upper.starts_with("ROLLBACK")
-            || upper.starts_with("END")
+        if upper.starts_with("COMMIT") || upper.starts_with("ROLLBACK") || upper.starts_with("END")
         {
             in_transaction = false;
         }
@@ -163,7 +162,7 @@ fn sql_literal(v: &Value) -> String {
         Value::Integer(i) => i.to_string(),
         Value::Real(f) => f.to_string(),
         Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
-        Value::Blob(b) => format!("x'{}'", b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+        Value::Blob(_) => v.to_string(),
     }
 }
 

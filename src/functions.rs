@@ -60,7 +60,9 @@ pub fn call_function(name: &str, args: &[Value]) -> Value {
                 Value::Null
             }
         }
-        "QUOTE" => args.first().map_or(Value::Null, |v| Value::Text(format!("'{}'", v))),
+        "QUOTE" => args
+            .first()
+            .map_or(Value::Null, |v| Value::Text(format!("'{}'", v))),
 
         // Math functions
         "ABS" => args.first().map_or(Value::Null, |v| match v {
@@ -79,7 +81,11 @@ pub fn call_function(name: &str, args: &[Value]) -> Value {
         "MAX" => {
             if let Some(first) = args.first() {
                 args.iter().skip(1).fold(first.clone(), |acc, v| {
-                    if compare_for_max(&acc, v) { acc } else { v.clone() }
+                    if compare_for_max(&acc, v) {
+                        acc
+                    } else {
+                        v.clone()
+                    }
                 })
             } else {
                 Value::Null
@@ -88,7 +94,11 @@ pub fn call_function(name: &str, args: &[Value]) -> Value {
         "MIN" => {
             if let Some(first) = args.first() {
                 args.iter().skip(1).fold(first.clone(), |acc, v| {
-                    if compare_for_min(&acc, v) { acc } else { v.clone() }
+                    if compare_for_min(&acc, v) {
+                        acc
+                    } else {
+                        v.clone()
+                    }
                 })
             } else {
                 Value::Null
@@ -96,8 +106,14 @@ pub fn call_function(name: &str, args: &[Value]) -> Value {
         }
 
         // Type functions
-        "TYPEOF" => args.first().map_or(Value::Null, |v| Value::Text(v.type_name().to_string())),
-        "COALESCE" => args.iter().find(|v| !v.is_null()).cloned().unwrap_or(Value::Null),
+        "TYPEOF" => args
+            .first()
+            .map_or(Value::Null, |v| Value::Text(v.type_name().to_string())),
+        "COALESCE" => args
+            .iter()
+            .find(|v| !v.is_null())
+            .cloned()
+            .unwrap_or(Value::Null),
         "IFNULL" => args
             .iter()
             .find(|v| !v.is_null())
@@ -105,7 +121,11 @@ pub fn call_function(name: &str, args: &[Value]) -> Value {
             .unwrap_or_else(|| args.last().cloned().unwrap_or(Value::Null)),
         "NULLIF" => {
             if let (Some(a), Some(b)) = (args.first(), args.get(1)) {
-                if a == b { Value::Null } else { a.clone() }
+                if a == b {
+                    Value::Null
+                } else {
+                    a.clone()
+                }
             } else {
                 Value::Null
             }
@@ -135,6 +155,8 @@ fn random_i64() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     (seed >> 33) as i64
 }

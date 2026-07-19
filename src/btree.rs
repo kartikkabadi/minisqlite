@@ -78,7 +78,7 @@ impl BTree {
         let pages_needed = if bytes.is_empty() {
             1
         } else {
-            (bytes.len() + data_per_page - 1) / data_per_page
+            bytes.len().div_ceil(data_per_page)
         };
 
         let mut new_pages = Vec::with_capacity(pages_needed);
@@ -137,7 +137,10 @@ impl BTree {
 
 fn read_u32(bytes: &[u8], offset: &mut usize) -> io::Result<u32> {
     if *offset + 4 > bytes.len() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated u32"));
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "truncated u32",
+        ));
     }
     let v = u32::from_be_bytes([
         bytes[*offset],
