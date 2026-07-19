@@ -41,3 +41,4 @@ These invariants are encoded in the implementation and exercised by tests.
 2. A successful commit has a stable receipt.
 3. Uncertain commit outcomes are reported as uncertain.
 4. A poisoned store rejects further writes.
+5. JSON CLI mode writes only machine-readable output to stdout; human prose goes to stderr.
