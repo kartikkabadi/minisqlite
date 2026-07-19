@@ -1,0 +1,14 @@
+[package]
+name = "minisqlite"
+version = "0.2.0"
+edition = "2021"
+authors = ["Kartik Kabadi <kartik@kartikkabadi.com>"]
+description = "A minimal, from-scratch SQLite-like relational database engine in Rust"
+license = "MIT"
+repository = "https://github.com/kartikkabadi/sqlite-rust-minimal"
+
+[[bin]]
+name = "minisqlite"
+path = "src/main.rs"
+
+[dependencies]
