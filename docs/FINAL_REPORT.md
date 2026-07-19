@@ -20,6 +20,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Ordered domain events with global sequence and per-stream version checks.
 * Named ordered-map projections with versioned put/delete/clear/replace, prefix/range scans.
 * Durable jobs: enqueue, claim with `worker_id` and lease token, ack, fail with retry, cancel, and explicit uncertain-resolution. `Store::jobs` returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, and `terminal_at_ms`.
+* `CommitBatch::with_correlation_id` and `with_metadata` persist optional transaction-level context as the first `TransactionMeta` record in a frame; `CommitReceipt` and `get_transaction` return them.
 * Strict vs Memory durability modes.
 * `MINISQL3` file format with `MINIFRAM` frame headers and `FRAMETRL` trailers, CRC32 via `crc32fast`.
 * Recovery scanner that validates frames, truncates torn tails, and fails closed on mid-file corruption.
@@ -55,6 +56,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain and are not silently retried.
 * Uncertain outcomes are reported and can be resolved durably.
 * Reopen reconstructs identical in-memory state from durable frames, even if the configured `Limits` have changed.
+* Transaction-level `correlation_id` and `metadata` survive commit and reopen.
 * Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected.
 * Reads can run concurrently while writes remain serialized.
 
@@ -124,12 +126,12 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 
 ## Complexity
 
-* Production lines added / deleted in `src/`: approximately **+5,427 / -4,858**.
-* Public API items: approximately **68** exported types/methods (including `Store::close`).
+* Production lines added / deleted in `src/`: approximately **+5,541 / -4,858**.
+* Public API items: approximately **70** exported types/methods.
 * Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, and `max_attempts == 0` is rejected.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, and transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record.
 
 ## Synara-shaped demonstration
 

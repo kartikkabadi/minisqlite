@@ -76,7 +76,8 @@ Each record starts with:
 | body length | 4 bytes |
 | body | variable |
 
-Record kinds include `Event`, `ProjectionPut`, `ProjectionDelete`, `ProjectionClear`, `ProjectionReplace`, `JobEnqueue`, `JobLease`, `JobAck`, `JobFail`, `JobCancel`, `JobResolve`.
+Record kinds include `TransactionMeta`, `Event`, `ProjectionPut`, `ProjectionDelete`, `ProjectionClear`, `ProjectionReplace`, `JobEnqueue`, `JobLease`, `JobAck`, `JobFail`, `JobCancel`, `JobResolve`.
+`TransactionMeta` is written as the first record when the `CommitBatch` carries a `correlation_id` or `metadata` and carries transaction-level opaque context without affecting state.
 Unknown kernel record kinds are rejected.
 Application event types are opaque bytes and may be anything.
 

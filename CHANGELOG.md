@@ -24,6 +24,9 @@
 - `fail_job` normalizes an explicit retry time equal to the default (`now_ms + 1000`) and stores the effective retry time on disk, so idempotent re-commits round-trip.
 - `JobInfo` omits `worker_id`, `lease_expires_at_ms`, and `retry_after_ms` for terminal jobs.
 - `max_attempts == 0` is rejected at validation time.
+- Added transaction-level `correlation_id` and `metadata` via `CommitBatch::with_correlation_id` and `with_metadata`, persisted as the first `TransactionMeta` record in a frame and returned on `CommitReceipt` and `get_transaction`.
+- Added `tests/integration.rs` round-trip test for transaction-level metadata.
+- Updated `docs/FORMAT.md` and `docs/FINAL_REPORT.md` to describe `TransactionMeta`.
 
 ## 0.2.1
 
