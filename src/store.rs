@@ -908,6 +908,15 @@ impl StoreInner {
                 Op::FailJob { error_summary, .. } => {
                     self.limits.validate_summary(error_summary)?;
                 }
+                Op::LeaseJob { worker_id, .. } => {
+                    self.limits.validate_string("worker_id", worker_id)?;
+                }
+                Op::AckJob {
+                    result_digest: Some(digest),
+                    ..
+                } => {
+                    self.limits.validate_metadata(digest.len())?;
+                }
                 _ => {}
             }
         }

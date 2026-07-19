@@ -103,10 +103,15 @@ impl Limits {
                 limit: self.max_event_payload,
             });
         }
-        if metadata_len > self.max_metadata {
+        self.validate_metadata(metadata_len)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_metadata(&self, len: usize) -> crate::Result<()> {
+        if len > self.max_metadata {
             return Err(crate::Error::PayloadTooLarge {
                 kind: "metadata",
-                size: metadata_len,
+                size: len,
                 limit: self.max_metadata,
             });
         }
