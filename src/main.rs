@@ -1,32 +1,33 @@
+use std::env;
 use std::io::{self, Write};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use lexopt::prelude::*;
 
 use minisqlite::{Durability, Error, JobState, StoreBuilder};
 
 const HELP: &str = "MiniSQLite control-plane state engine
 
 Usage:
-  minisqlite [OPTIONS] <path> <command> [ARGS]
+  minisqlite [OPTIONS] <command> [command-args]
+  minisqlite [OPTIONS] <path> <command> [command-args]
 
 Commands:
-  doctor                 Open the store, verify it, and print diagnostics.
-  verify                 Verify the file and exit with status 0 if intact.
-  stats                  Print store statistics.
-  events tail [LIMIT]    Print the last events.
-  events stream <ID> [LIMIT]
-                         Print events for a single stream.
-  projections list       List projections and versions.
-  projections get <NAME> <KEY>
-                         Read a single projection key.
-  projections scan <NAME> [PREFIX]
-                         Scan a projection for keys with a prefix.
-  jobs list [QUEUE] [--state <STATE>]
-                         List jobs, optionally filtered by queue and state.
-  export                 Dump a JSONL snapshot of events, projections and jobs.
-  backup <DEST>          Atomically copy the primary file.
+  doctor <database>                 Open the store, verify it, and print diagnostics.
+  verify <database>               Verify the file and exit with status 0 if intact.
+  stats <database>                Print store statistics.
+  events tail <database> [LIMIT]  Print the last events.
+  events stream <database> <stream-id> [LIMIT]
+                                  Print events for a single stream.
+  projections list <database>     List projections and versions.
+  projections get <database> <name> <key>
+                                  Read a single projection key.
+  projections scan <database> <projection> [--prefix <prefix>]
+                                  Scan a projection for keys with a prefix.
+  jobs list <database> [--queue <queue>] [--state <state>]
+                                  List jobs, optionally filtered.
+  export <database> [--format jsonl]
+                                  Dump a JSONL snapshot.
+  backup <database> <destination>   Atomically copy the primary file.
 
 Options:
   -j, --json                       Emit machine-readable JSON output.
@@ -35,6 +36,67 @@ Options:
   -l, --lock <PATH>                Custom lock-file path.
   -h, --help                       Print this help.
 ";
+
+struct GlobalOpts {
+    json: bool,
+    show_payloads: bool,
+    durability: Durability,
+    lock_path: Option<String>,
+}
+
+struct CommandOpts {
+    limit: Option<usize>,
+    prefix: Option<String>,
+    queue: Option<String>,
+    state: Option<JobState>,
+    format: Option<String>,
+}
+
+enum Command {
+    Doctor {
+        path: String,
+    },
+    Verify {
+        path: String,
+    },
+    Stats {
+        path: String,
+    },
+    EventsTail {
+        path: String,
+        limit: usize,
+    },
+    EventsStream {
+        path: String,
+        stream_id: String,
+        limit: usize,
+    },
+    ProjectionsList {
+        path: String,
+    },
+    ProjectionsGet {
+        path: String,
+        name: String,
+        key: String,
+    },
+    ProjectionsScan {
+        path: String,
+        name: String,
+        prefix: Option<String>,
+    },
+    JobsList {
+        path: String,
+        queue: Option<String>,
+        state: Option<JobState>,
+    },
+    Export {
+        path: String,
+    },
+    Backup {
+        path: String,
+        dest: String,
+    },
+}
 
 fn main() {
     if let Err(e) = run() {
@@ -69,77 +131,337 @@ fn exit_code(error: &Error) -> i32 {
     }
 }
 
-fn run() -> Result<(), Error> {
-    let mut parser = lexopt::Parser::from_env();
-    let mut path: Option<String> = None;
-    let mut cmd: Option<String> = None;
-    let mut durability = Durability::Strict;
-    let mut lock_path: Option<String> = None;
-    let mut json = false;
-    let mut show_payloads = false;
+fn is_top_level_command(s: &str) -> bool {
+    matches!(
+        s,
+        "doctor" | "verify" | "stats" | "events" | "projections" | "jobs" | "export" | "backup"
+    )
+}
 
-    while let Some(arg) = parser.next().map_err(|e| Error::Usage(e.to_string()))? {
-        match arg {
-            Short('h') | Long("help") => {
-                print!("{}", HELP);
-                return Ok(());
+fn is_events_subcommand(s: &str) -> bool {
+    matches!(s, "tail" | "stream")
+}
+
+fn is_projections_subcommand(s: &str) -> bool {
+    matches!(s, "list" | "get" | "scan")
+}
+
+fn parse_args() -> Result<(GlobalOpts, Command), Error> {
+    let mut args = env::args().skip(1);
+    let mut global = GlobalOpts {
+        json: false,
+        show_payloads: false,
+        durability: Durability::Strict,
+        lock_path: None,
+    };
+    let mut cmd_opts = CommandOpts {
+        limit: None,
+        prefix: None,
+        queue: None,
+        state: None,
+        format: None,
+    };
+    let mut positionals: Vec<String> = Vec::new();
+
+    while let Some(arg) = args.next() {
+        if arg.starts_with('-') {
+            match arg.as_str() {
+                "-h" | "--help" => {
+                    print!("{}", HELP);
+                    process::exit(0);
+                }
+                "-j" | "--json" => global.json = true,
+                "-p" | "--show-payloads" => global.show_payloads = true,
+                "-d" | "--durability" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing durability value".into()))?;
+                    global.durability = parse_durability(&value)?;
+                }
+                "-l" | "--lock" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing lock path".into()))?;
+                    global.lock_path = Some(value);
+                }
+                "--limit" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing --limit value".into()))?;
+                    let n = value
+                        .parse()
+                        .map_err(|_| Error::Usage(format!("invalid limit: {value}")))?;
+                    cmd_opts.limit = Some(n);
+                }
+                "--prefix" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing --prefix value".into()))?;
+                    cmd_opts.prefix = Some(value);
+                }
+                "--queue" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing --queue value".into()))?;
+                    cmd_opts.queue = Some(value);
+                }
+                "--state" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing --state value".into()))?;
+                    cmd_opts.state = Some(parse_job_state(&value)?);
+                }
+                "--format" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| Error::Usage("missing --format value".into()))?;
+                    cmd_opts.format = Some(value);
+                }
+                _ => return Err(Error::Usage(format!("unknown option: {arg}"))),
             }
-            Short('j') | Long("json") => json = true,
-            Short('p') | Long("show-payloads") => show_payloads = true,
-            Short('d') | Long("durability") => {
-                let value = parser.value().map_err(|e| Error::Usage(e.to_string()))?;
-                durability =
-                    parse_durability(&value.string().map_err(|e| Error::Usage(e.to_string()))?)?;
-            }
-            Short('l') | Long("lock") => {
-                let value = parser.value().map_err(|e| Error::Usage(e.to_string()))?;
-                lock_path = Some(value.string().map_err(|e| Error::Usage(e.to_string()))?);
-            }
-            Value(v) if path.is_none() => {
-                path = Some(v.string().map_err(|e| Error::Usage(e.to_string()))?);
-            }
-            Value(v) if cmd.is_none() => {
-                cmd = Some(v.string().map_err(|e| Error::Usage(e.to_string()))?);
-                break;
-            }
-            _ => return Err(Error::Usage("unexpected argument".into())),
+        } else {
+            positionals.push(arg);
         }
     }
 
-    let path = path.ok_or_else(|| Error::Usage("missing store path".into()))?;
-    let cmd = cmd.ok_or_else(|| Error::Usage("missing command".into()))?;
+    if positionals.is_empty() {
+        return Err(Error::Usage("missing command".into()));
+    }
 
-    match cmd.as_str() {
-        "doctor" => doctor(&path, durability, lock_path.as_deref(), json),
-        "verify" => verify(&path, durability, lock_path.as_deref(), json),
-        "stats" => stats(&path, durability, lock_path.as_deref(), json),
-        "events" => events(
-            &mut parser,
+    // Determine command tokens, database path, and any remaining positional args.
+    let (cmd_tokens, path, args_after_path) = if is_top_level_command(&positionals[0]) {
+        parse_command_first(&positionals)?
+    } else {
+        parse_path_first(&positionals)?
+    };
+
+    let command = match (
+        cmd_tokens[0].as_str(),
+        cmd_tokens.get(1).map(|s| s.as_str()),
+    ) {
+        ("doctor", None) => Command::Doctor { path },
+        ("verify", None) => Command::Verify { path },
+        ("stats", None) => Command::Stats { path },
+        ("events", Some("tail")) => {
+            let limit = cmd_opts
+                .limit
+                .or_else(|| args_after_path.first().and_then(|s| s.parse().ok()))
+                .unwrap_or(10);
+            Command::EventsTail { path, limit }
+        }
+        ("events", Some("stream")) => {
+            if args_after_path.is_empty() {
+                return Err(Error::Usage("missing stream-id".into()));
+            }
+            let stream_id = args_after_path[0].clone();
+            let limit = cmd_opts
+                .limit
+                .or_else(|| args_after_path.get(1).and_then(|s| s.parse().ok()))
+                .unwrap_or(10);
+            Command::EventsStream {
+                path,
+                stream_id,
+                limit,
+            }
+        }
+        ("projections", Some("list")) => Command::ProjectionsList { path },
+        ("projections", Some("get")) => {
+            if args_after_path.len() < 2 {
+                return Err(Error::Usage("projections get requires <name> <key>".into()));
+            }
+            Command::ProjectionsGet {
+                path,
+                name: args_after_path[0].clone(),
+                key: args_after_path[1].clone(),
+            }
+        }
+        ("projections", Some("scan")) => {
+            if args_after_path.is_empty() {
+                return Err(Error::Usage(
+                    "projections scan requires <projection>".into(),
+                ));
+            }
+            let name = args_after_path[0].clone();
+            let prefix = cmd_opts.prefix.or_else(|| args_after_path.get(1).cloned());
+            Command::ProjectionsScan { path, name, prefix }
+        }
+        ("jobs", Some("list")) => Command::JobsList {
+            path,
+            queue: cmd_opts.queue,
+            state: cmd_opts.state,
+        },
+        ("export", None) => {
+            let format = cmd_opts.format.unwrap_or_else(|| "jsonl".into());
+            if format != "jsonl" {
+                return Err(Error::Usage(format!("unsupported export format: {format}")));
+            }
+            Command::Export { path }
+        }
+        ("backup", None) => {
+            if args_after_path.is_empty() {
+                return Err(Error::Usage("backup requires <destination>".into()));
+            }
+            Command::Backup {
+                path,
+                dest: args_after_path[0].clone(),
+            }
+        }
+        _ => {
+            return Err(Error::Usage(format!(
+                "unknown command: {}",
+                cmd_tokens.join(" ")
+            )))
+        }
+    };
+
+    Ok((global, command))
+}
+
+fn parse_command_first(
+    positionals: &[String],
+) -> Result<(Vec<String>, String, Vec<String>), Error> {
+    let mut cmd_tokens = vec![positionals[0].clone()];
+
+    let i = match positionals[0].as_str() {
+        "events" => {
+            if positionals.len() < 2 || !is_events_subcommand(&positionals[1]) {
+                return Err(Error::Usage("expected events tail|stream".into()));
+            }
+            cmd_tokens.push(positionals[1].clone());
+            2
+        }
+        "projections" => {
+            if positionals.len() < 2 || !is_projections_subcommand(&positionals[1]) {
+                return Err(Error::Usage("expected projections list|get|scan".into()));
+            }
+            cmd_tokens.push(positionals[1].clone());
+            2
+        }
+        "jobs" => {
+            if positionals.len() < 2 || positionals[1] != "list" {
+                return Err(Error::Usage("expected jobs list".into()));
+            }
+            cmd_tokens.push(positionals[1].clone());
+            2
+        }
+        _ => 1,
+    };
+
+    if i >= positionals.len() {
+        return Err(Error::Usage("missing database path".into()));
+    }
+    let path = positionals[i].clone();
+    let args = positionals[i + 1..].to_vec();
+    Ok((cmd_tokens, path, args))
+}
+
+fn parse_path_first(positionals: &[String]) -> Result<(Vec<String>, String, Vec<String>), Error> {
+    let path = positionals[0].clone();
+    if positionals.len() < 2 || !is_top_level_command(&positionals[1]) {
+        return Err(Error::Usage("missing command".into()));
+    }
+
+    let mut cmd_tokens = vec![positionals[1].clone()];
+
+    let i = match positionals[1].as_str() {
+        "events" => {
+            if positionals.len() < 3 || !is_events_subcommand(&positionals[2]) {
+                return Err(Error::Usage("expected events tail|stream".into()));
+            }
+            cmd_tokens.push(positionals[2].clone());
+            3
+        }
+        "projections" => {
+            if positionals.len() < 3 || !is_projections_subcommand(&positionals[2]) {
+                return Err(Error::Usage("expected projections list|get|scan".into()));
+            }
+            cmd_tokens.push(positionals[2].clone());
+            3
+        }
+        "jobs" => {
+            if positionals.len() < 3 || positionals[2] != "list" {
+                return Err(Error::Usage("expected jobs list".into()));
+            }
+            cmd_tokens.push(positionals[2].clone());
+            3
+        }
+        _ => 2,
+    };
+
+    let args = positionals[i..].to_vec();
+    Ok((cmd_tokens, path, args))
+}
+
+fn run() -> Result<(), Error> {
+    let (opts, cmd) = parse_args()?;
+    match cmd {
+        Command::Doctor { path } => {
+            doctor(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
+        }
+        Command::Verify { path } => {
+            verify(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
+        }
+        Command::Stats { path } => {
+            stats(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
+        }
+        Command::EventsTail { path, limit } => events_tail(
             &path,
-            durability,
-            lock_path.as_deref(),
-            json,
-            show_payloads,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            opts.show_payloads,
+            limit,
         ),
-        "projections" => projections(
-            &mut parser,
+        Command::EventsStream {
+            path,
+            stream_id,
+            limit,
+        } => events_stream(
             &path,
-            durability,
-            lock_path.as_deref(),
-            json,
-            show_payloads,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            opts.show_payloads,
+            &stream_id,
+            limit,
         ),
-        "jobs" => jobs(
-            &mut parser,
+        Command::ProjectionsList { path } => {
+            projections_list(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
+        }
+        Command::ProjectionsGet { path, name, key } => projections_get(
             &path,
-            durability,
-            lock_path.as_deref(),
-            json,
-            show_payloads,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            &name,
+            &key,
         ),
-        "export" => export(&path, durability, lock_path.as_deref()),
-        "backup" => backup(&mut parser, &path, durability, lock_path.as_deref(), json),
-        _ => Err(Error::Usage(format!("unknown command: {cmd}"))),
+        Command::ProjectionsScan { path, name, prefix } => projections_scan(
+            &path,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            opts.show_payloads,
+            &name,
+            prefix.as_deref(),
+        ),
+        Command::JobsList { path, queue, state } => jobs_list(
+            &path,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            opts.show_payloads,
+            queue.as_deref(),
+            state,
+        ),
+        Command::Export { path } => export(&path, opts.durability, opts.lock_path.as_deref()),
+        Command::Backup { path, dest } => backup(
+            &path,
+            opts.durability,
+            opts.lock_path.as_deref(),
+            opts.json,
+            &dest,
+        ),
     }
 }
 
@@ -169,51 +491,73 @@ fn doctor(
     lock_path: Option<&str>,
     json: bool,
 ) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
-    store.verify()?;
-    let stats = store.stats();
-    if json {
-        let status = if stats.poisoned {
-            "poisoned"
-        } else if stats.recovered_tail {
-            "ok_tail_truncated"
-        } else {
-            "ok"
-        };
-        println!(
-            "{}",
-            serde_json::json!({
-                "path": store.path().to_string_lossy(),
-                "status": status,
-                "stats": stats,
-            })
-        );
-        return Ok(());
+    match open_store(path, durability, lock_path) {
+        Ok(store) => {
+            store.verify()?;
+            let stats = store.stats();
+            if json {
+                let status = if stats.poisoned {
+                    "poisoned"
+                } else if stats.recovered_tail {
+                    "ok_tail_truncated"
+                } else {
+                    "ok"
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "path": store.path().to_string_lossy(),
+                        "status": status,
+                        "locked": true,
+                        "stats": stats,
+                    })
+                );
+                return Ok(());
+            }
+            println!("path:          {}", store.path().display());
+            println!(
+                "format:        {}.{}",
+                stats.format_version_major, stats.format_version_minor
+            );
+            println!("file_size:     {}", stats.file_size);
+            println!("transactions:  {}", stats.transaction_count);
+            println!("events:        {}", stats.event_count);
+            println!("streams:       {}", stats.stream_count);
+            println!("projections:   {}", stats.projection_count);
+            println!("jobs:          {}", stats.job_count);
+            println!("last_tx_seq:   {}", stats.last_transaction_sequence);
+            println!("last_event_seq:{}", stats.last_event_sequence);
+            for (state, count) in &stats.job_counts {
+                println!("jobs.{:?}        {}", state, count);
+            }
+            if stats.poisoned {
+                println!("status:        POISONED");
+            } else if stats.recovered_tail {
+                println!("status:        OK (tail truncated on recovery)");
+            } else {
+                println!("status:        OK");
+            }
+            println!("locked:        true (this process owns the store)");
+            Ok(())
+        }
+        Err(Error::AlreadyOpen) | Err(Error::LockUnavailable) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "path": path,
+                        "status": "locked",
+                        "locked": true,
+                    })
+                );
+            } else {
+                println!("path:   {path}");
+                println!("status: LOCKED (another process owns the store)");
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
     }
-    println!("path:          {}", store.path().display());
-    println!(
-        "format:        {}.{}",
-        stats.format_version_major, stats.format_version_minor
-    );
-    println!("file_size:     {}", stats.file_size);
-    println!("transactions:  {}", stats.transaction_count);
-    println!("events:        {}", stats.event_count);
-    println!("streams:       {}", stats.stream_count);
-    println!("projections:   {}", stats.projection_count);
-    println!("jobs:          {}", stats.job_count);
-    println!("last_tx_seq:   {}", stats.last_transaction_sequence);
-    println!("last_event_seq:{}", stats.last_event_sequence);
-    for (state, count) in &stats.job_counts {
-        println!("jobs.{:?}        {}", state, count);
-    }
-    if stats.poisoned {
-        println!("status:        POISONED");
-    } else if stats.recovered_tail {
-        println!("status:        OK (tail truncated on recovery)");
-    } else {
-        println!("status:        OK");
-    }
-    Ok(())
 }
 
 fn verify(
@@ -267,199 +611,162 @@ fn stats(
     Ok(())
 }
 
-fn events(
-    parser: &mut lexopt::Parser,
+fn events_tail(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
+    limit: usize,
 ) -> Result<(), Error> {
-    let sub = parser
-        .value()
-        .map_err(|e| Error::Usage(e.to_string()))?
-        .string()
-        .map_err(|e| Error::Usage(e.to_string()))?;
-
     let store = open_store(path, durability, lock_path)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-
-    match sub.as_str() {
-        "tail" => {
-            let limit = next_usize(parser, 10)?;
-            let events = store.events_after(0, limit);
-            for e in events {
-                if json {
-                    writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
-                } else {
-                    writeln_event(&mut stdout, &e, show_payloads)?;
-                }
-            }
-        }
-        "stream" => {
-            let stream_id = parser
-                .value()
-                .map_err(|e| Error::Usage(e.to_string()))?
-                .string()
-                .map_err(|e| Error::Usage(e.to_string()))?;
-            let limit = next_usize(parser, 10)?;
-            let events = store.stream_events(&stream_id, 0, limit);
-            for e in events {
-                if json {
-                    writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
-                } else {
-                    writeln_event(&mut stdout, &e, show_payloads)?;
-                }
-            }
-        }
-        _ => return Err(Error::Usage(format!("unknown events subcommand: {sub}"))),
-    }
-    Ok(())
-}
-
-fn projections(
-    parser: &mut lexopt::Parser,
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-    show_payloads: bool,
-) -> Result<(), Error> {
-    let sub = parser
-        .value()
-        .map_err(|e| Error::Usage(e.to_string()))?
-        .string()
-        .map_err(|e| Error::Usage(e.to_string()))?;
-
-    let store = open_store(path, durability, lock_path)?;
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-
-    match sub.as_str() {
-        "list" => {
-            for name in store.projection_names() {
-                let version = store.projection_version(&name)?;
-                if json {
-                    writeln!(
-                        &mut stdout,
-                        "{}",
-                        serde_json::json!({"projection": name, "version": version})
-                    )?;
-                } else {
-                    writeln!(stdout, "{} {}", name, version)?;
-                }
-            }
-        }
-        "get" => {
-            let name = parser
-                .value()
-                .map_err(|e| Error::Usage(e.to_string()))?
-                .string()
-                .map_err(|e| Error::Usage(e.to_string()))?;
-            let key = parser
-                .value()
-                .map_err(|e| Error::Usage(e.to_string()))?
-                .string()
-                .map_err(|e| Error::Usage(e.to_string()))?;
-            let value = store.get_projection(&name, key.as_bytes())?;
-            match value {
-                Some(v) => {
-                    if json {
-                        writeln!(
-                            &mut stdout,
-                            "{}",
-                            serde_json::json!({
-                                "projection": name,
-                                "key": key,
-                                "value": hex(&v),
-                            })
-                        )?;
-                    } else {
-                        stdout.write_all(&v)?;
-                        writeln!(stdout)?;
-                    }
-                }
-                None => return Err(Error::ProjectionNotFound(name)),
-            }
-        }
-        "scan" => {
-            let name = parser
-                .value()
-                .map_err(|e| Error::Usage(e.to_string()))?
-                .string()
-                .map_err(|e| Error::Usage(e.to_string()))?;
-            let prefix = parser
-                .value()
-                .ok()
-                .and_then(|v| v.string().ok())
-                .unwrap_or_default();
-            let entries = store.scan_projection_prefix(&name, prefix.as_bytes())?;
-            for entry in entries {
-                if json {
-                    let value = if show_payloads {
-                        serde_json::Value::String(hex(&entry.value))
-                    } else {
-                        serde_json::Value::Null
-                    };
-                    writeln!(
-                        &mut stdout,
-                        "{}",
-                        serde_json::json!({
-                            "projection": name,
-                            "key": String::from_utf8_lossy(&entry.key),
-                            "value": value,
-                        })
-                    )?;
-                } else {
-                    writeln!(
-                        stdout,
-                        "{} {} {}",
-                        name,
-                        bytes_repr(&entry.key, show_payloads),
-                        bytes_repr(&entry.value, show_payloads)
-                    )?;
-                }
-            }
-        }
-        _ => {
-            return Err(Error::Usage(format!(
-                "unknown projections subcommand: {sub}"
-            )))
+    for e in store.events_after(0, limit) {
+        if json {
+            writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
+        } else {
+            writeln_event(&mut stdout, &e, show_payloads)?;
         }
     }
     Ok(())
 }
 
-fn jobs(
-    parser: &mut lexopt::Parser,
+fn events_stream(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
+    stream_id: &str,
+    limit: usize,
 ) -> Result<(), Error> {
-    let mut state: Option<JobState> = None;
-    let mut queue: Option<String> = None;
-
-    while let Some(arg) = parser.next().map_err(|e| Error::Usage(e.to_string()))? {
-        match arg {
-            Short('s') | Long("state") => {
-                let value = parser.value().map_err(|e| Error::Usage(e.to_string()))?;
-                state = Some(parse_job_state(
-                    &value.string().map_err(|e| Error::Usage(e.to_string()))?,
-                )?);
-            }
-            Value(v) if queue.is_none() => {
-                queue = Some(v.string().map_err(|e| Error::Usage(e.to_string()))?);
-            }
-            _ => return Err(Error::Usage("unexpected argument".into())),
+    let store = open_store(path, durability, lock_path)?;
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    for e in store.stream_events(stream_id, 0, limit) {
+        if json {
+            writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
+        } else {
+            writeln_event(&mut stdout, &e, show_payloads)?;
         }
     }
+    Ok(())
+}
 
+fn projections_list(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+) -> Result<(), Error> {
+    let store = open_store(path, durability, lock_path)?;
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    for name in store.projection_names() {
+        let version = store.projection_version(&name)?;
+        if json {
+            writeln!(
+                &mut stdout,
+                "{}",
+                serde_json::json!({"projection": name, "version": version})
+            )?;
+        } else {
+            writeln!(stdout, "{} {}", name, version)?;
+        }
+    }
+    Ok(())
+}
+
+fn projections_get(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+    name: &str,
+    key: &str,
+) -> Result<(), Error> {
+    let store = open_store(path, durability, lock_path)?;
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    match store.get_projection(name, key.as_bytes())? {
+        Some(v) => {
+            if json {
+                writeln!(
+                    &mut stdout,
+                    "{}",
+                    serde_json::json!({
+                        "projection": name,
+                        "key": key,
+                        "value": hex(&v),
+                    })
+                )?;
+            } else {
+                stdout.write_all(&v)?;
+                writeln!(stdout)?;
+            }
+        }
+        None => return Err(Error::ProjectionNotFound(name.into())),
+    }
+    Ok(())
+}
+
+fn projections_scan(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+    show_payloads: bool,
+    name: &str,
+    prefix: Option<&str>,
+) -> Result<(), Error> {
+    let store = open_store(path, durability, lock_path)?;
+    let prefix_bytes = prefix.map(|p| p.as_bytes()).unwrap_or_default();
+    let entries = store.scan_projection_prefix(name, prefix_bytes)?;
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    for entry in entries {
+        if json {
+            let value = if show_payloads {
+                serde_json::Value::String(hex(&entry.value))
+            } else {
+                serde_json::Value::Null
+            };
+            writeln!(
+                &mut stdout,
+                "{}",
+                serde_json::json!({
+                    "projection": name,
+                    "key": String::from_utf8_lossy(&entry.key),
+                    "value": value,
+                })
+            )?;
+        } else {
+            writeln!(
+                stdout,
+                "{} {} {}",
+                name,
+                bytes_repr(&entry.key, show_payloads),
+                bytes_repr(&entry.value, show_payloads)
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn jobs_list(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+    show_payloads: bool,
+    queue: Option<&str>,
+    state: Option<JobState>,
+) -> Result<(), Error> {
     let store = open_store(path, durability, lock_path)?;
     let now_ms = current_time_ms();
-    let records = store.jobs(now_ms, queue.clone(), state);
+    let queue = queue.map(|s| s.to_string());
+    let records = store.jobs(now_ms, queue, state);
     for (job_id, spec, job_state) in records {
         let payload = if show_payloads {
             serde_json::Value::String(hex(&spec.payload))
@@ -501,8 +808,7 @@ fn export(path: &str, durability: Durability, lock_path: Option<&str>) -> Result
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    let events = store.events_after(0, usize::MAX);
-    for e in events {
+    for e in store.events_after(0, usize::MAX) {
         writeln!(
             out,
             r#"{{"type":"event","global_sequence":{},"stream_version":{},"event_id":"{}","stream_id":"{}","event_type":"{}","schema_version":{},"occurred_at_ms":{},"causation_id":"{}","correlation_id":"{}","payload":"{}","metadata":"{}"}}"#,
@@ -553,37 +859,20 @@ fn export(path: &str, durability: Durability, lock_path: Option<&str>) -> Result
 }
 
 fn backup(
-    parser: &mut lexopt::Parser,
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
     json: bool,
+    dest: &str,
 ) -> Result<(), Error> {
-    let dest = parser
-        .value()
-        .map_err(|e| Error::Usage(e.to_string()))?
-        .string()
-        .map_err(|e| Error::Usage(e.to_string()))?;
     let store = open_store(path, durability, lock_path)?;
-    store.backup(&dest)?;
+    store.backup(dest)?;
     if json {
         println!("{}", serde_json::json!({ "destination": dest }));
     } else {
         println!("backup written to {dest}");
     }
     Ok(())
-}
-
-fn next_usize(parser: &mut lexopt::Parser, default: usize) -> Result<usize, Error> {
-    match parser.value() {
-        Ok(v) => v
-            .string()
-            .map_err(|e| Error::Usage(e.to_string()))?
-            .parse()
-            .map_err(|e| Error::Usage(format!("invalid number: {e}"))),
-        Err(lexopt::Error::MissingValue { .. }) => Ok(default),
-        Err(e) => Err(Error::Usage(e.to_string())),
-    }
 }
 
 fn parse_job_state(s: &str) -> Result<JobState, Error> {

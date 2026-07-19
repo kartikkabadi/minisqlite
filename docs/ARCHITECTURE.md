@@ -34,7 +34,7 @@
 * `store` — `Store`, `StoreBuilder`, `StoreStats`.
 * `codec` — `Writer`/`Reader`, header/frame/record encoding, CRC32.
 * `storage` — `DataFile`, `Lock`, `recovery` scanner.
-* `main` — operational CLI using `lexopt`.
+* `main` — operational CLI with manual argument parsing.
 
 ## Concurrency model
 

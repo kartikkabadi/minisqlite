@@ -25,7 +25,6 @@ required-features = ["failpoint"]
 [dependencies]
 crc32fast = "1.4.2"
 fs2 = "0.4.3"
-lexopt = "0.3"
 
 [dependencies.serde]
 version = "1.0"

@@ -13,9 +13,13 @@ fn now_ms() -> i64 {
 }
 
 fn main() {
-    let tmp = std::env::temp_dir().join("synara_control_plane.mini");
-    let _ = std::fs::remove_file(&tmp);
-    let store = StoreBuilder::new(&tmp)
+    let path: std::path::PathBuf = std::env::args()
+        .nth(1)
+        .map(Into::into)
+        .unwrap_or_else(|| std::env::temp_dir().join("synara_control_plane.mini"));
+    let delete_after = std::env::args().len() < 2;
+    let _ = std::fs::remove_file(&path);
+    let store = StoreBuilder::new(&path)
         .durability(Durability::Strict)
         .open()
         .unwrap();
@@ -218,7 +222,7 @@ fn main() {
 
     // Restart the process by reopening the store.
     drop(store);
-    let store = StoreBuilder::new(&tmp)
+    let store = StoreBuilder::new(&path)
         .durability(Durability::Strict)
         .open()
         .unwrap();
@@ -275,5 +279,8 @@ fn main() {
     );
 
     println!("All Synara-shaped flows completed.");
-    let _ = std::fs::remove_file(&tmp);
+    drop(store);
+    if delete_after {
+        let _ = std::fs::remove_file(&path);
+    }
 }

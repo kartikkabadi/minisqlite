@@ -101,15 +101,15 @@ See [`examples/synara_control_plane.rs`](examples/synara_control_plane.rs) for a
 ## CLI
 
 ```bash
-minisqlite app.mini doctor
-minisqlite app.mini stats
-minisqlite app.mini events tail 50
-minisqlite app.mini events stream user:42
-minisqlite app.mini projections list
-minisqlite app.mini projections scan users
-minisqlite app.mini jobs list
-minisqlite app.mini export --format jsonl > snapshot.jsonl
-minisqlite app.mini backup app-backup.mini
+minisqlite doctor app.mini
+minisqlite stats app.mini
+minisqlite events tail app.mini 50
+minisqlite events stream app.mini user:42
+minisqlite projections list app.mini
+minisqlite projections scan app.mini users
+minisqlite jobs list app.mini
+minisqlite export app.mini --format jsonl > snapshot.jsonl
+minisqlite backup app.mini app-backup.mini
 ```
 
 ## Crash recovery guarantee
