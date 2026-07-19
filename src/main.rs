@@ -622,7 +622,8 @@ fn events_tail(
     let store = open_store(path, durability, lock_path)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    for e in store.events_after(0, limit) {
+    let start = store.high_water_sequence().saturating_sub(limit as u64);
+    for e in store.events_after(start, limit) {
         if json {
             writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
         } else {
@@ -644,7 +645,11 @@ fn events_stream(
     let store = open_store(path, durability, lock_path)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
-    for e in store.stream_events(stream_id, 0, limit) {
+    let start = store
+        .stream_version(stream_id)
+        .unwrap_or(0)
+        .saturating_sub(limit as u64);
+    for e in store.stream_events(stream_id, start, limit) {
         if json {
             writeln!(&mut stdout, "{}", event_json(&e, show_payloads))?;
         } else {
