@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Expr {
     Null,
     Boolean(bool),
@@ -85,6 +86,7 @@ pub enum BinOp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum UnaryOp {
     Neg,
     Pos,
@@ -1537,20 +1539,6 @@ fn token_to_string(t: &Token) -> String {
         Token::Keyword(s) | Token::Ident(s) | Token::String(s) | Token::Number(s) => s.clone(),
         Token::Punct(c) => c.to_string(),
     }
-}
-
-fn is_select_separator(k: &str) -> bool {
-    matches!(
-        k.to_uppercase().as_str(),
-        "FROM" | "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "OFFSET"
-    )
-}
-
-fn is_table_ref_separator(k: &str) -> bool {
-    matches!(
-        k.to_uppercase().as_str(),
-        "JOIN" | "INNER" | "LEFT" | "RIGHT" | "CROSS" | "WHERE" | "GROUP" | "ORDER" | "LIMIT" | "OFFSET" | "ON" | "," | ";"
-    )
 }
 
 static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
