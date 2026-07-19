@@ -83,7 +83,7 @@ proptest! {
         for op in ops {
             match op {
                 Op::AppendEvent { stream, payload } => {
-                    let event = Event::with_json_payload(Id::new(), &stream, "e", &payload);
+                    let event = Event::with_json_payload(Id::new(), &stream, "e", now_ms(), &payload);
                     store
                         .commit(CommitBatch::new(Id::new(), now_ms()).append_event(event))
                         .unwrap();

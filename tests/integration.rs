@@ -360,6 +360,7 @@ fn synara_shaped_flows() {
         Id::new(),
         &stream,
         "thread.created",
+        now_ms(),
         br#"{"title":"hello"}"#,
     );
     let receipt = store
@@ -378,7 +379,8 @@ fn synara_shaped_flows() {
     assert_eq!(store.stream_version(&stream), Some(1));
 
     // Flow B.
-    let requested = Event::with_json_payload(Id::new(), &stream, "thread.turn-requested", b"");
+    let requested =
+        Event::with_json_payload(Id::new(), &stream, "thread.turn-requested", now_ms(), b"");
     let job = JobSpec::new(
         Id::new(),
         "provider",
@@ -419,7 +421,8 @@ fn synara_shaped_flows() {
     assert_eq!(claimed.len(), 1);
     let token = claimed[0].lease_token;
 
-    let completed = Event::with_json_payload(Id::new(), &stream, "thread.turn-completed", b"");
+    let completed =
+        Event::with_json_payload(Id::new(), &stream, "thread.turn-completed", now_ms(), b"");
     store
         .commit(
             CommitBatch::new(Id::new(), now_ms())
@@ -470,7 +473,8 @@ fn synara_shaped_flows() {
     // Flow E.
     let loop_id = Id::new();
     let loop_stream = format!("loop:{loop_id}");
-    let iteration = Event::with_json_payload(Id::new(), &loop_stream, "loop.iteration", b"1");
+    let iteration =
+        Event::with_json_payload(Id::new(), &loop_stream, "loop.iteration", now_ms(), b"1");
     let next_job = JobSpec::new(Id::new(), "loop", loop_id.to_string(), b"next".to_vec())
         .with_not_before_ms(now_ms() + 10_000);
     let next_id = next_job.job_id;

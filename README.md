@@ -76,16 +76,22 @@ fn main() {
         .open()
         .unwrap();
 
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+
     let event = Event::with_json_payload(
         Id::new(),
         "user:42",
         "user.created",
+        now,
         br#"{"name":"Ada"}"#,
     );
 
     store
         .commit(
-            CommitBatch::new(Id::new(), 0)
+            CommitBatch::new(Id::new(), now)
                 .append_event(event)
                 .projection_put("users", 1, b"user:42".to_vec(), br#"{"name":"Ada"}"#.to_vec())
                 .enqueue_job(minisqlite::JobSpec::new(
@@ -100,10 +106,6 @@ fn main() {
     let users = store.scan_projection_prefix("users", b"").unwrap();
     println!("{:?}", users);
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as i64;
     let mut claimed = store.claim_jobs(minisqlite::ClaimRequest {
         queue: "emails".into(),
         worker_id: "worker-1".into(),

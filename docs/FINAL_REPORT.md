@@ -107,6 +107,8 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | Model-based store comparison (`tests/property.rs`) | Passed |
 | Job lifecycle property test (`tests/job_property.rs`) | Passed |
 | CLI end-to-end smoke test (`tests/cli.rs`) | Passed |
+| Projection operation tests (`tests/projection_ops.rs`) | Passed |
+| Invalid job-transition tests (`tests/invalid_job_transitions.rs`) | Passed |
 
 ## `cargo fuzz` targets
 
@@ -122,10 +124,11 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 ## Complexity
 
 * Production lines added / deleted in `src/`: approximately **+5,427 / -4,858**.
-* Public API items: approximately **68** exported types/methods (including the new `Store::close`).
+* Public API items: approximately **68** exported types/methods (including `Store::close`).
 * Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops.
 
 ## Synara-shaped demonstration
 

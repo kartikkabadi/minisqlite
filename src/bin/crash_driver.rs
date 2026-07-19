@@ -23,7 +23,7 @@ fn main() {
         .durability(Durability::Strict)
         .open()
         .unwrap();
-    let event = Event::with_json_payload(Id::new(), "stream", "init", b"{}");
+    let event = Event::with_json_payload(Id::new(), "stream", "init", now_ms(), b"{}");
     store
         .commit(
             CommitBatch::new(Id::new(), now_ms())
@@ -41,6 +41,7 @@ fn main() {
             Id::new(),
             "stream",
             "second",
+            now_ms(),
             b"{}",
         ))
         .projection_put("state", 2, b"key".to_vec(), b"second".to_vec())

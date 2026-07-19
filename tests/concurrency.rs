@@ -21,6 +21,7 @@ fn concurrent_commits_serialize() {
                 Id::new(),
                 "concurrent",
                 "e",
+                i as i64,
                 format!("{{\"i\":{i}}}").as_bytes(),
             );
             s.commit(CommitBatch::new(Id::new(), i as i64).append_event(event))
@@ -54,7 +55,7 @@ fn concurrent_stream_conflict_is_explicit() {
         senders.push(tx);
         let s = store.clone();
         handles.push(thread::spawn(move || {
-            let event = Event::with_json_payload(Id::new(), "stream", "e", b"{}");
+            let event = Event::with_json_payload(Id::new(), "stream", "e", 0, b"{}");
             let result = s.commit(
                 CommitBatch::new(Id::new(), 0)
                     .expect_stream_version("stream", 0)
@@ -92,7 +93,13 @@ fn concurrent_reads_never_observe_half_commit() {
             writer
                 .commit(
                     CommitBatch::new(Id::new(), i as i64)
-                        .append_event(Event::with_json_payload(Id::new(), "x", "e", b"{}"))
+                        .append_event(Event::with_json_payload(
+                            Id::new(),
+                            "x",
+                            "e",
+                            i as i64,
+                            b"{}",
+                        ))
                         .projection_put(
                             "p",
                             i as u64 + 1,

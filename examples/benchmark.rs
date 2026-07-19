@@ -22,7 +22,8 @@ fn main() {
 
             let start = Instant::now();
             for i in 0..n {
-                let event = Event::with_json_payload(Id::new(), "bench", "event", br#"{"i":0}"#);
+                let event =
+                    Event::with_json_payload(Id::new(), "bench", "event", i as i64, br#"{"i":0}"#);
                 store
                     .commit(CommitBatch::new(Id::new(), i as i64).append_event(event))
                     .unwrap();

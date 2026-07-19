@@ -42,11 +42,12 @@ impl Event {
         }
     }
 
-    /// Helper for tests and examples that want a small JSON-ish payload.
+    /// Helper for a small JSON-ish payload with caller-supplied wall-clock time.
     pub fn with_json_payload(
         event_id: Id,
         stream_id: impl Into<String>,
         event_type: impl Into<String>,
+        occurred_at_ms: i64,
         payload: &[u8],
     ) -> Self {
         Self::new(
@@ -54,7 +55,7 @@ impl Event {
             stream_id,
             event_type,
             1,
-            0,
+            occurred_at_ms,
             None,
             None,
             payload,

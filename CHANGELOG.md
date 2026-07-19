@@ -11,6 +11,9 @@
 - Operational CLI: `doctor`, `verify`, `stats`, `events`, `projections`, `jobs`, `export`, `backup`.
 - `examples/synara_control_plane.rs` demonstrating the six required Synara-shaped flows.
 - New documentation in `docs/` and an updated `README.md`.
+- Added `tests/invalid_job_transitions.rs` and `tests/projection_ops.rs`.
+- `Event::with_json_payload` now requires caller-supplied `occurred_at_ms`; no hidden clock.
+- `Store` flushes on `Drop`; removed dead `JobInternalState::Uncertain` variant; optimized projection replace no-op detection.
 
 ## 0.2.1
 

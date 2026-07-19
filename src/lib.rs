@@ -20,13 +20,15 @@
 //!     .unwrap();
 //!
 //! let tx = minisqlite::Id::new();
+//! let now = 0; // caller-supplied wall-clock millis
 //! let event = Event::with_json_payload(
 //!     minisqlite::Id::new(),
 //!     "thread:abc",
 //!     "thread.created",
+//!     now,
 //!     b"{}",
 //! );
-//! store.commit(CommitBatch::new(tx, 0).append_event(event)).unwrap();
+//! store.commit(CommitBatch::new(tx, now).append_event(event)).unwrap();
 //! ```
 
 /// Internal codec implementation. Not part of the stable public API.

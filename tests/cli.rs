@@ -34,7 +34,7 @@ fn cli_verify_and_doctor_succeed() {
         .durability(Durability::Memory)
         .open()
         .unwrap();
-    let event = Event::with_json_payload(Id::new(), "thread:abc", "thread.created", b"{}");
+    let event = Event::with_json_payload(Id::new(), "thread:abc", "thread.created", 0, b"{}");
     store
         .commit(CommitBatch::new(Id::new(), 0).append_event(event))
         .unwrap();

@@ -471,6 +471,12 @@ impl Store {
     }
 }
 
+impl Drop for Store {
+    fn drop(&mut self) {
+        let _ = self.inner.lock().map(|mut g| g.data_file.sync());
+    }
+}
+
 impl StoreInner {
     fn replay_frame(&mut self, frame: &Frame, frame_offset: u64) -> Result<(), Error> {
         if frame.header.transaction_sequence != self.transaction_seq + 1 {
@@ -977,12 +983,12 @@ impl StoreInner {
             Op::ProjectionDelete { key, .. } => state.data.contains_key(key),
             Op::ProjectionClear { .. } => !state.data.is_empty(),
             Op::ProjectionReplace { entries, .. } => {
-                let mut expected = state.data.clone();
-                expected.clear();
-                for ProjectionEntry { key, value } in entries {
-                    expected.insert(key.clone(), value.clone());
+                if entries.len() != state.data.len() {
+                    return true;
                 }
-                expected != state.data
+                entries.iter().any(|ProjectionEntry { key, value }| {
+                    state.data.get(key).map_or(true, |v| v != value)
+                })
             }
             _ => false,
         }

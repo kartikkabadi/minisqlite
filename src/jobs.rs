@@ -182,7 +182,6 @@ impl JobStateRecord {
             JobInternalState::Succeeded => JobState::Succeeded,
             JobInternalState::Dead => JobState::Dead,
             JobInternalState::Cancelled => JobState::Cancelled,
-            JobInternalState::Uncertain => JobState::Uncertain,
         }
     }
 
@@ -194,10 +193,9 @@ impl JobStateRecord {
     }
 
     pub fn is_uncertain_at(&self, now_ms: i64) -> bool {
-        self.state == JobInternalState::Uncertain
-            || (matches!(self.state, JobInternalState::Leased)
-                && now_ms >= self.lease_expires_at_ms
-                && self.spec.effect_mode == EffectMode::UncertainOnLeaseExpiry)
+        matches!(self.state, JobInternalState::Leased)
+            && now_ms >= self.lease_expires_at_ms
+            && self.spec.effect_mode == EffectMode::UncertainOnLeaseExpiry
     }
 
     pub fn is_ready_at(&self, now_ms: i64) -> bool {
@@ -228,7 +226,6 @@ pub(crate) enum JobInternalState {
     Succeeded,
     Dead,
     Cancelled,
-    Uncertain,
 }
 
 #[cfg(test)]
