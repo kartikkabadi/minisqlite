@@ -30,7 +30,11 @@
 - Recovery replay now fails closed when a committed job record references a missing job, has a stale lease token, or has an inconsistent terminal flag.
 - Refactored projection operations (`put`, `delete`, `clear`, `replace`, prefix/range scans) into `ProjectionState` methods so `store.rs` no longer duplicates the BTreeMap logic.
 - Removed the `projections get` CLI subcommand; the spec only requires `projections list/scan`, and `Store::get_projection` is still available in the library.
-- Updated `docs/FORMAT.md` and `docs/FINAL_REPORT.md` to describe `TransactionMeta`.
+- `claim_jobs` now enforces partition ordering by claiming at most one ready job per partition per call.
+- `Record::JobFail` now stores and validates the attempt count on disk.
+- `Store::backup` fsyncs the destination parent directory on Unix after the atomic rename.
+- Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
+- Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
 
 ## 0.2.1
 
