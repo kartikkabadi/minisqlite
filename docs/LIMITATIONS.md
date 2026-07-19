@@ -5,6 +5,12 @@
 `v0.3.0-alpha.1` is a correctness-focused rewrite. The public API and file format may change.
 Do not use it for production data you cannot afford to lose.
 
+## Time semantics
+
+`now_ms` is caller-supplied wall-clock time. Lease expiry, `not_before_ms`, and commit
+timestamps are interpreted relative to that value. Large clock jumps or divergent callers
+can change job visibility or lease timing. The engine does not provide a distributed clock.
+
 ## Concurrency
 
 * Single process owns the store.

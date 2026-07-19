@@ -67,3 +67,9 @@ store.resolve_uncertain_job(job_id, Resolution::Retry, now_ms)?;
 ```
 
 This matches the reality that some external effects cannot be safely repeated without human or system confirmation.
+
+## Timestamps
+
+Job `not_before_ms` and lease-expiry timestamps use the caller-supplied wall-clock `now_ms`.
+Large clock jumps can make a job claimable earlier or later than intended. The engine does not
+implement a distributed clock; it trusts the `now_ms` value it receives.
