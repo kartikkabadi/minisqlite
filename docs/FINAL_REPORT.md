@@ -153,4 +153,4 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 
 ## Next evidence-producing step
 
-Run `cargo fuzz` harnesses for header/frame/record decoding and recovery scanning on representative inputs to catch decoder edge cases that the proptests and crash matrix do not cover.
+Run each `cargo fuzz` target for a longer duration (e.g., one hour per target) and add a nightly CI job that exercises them, to catch decoder edge cases that the proptests and crash matrix do not cover.
