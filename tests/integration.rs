@@ -669,3 +669,56 @@ fn claimed_job_includes_worker_id() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn transaction_correlation_id_and_metadata_roundtrip() {
+    let path = tmp_path("tx_meta.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let correlation = Id::new();
+    let metadata = b"causal context".to_vec();
+    let tx = Id::new();
+    let event = Event::new(
+        Id::new(),
+        "tx-meta",
+        "meta.test",
+        1,
+        now_ms(),
+        None,
+        None,
+        b"{}",
+        b"",
+    );
+    let receipt = store
+        .commit(
+            CommitBatch::new(tx, now_ms())
+                .with_correlation_id(correlation)
+                .with_metadata(metadata.clone())
+                .append_event(event),
+        )
+        .unwrap();
+
+    assert_eq!(receipt.correlation_id, Some(correlation));
+    assert_eq!(receipt.metadata, metadata);
+
+    let fetched = store.get_transaction(tx).unwrap();
+    assert_eq!(fetched.correlation_id, Some(correlation));
+    assert_eq!(fetched.metadata, metadata);
+
+    drop(store);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    let fetched = store.get_transaction(tx).unwrap();
+    assert_eq!(fetched.correlation_id, Some(correlation));
+    assert_eq!(fetched.metadata, metadata);
+
+    let _ = std::fs::remove_file(&path);
+}
