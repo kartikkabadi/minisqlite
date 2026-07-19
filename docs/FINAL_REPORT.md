@@ -106,6 +106,7 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | Recovery scanning with random trailing bytes (`storage::recovery` proptest) | Passed |
 | Model-based store comparison (`tests/property.rs`) | Passed |
 | Job lifecycle property test (`tests/job_property.rs`) | Passed |
+| CLI end-to-end smoke test (`tests/cli.rs`) | Passed |
 
 ## `cargo fuzz` targets
 
@@ -121,7 +122,7 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 ## Complexity
 
 * Production lines added / deleted in `src/`: approximately **+5,427 / -4,858**.
-* Public API items: approximately **66** exported types/methods.
+* Public API items: approximately **68** exported types/methods (including the new `Store::close`).
 * Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
