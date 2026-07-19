@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 
 [dependencies.minisqlite]
 path = ".."
+features = ["fuzzing"]
 
 [[bin]]
 name = "header_decode"

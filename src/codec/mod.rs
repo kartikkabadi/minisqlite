@@ -68,6 +68,8 @@ impl Writer {
         self.bytes.len()
     }
 
+    // `is_empty` is only required to satisfy `len_without_is_empty` when `Writer` is public.
+    #[cfg(feature = "fuzzing")]
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }

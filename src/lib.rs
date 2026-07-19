@@ -30,11 +30,18 @@
 //! ```
 
 /// Internal codec implementation. Not part of the stable public API.
+#[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod codec;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod codec;
+
 /// Internal storage implementation. Not part of the stable public API.
+#[cfg(feature = "fuzzing")]
 #[doc(hidden)]
 pub mod storage;
+#[cfg(not(feature = "fuzzing"))]
+pub(crate) mod storage;
 
 pub mod config;
 pub mod error;

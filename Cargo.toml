@@ -45,3 +45,5 @@ default = ["json"]
 json = ["serde", "dep:serde_json"]
 serde = ["dep:serde"]
 failpoint = []
+# Internal feature used only by the cargo-fuzz harnesses in fuzz/.
+fuzzing = []
