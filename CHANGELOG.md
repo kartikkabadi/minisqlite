@@ -29,6 +29,7 @@
 - Refactored job state transitions into `JobStateRecord` methods (`lease`, `acknowledge`, `fail`, `cancel`, `resolve`) so validation, record encoding, and recovery replay all share one state machine.
 - Recovery replay now fails closed when a committed job record references a missing job, has a stale lease token, or has an inconsistent terminal flag.
 - Refactored projection operations (`put`, `delete`, `clear`, `replace`, prefix/range scans) into `ProjectionState` methods so `store.rs` no longer duplicates the BTreeMap logic.
+- Removed the `projections get` CLI subcommand; the spec only requires `projections list/scan`, and `Store::get_projection` is still available in the library.
 - Updated `docs/FORMAT.md` and `docs/FINAL_REPORT.md` to describe `TransactionMeta`.
 
 ## 0.2.1
