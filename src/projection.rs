@@ -52,7 +52,7 @@ impl ProjectionState {
     }
 
     pub fn put_changes(&self, key: &[u8], value: &[u8]) -> bool {
-        self.data.get(key).map_or(true, |v| v.as_slice() != value)
+        self.data.get(key).is_none_or(|v| v.as_slice() != value)
     }
 
     pub fn delete_changes(&self, key: &[u8]) -> bool {
@@ -70,7 +70,7 @@ impl ProjectionState {
         entries.iter().any(|e| {
             self.data
                 .get(&e.key)
-                .map_or(true, |dv| dv.as_slice() != e.value.as_slice())
+                .is_none_or(|dv| dv.as_slice() != e.value.as_slice())
         })
     }
 

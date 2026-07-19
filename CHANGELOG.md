@@ -28,6 +28,7 @@
 - Added `tests/integration.rs` round-trip test for transaction-level metadata.
 - Refactored job state transitions into `JobStateRecord` methods (`lease`, `acknowledge`, `fail`, `cancel`, `resolve`) so validation, record encoding, and recovery replay all share one state machine.
 - Recovery replay now fails closed when a committed job record references a missing job, has a stale lease token, or has an inconsistent terminal flag.
+- Refactored projection operations (`put`, `delete`, `clear`, `replace`, prefix/range scans) into `ProjectionState` methods so `store.rs` no longer duplicates the BTreeMap logic.
 - Updated `docs/FORMAT.md` and `docs/FINAL_REPORT.md` to describe `TransactionMeta`.
 
 ## 0.2.1
