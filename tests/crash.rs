@@ -149,6 +149,10 @@ fn assert_first_commit_only(path: &std::path::Path) {
         .durability(Durability::Memory)
         .open()
         .unwrap();
+    assert!(
+        !store.is_poisoned(),
+        "store must not be poisoned after reopen"
+    );
     assert_eq!(store.high_water_sequence(), 1);
     assert_eq!(store.stream_version("stream"), Some(1));
     assert_eq!(
