@@ -26,6 +26,14 @@ impl Lock {
             .create(true)
             .truncate(false)
             .open(&path)?;
+
+        #[cfg(unix)]
+        {
+            use std::fs::set_permissions;
+            use std::os::unix::fs::PermissionsExt;
+            let _ = set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
+
         match file.try_lock_exclusive() {
             Ok(()) => Ok(Self { file }),
             Err(e) => {
