@@ -758,6 +758,9 @@ impl StoreInner {
                         }
                     }
                 }
+                Record::TransactionMeta { .. } => {
+                    // Transaction metadata is a framing record; it does not affect state.
+                }
             }
         }
         Ok(())
@@ -791,6 +794,13 @@ impl StoreInner {
         self.validate_job_ops(&batch)?;
 
         let records = self.ops_to_records(&batch)?;
+        if records.len() > self.limits.max_records_per_transaction {
+            return Err(Error::Validation(format!(
+                "too many records: {} > {}",
+                records.len(),
+                self.limits.max_records_per_transaction
+            )));
+        }
         let payload_bytes = encode_records(&records);
 
         if payload_bytes.len()
@@ -894,6 +904,7 @@ impl StoreInner {
     }
 
     fn validate_batch(&self, batch: &CommitBatch) -> Result<(), Error> {
+        self.limits.validate_metadata(batch.metadata.len())?;
         if batch.ops.len() > self.limits.max_records_per_transaction {
             return Err(Error::Validation(format!(
                 "too many records: {} > {}",
@@ -1176,7 +1187,13 @@ impl StoreInner {
     }
 
     fn ops_to_records(&self, batch: &CommitBatch) -> Result<Vec<Record>, Error> {
-        let mut records = Vec::with_capacity(batch.ops.len());
+        let mut records = Vec::with_capacity(batch.ops.len() + 1);
+        if batch.correlation_id.is_some() || !batch.metadata.is_empty() {
+            records.push(Record::TransactionMeta {
+                correlation_id: batch.correlation_id,
+                metadata: batch.metadata.clone(),
+            });
+        }
         let mut next_global_seq = self.high_water_sequence + 1;
         let mut per_stream_next_version: HashMap<String, u64> = HashMap::new();
 
@@ -1551,6 +1568,13 @@ fn build_receipt(
     transaction_sequence: u64,
     frame_offset: u64,
 ) -> CommitReceipt {
+    let (correlation_id, metadata) = records.first().map_or((None, Vec::new()), |r| match r {
+        Record::TransactionMeta {
+            correlation_id,
+            metadata,
+        } => (*correlation_id, metadata.clone()),
+        _ => (None, Vec::new()),
+    });
     let mut first_event_sequence: Option<u64> = None;
     let mut last_event_sequence: Option<u64> = None;
     let mut stream_versions: Vec<StreamVersion> = Vec::new();
@@ -1578,6 +1602,8 @@ fn build_receipt(
     CommitReceipt {
         transaction_id,
         transaction_sequence,
+        correlation_id,
+        metadata,
         first_event_sequence,
         last_event_sequence,
         stream_versions,

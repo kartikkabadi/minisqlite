@@ -14,6 +14,7 @@ pub const JOB_ACK: u8 = 0x22;
 pub const JOB_FAIL: u8 = 0x23;
 pub const JOB_CANCEL: u8 = 0x24;
 pub const JOB_RESOLVE: u8 = 0x25;
+pub const TRANSACTION_META: u8 = 0x30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
@@ -94,6 +95,10 @@ pub enum Record {
         job_id: Id,
         resolution: Resolution,
         resolved_at_ms: i64,
+    },
+    TransactionMeta {
+        correlation_id: Option<Id>,
+        metadata: Vec<u8>,
     },
 }
 
@@ -261,6 +266,13 @@ impl Record {
                 body.write_u8(resolution.to_u8());
                 body.write_i64(*resolved_at_ms);
             }
+            Record::TransactionMeta {
+                correlation_id,
+                metadata,
+            } => {
+                body.write_optional_id(*correlation_id);
+                body.write_bytes(metadata);
+            }
         }
 
         let mut out = Writer::with_capacity(1 + 1 + 1 + 4 + body.len());
@@ -285,6 +297,7 @@ impl Record {
             Record::JobFail { .. } => JOB_FAIL,
             Record::JobCancel { .. } => JOB_CANCEL,
             Record::JobResolve { .. } => JOB_RESOLVE,
+            Record::TransactionMeta { .. } => TRANSACTION_META,
         }
     }
 
@@ -387,6 +400,10 @@ impl Record {
                 job_id: r.read_id()?,
                 resolution: Resolution::from_u8(r.read_u8()?)?,
                 resolved_at_ms: r.read_i64()?,
+            },
+            TRANSACTION_META => Record::TransactionMeta {
+                correlation_id: r.read_optional_id()?,
+                metadata: r.read_bytes()?,
             },
             _ => {
                 return Err(Error::Corruption {

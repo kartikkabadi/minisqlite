@@ -16,6 +16,8 @@ use crate::Error;
 pub struct CommitBatch {
     pub(crate) transaction_id: Id,
     pub(crate) now_ms: i64,
+    pub(crate) correlation_id: Option<Id>,
+    pub(crate) metadata: Vec<u8>,
     pub(crate) expected_stream_versions: Vec<(String, u64)>,
     pub(crate) ops: VecDeque<Op>,
 }
@@ -78,6 +80,8 @@ pub(crate) enum Op {
 pub struct CommitReceipt {
     pub transaction_id: Id,
     pub transaction_sequence: u64,
+    pub correlation_id: Option<Id>,
+    pub metadata: Vec<u8>,
     pub first_event_sequence: Option<u64>,
     pub last_event_sequence: Option<u64>,
     pub stream_versions: Vec<StreamVersion>,
@@ -91,9 +95,23 @@ impl CommitBatch {
         Self {
             transaction_id,
             now_ms,
+            correlation_id: None,
+            metadata: Vec::new(),
             expected_stream_versions: Vec::new(),
             ops: VecDeque::new(),
         }
+    }
+
+    /// Attach an optional correlation id to the transaction.
+    pub fn with_correlation_id(mut self, correlation_id: Id) -> Self {
+        self.correlation_id = Some(correlation_id);
+        self
+    }
+
+    /// Attach optional opaque metadata to the transaction.
+    pub fn with_metadata(mut self, metadata: Vec<u8>) -> Self {
+        self.metadata = metadata;
+        self
     }
 
     /// Require that `stream_id` is currently at `version` before this commit succeeds.
@@ -248,7 +266,10 @@ impl CommitBatch {
     /// The timestamp is an application-supplied wall-clock value; expected versions are
     /// preconditions, not durable content.
     pub(crate) fn logical_eq(&self, other: &CommitBatch) -> bool {
-        self.transaction_id == other.transaction_id && self.ops == other.ops
+        self.transaction_id == other.transaction_id
+            && self.correlation_id == other.correlation_id
+            && self.metadata == other.metadata
+            && self.ops == other.ops
     }
 
     /// Reconstruct a `CommitBatch` from the durable records of a committed frame.
@@ -259,13 +280,30 @@ impl CommitBatch {
         now_ms: i64,
         records: Vec<Record>,
     ) -> Result<Self, Error> {
+        let mut correlation_id = None;
+        let mut metadata = Vec::new();
         let mut ops = VecDeque::with_capacity(records.len());
+        let mut first = true;
         for record in records {
+            if first {
+                first = false;
+                if let Record::TransactionMeta {
+                    correlation_id: cid,
+                    metadata: md,
+                } = record
+                {
+                    correlation_id = cid;
+                    metadata = md;
+                    continue;
+                }
+            }
             ops.push_back(op_from_record(record, now_ms)?);
         }
         Ok(Self {
             transaction_id,
             now_ms,
+            correlation_id,
+            metadata,
             expected_stream_versions: Vec::new(),
             ops,
         })
@@ -413,6 +451,10 @@ fn op_from_record(record: Record, now_ms: i64) -> Result<Op, Error> {
         } => Ok(Op::ResolveJob {
             job_id,
             resolution: resolution_from_record(resolution),
+        }),
+        Record::TransactionMeta { .. } => Err(Error::Corruption {
+            message: "transaction meta record must be the first record in a frame".into(),
+            offset: 0,
         }),
     }
 }
