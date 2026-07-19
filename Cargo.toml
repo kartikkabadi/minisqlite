@@ -7,6 +7,8 @@ description = "A minimal, from-scratch SQLite-like relational database engine in
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/kartikkabadi/minisqlite"
+homepage = "https://github.com/kartikkabadi/minisqlite"
+documentation = "https://docs.rs/minisqlite"
 keywords = ["sqlite", "database", "embedded", "sql", "rust"]
 categories = ["database-implementations"]
 
