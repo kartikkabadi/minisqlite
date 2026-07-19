@@ -83,7 +83,8 @@ pub struct PersistedEvent {
     pub stream_version: u64,
     pub event: Event,
     /// File offset of the transaction frame containing this event.
-    pub frame_offset: u64,
+    /// Internal to the kernel; not exposed to callers.
+    pub(crate) frame_offset: u64,
 }
 
 /// The current version of a stream.

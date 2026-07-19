@@ -909,7 +909,6 @@ fn event_json(e: &minisqlite::PersistedEvent, show_payloads: bool) -> String {
         "global_sequence": e.global_sequence,
         "stream_version": e.stream_version,
         "transaction_id": e.transaction_id.to_hex(),
-        "frame_offset": e.frame_offset,
         "event": {
             "event_id": e.event.event_id.to_hex(),
             "stream_id": e.event.stream_id,
