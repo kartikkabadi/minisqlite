@@ -36,7 +36,11 @@ fn cli_verify_and_doctor_succeed() {
         .unwrap();
     let event = Event::with_json_payload(Id::new(), "thread:abc", "thread.created", 0, b"{}");
     store
-        .commit(CommitBatch::new(Id::new(), 0).append_event(event))
+        .commit(
+            CommitBatch::new(Id::new(), 0)
+                .append_event(event)
+                .projection_put("threads", 1, b"thread-1".to_vec(), b"hello".to_vec()),
+        )
         .unwrap();
     drop(store);
 
@@ -50,6 +54,32 @@ fn cli_verify_and_doctor_succeed() {
     let (out, status) = run(&[path.to_str().unwrap(), "stats", "--json"]);
     assert!(status.success());
     assert!(out.contains("\"event_count\":"));
+
+    let (out, status) = run(&[path.to_str().unwrap(), "projections", "list"]);
+    assert!(status.success());
+    assert!(out.contains("threads"));
+
+    let (out, status) = run(&[
+        path.to_str().unwrap(),
+        "projections",
+        "get",
+        "threads",
+        "thread-1",
+    ]);
+    assert!(status.success());
+    assert!(out.contains("hello"));
+
+    let (out, status) = run(&[
+        path.to_str().unwrap(),
+        "--json",
+        "projections",
+        "scan",
+        "threads",
+        "--prefix",
+        "thread-",
+    ]);
+    assert!(status.success());
+    assert!(out.contains("thread-1"));
 
     let (out, status) = run(&[path.to_str().unwrap(), "events", "tail", "1"]);
     assert!(status.success());

@@ -14,9 +14,9 @@ can change job visibility or lease timing. The engine does not provide a distrib
 ## Concurrency
 
 * Single process owns the store.
-* Writes are serialized through an in-process mutex.
+* Writes are serialized through an in-process `RwLock`.
 * There is no multi-process writer support.
-* Readers are in-process and take short locks.
+* Readers are in-process and take short read locks.
 
 ## Durability
 
