@@ -82,6 +82,7 @@ pub enum Record {
         job_id: Id,
         lease_token: Id,
         error_summary: String,
+        attempt: u32,
         retry_after_ms: i64,
         terminal: bool,
         failed_at_ms: i64,
@@ -237,6 +238,7 @@ impl Record {
                 job_id,
                 lease_token,
                 error_summary,
+                attempt,
                 retry_after_ms,
                 terminal,
                 failed_at_ms,
@@ -244,6 +246,7 @@ impl Record {
                 body.write_id(*job_id);
                 body.write_id(*lease_token);
                 body.write_string(error_summary);
+                body.write_u32(*attempt);
                 body.write_i64(*retry_after_ms);
                 body.write_u8(*terminal as u8);
                 body.write_i64(*failed_at_ms);
@@ -387,6 +390,7 @@ impl Record {
                 job_id: r.read_id()?,
                 lease_token: r.read_id()?,
                 error_summary: r.read_string()?,
+                attempt: r.read_u32()?,
                 retry_after_ms: r.read_i64()?,
                 terminal: r.read_u8()? != 0,
                 failed_at_ms: r.read_i64()?,

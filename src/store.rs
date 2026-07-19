@@ -702,6 +702,7 @@ impl StoreInner {
                     job_id,
                     lease_token,
                     error_summary,
+                    attempt,
                     retry_after_ms,
                     terminal,
                     failed_at_ms,
@@ -712,6 +713,12 @@ impl StoreInner {
                             frame_offset,
                         )
                     })?;
+                    if job.attempt != *attempt {
+                        return Err(Self::corruption(
+                            format!("JobFail attempt mismatch for {job_id}"),
+                            frame_offset,
+                        ));
+                    }
                     job.fail(
                         *failed_at_ms,
                         *lease_token,
@@ -1296,6 +1303,7 @@ impl StoreInner {
                         job_id: *job_id,
                         lease_token: *lease_token,
                         error_summary: error_summary.clone(),
+                        attempt: job.attempt,
                         retry_after_ms: retry_after,
                         terminal,
                         failed_at_ms: batch.now_ms,
