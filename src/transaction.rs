@@ -187,6 +187,8 @@ impl CommitBatch {
     }
 
     /// Record a job failure. The store will decide retry or dead based on `max_attempts`.
+    /// `retry_after_ms` defaults to `now_ms + 1000`; an explicit value equal to the default is
+    /// normalized so the on-disk record round-trips cleanly.
     pub fn fail_job(
         mut self,
         job_id: Id,
@@ -194,6 +196,11 @@ impl CommitBatch {
         error_summary: impl Into<String>,
         retry_after_ms: Option<i64>,
     ) -> Self {
+        let default_retry = self.now_ms + 1000;
+        let retry_after_ms = match retry_after_ms {
+            Some(v) if v == default_retry => None,
+            other => other,
+        };
         self.ops.push_back(Op::FailJob {
             job_id,
             lease_token,
@@ -376,13 +383,12 @@ fn op_from_record(record: Record, now_ms: i64) -> Result<Op, Error> {
             lease_token,
             error_summary,
             retry_after_ms: record_retry,
-            terminal,
             ..
         } => {
-            // The original `Op::FailJob` stored an optional `retry_after_ms`. The record stores
-            // a concrete value: `now_ms + 1000` for non-terminal failures with no explicit retry
-            // time, and `0` for terminal ones. Reconstruct the option so logical equality round-trips.
-            let retry_after_ms = if terminal || record_retry == now_ms + 1000 {
+            // The on-disk record stores the effective retry time. The public `Op::FailJob` uses
+            // `None` to mean "default to now_ms + 1000"; normalize that case here so idempotent
+            // re-commits with the same transaction id compare equal.
+            let retry_after_ms = if record_retry == now_ms + 1000 {
                 None
             } else {
                 Some(record_retry)

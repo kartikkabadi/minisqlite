@@ -367,23 +367,34 @@ impl Store {
             .values()
             .filter(|j| queue.as_ref().map(|q| &j.spec.queue == q).unwrap_or(true))
             .filter(|j| state.map(|s| j.state_at(now_ms) == s).unwrap_or(true))
-            .map(|j| JobInfo {
-                job_id: j.spec.job_id,
-                spec: j.spec.clone(),
-                state: j.state_at(now_ms),
-                attempt: j.attempt,
-                lease_expires_at_ms: if j.lease_expires_at_ms > 0 {
-                    Some(j.lease_expires_at_ms)
-                } else {
-                    None
-                },
-                worker_id: j.worker_id.clone(),
-                retry_after_ms: if j.retry_after_ms > 0 {
-                    Some(j.retry_after_ms)
-                } else {
-                    None
-                },
-                terminal_at_ms: j.terminal_at_ms,
+            .map(|j| {
+                let state = j.state_at(now_ms);
+                let is_terminal = matches!(
+                    state,
+                    JobState::Succeeded | JobState::Dead | JobState::Cancelled
+                );
+                JobInfo {
+                    job_id: j.spec.job_id,
+                    spec: j.spec.clone(),
+                    state,
+                    attempt: j.attempt,
+                    lease_expires_at_ms: if is_terminal || j.lease_expires_at_ms == 0 {
+                        None
+                    } else {
+                        Some(j.lease_expires_at_ms)
+                    },
+                    worker_id: if is_terminal {
+                        None
+                    } else {
+                        j.worker_id.clone()
+                    },
+                    retry_after_ms: if is_terminal || j.retry_after_ms == 0 {
+                        None
+                    } else {
+                        Some(j.retry_after_ms)
+                    },
+                    terminal_at_ms: j.terminal_at_ms,
+                }
             })
             .collect()
     }
@@ -919,6 +930,11 @@ impl StoreInner {
                     }
                 }
                 Op::EnqueueJob(job) => {
+                    if job.max_attempts == 0 {
+                        return Err(Error::Validation(
+                            "max_attempts must be greater than 0".into(),
+                        ));
+                    }
                     self.limits.validate_job_payload(job.payload.len())?;
                     self.limits.validate_string("queue", &job.queue)?;
                     self.limits.validate_string("partition", &job.partition)?;
@@ -1315,11 +1331,7 @@ impl StoreInner {
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
                     let terminal = job.attempt >= job.spec.max_attempts;
-                    let retry_after = if terminal {
-                        0
-                    } else {
-                        retry_after_ms.unwrap_or(batch.now_ms + 1000)
-                    };
+                    let retry_after = retry_after_ms.unwrap_or(batch.now_ms + 1000);
                     if terminal {
                         job.state = JobInternalState::Dead;
                         job.terminal_at_ms = Some(batch.now_ms);

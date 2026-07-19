@@ -21,6 +21,9 @@
 - `ops_to_records` now simulates job-state transitions within a batch so `LeaseJob` followed by `FailJob` in one atomic commit uses the updated attempt count.
 - `Store::jobs` now returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, and `terminal_at_ms`.
 - CLI `jobs list` and `export` include the new `JobInfo` fields.
+- `fail_job` normalizes an explicit retry time equal to the default (`now_ms + 1000`) and stores the effective retry time on disk, so idempotent re-commits round-trip.
+- `JobInfo` omits `worker_id`, `lease_expires_at_ms`, and `retry_after_ms` for terminal jobs.
+- `max_attempts == 0` is rejected at validation time.
 
 ## 0.2.1
 
