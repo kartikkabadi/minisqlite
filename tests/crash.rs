@@ -1,3 +1,5 @@
+#![cfg(feature = "failpoint")]
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
