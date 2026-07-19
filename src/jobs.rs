@@ -99,6 +99,20 @@ pub struct ClaimRequest {
     pub limit: usize,
 }
 
+/// A snapshot of a job record as of a point in time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct JobInfo {
+    pub job_id: Id,
+    pub spec: JobSpec,
+    pub state: JobState,
+    pub attempt: u32,
+    pub lease_expires_at_ms: Option<i64>,
+    pub worker_id: Option<String>,
+    pub retry_after_ms: Option<i64>,
+    pub terminal_at_ms: Option<i64>,
+}
+
 /// A job claimed by a worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

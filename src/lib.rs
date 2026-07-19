@@ -58,7 +58,7 @@ pub use config::{Durability, EffectMode, Limits};
 pub use error::Error;
 pub use event::{Event, PersistedEvent, StreamVersion};
 pub use id::{Id, InvalidId};
-pub use jobs::{ClaimRequest, ClaimedJob, JobSpec, JobState, Resolution};
+pub use jobs::{ClaimRequest, ClaimedJob, JobInfo, JobSpec, JobState, Resolution};
 pub use projection::ProjectionEntry;
 pub use store::{Store, StoreBuilder, StoreStats};
 pub use transaction::{CommitBatch, CommitReceipt};

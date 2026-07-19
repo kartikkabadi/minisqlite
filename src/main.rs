@@ -772,9 +772,9 @@ fn jobs_list(
     let now_ms = current_time_ms();
     let queue = queue.map(|s| s.to_string());
     let records = store.jobs(now_ms, queue, state);
-    for (job_id, spec, job_state) in records {
+    for info in records {
         let payload = if show_payloads {
-            serde_json::Value::String(hex(&spec.payload))
+            serde_json::Value::String(hex(&info.spec.payload))
         } else {
             serde_json::Value::Null
         };
@@ -782,26 +782,39 @@ fn jobs_list(
             println!(
                 "{}",
                 serde_json::json!({
-                    "job_id": job_id.to_hex(),
-                    "state": job_state_str(job_state),
-                    "queue": spec.queue,
-                    "partition": spec.partition,
+                    "job_id": info.job_id.to_hex(),
+                    "state": job_state_str(info.state),
+                    "queue": info.spec.queue,
+                    "partition": info.spec.partition,
                     "payload": payload,
-                    "max_attempts": spec.max_attempts,
-                    "effect_mode": effect_mode_str(spec.effect_mode),
-                    "not_before_ms": spec.not_before_ms,
-                    "idempotency_key": spec.idempotency_key,
+                    "attempt": info.attempt,
+                    "max_attempts": info.spec.max_attempts,
+                    "effect_mode": effect_mode_str(info.spec.effect_mode),
+                    "not_before_ms": info.spec.not_before_ms,
+                    "idempotency_key": info.spec.idempotency_key,
+                    "worker_id": info.worker_id,
+                    "lease_expires_at_ms": info.lease_expires_at_ms,
+                    "retry_after_ms": info.retry_after_ms,
+                    "terminal_at_ms": info.terminal_at_ms,
                 })
             );
         } else {
             println!(
-                "{} {:?} {} {} {}",
-                job_id,
-                job_state,
-                spec.queue,
-                spec.partition,
-                bytes_repr(&spec.payload, show_payloads)
+                "{} {:?} {} {} {} {} {} {:?} {:?}",
+                info.job_id,
+                info.state,
+                info.spec.queue,
+                info.spec.partition,
+                info.attempt,
+                info.worker_id.as_deref().unwrap_or("-"),
+                info.lease_expires_at_ms
+                    .map_or_else(|| "-".to_string(), |v| v.to_string()),
+                info.retry_after_ms,
+                info.terminal_at_ms,
             );
+            if show_payloads {
+                println!("    {}", bytes_repr(&info.spec.payload, true));
+            }
         }
     }
     Ok(())
@@ -846,17 +859,25 @@ fn export(path: &str, durability: Durability, lock_path: Option<&str>) -> Result
         }
     }
 
-    for (job_id, spec, state) in store.jobs(now_ms, None, None) {
+    for info in store.jobs(now_ms, None, None) {
         writeln!(
             out,
-            r#"{{"type":"job","job_id":"{}","state":"{:?}","queue":"{}","partition":"{}","payload":"{}","max_attempts":{},"effect_mode":"{:?}"}}"#,
-            job_id,
-            state,
-            json_escape(&spec.queue),
-            json_escape(&spec.partition),
-            hex(&spec.payload),
-            spec.max_attempts,
-            spec.effect_mode
+            r#"{{"type":"job","job_id":"{}","state":"{:?}","queue":"{}","partition":"{}","payload":"{}","attempt":{},"max_attempts":{},"effect_mode":"{:?}","worker_id":"{}","lease_expires_at_ms":{},"retry_after_ms":{},"terminal_at_ms":{}}}"#,
+            info.job_id,
+            info.state,
+            json_escape(&info.spec.queue),
+            json_escape(&info.spec.partition),
+            hex(&info.spec.payload),
+            info.attempt,
+            info.spec.max_attempts,
+            info.spec.effect_mode,
+            info.worker_id.as_deref().unwrap_or(""),
+            info.lease_expires_at_ms
+                .map_or_else(|| "null".to_string(), |v| v.to_string()),
+            info.retry_after_ms
+                .map_or_else(|| "null".to_string(), |v| v.to_string()),
+            info.terminal_at_ms
+                .map_or_else(|| "null".to_string(), |v| v.to_string()),
         )?;
     }
 

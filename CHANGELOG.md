@@ -19,6 +19,8 @@
 - Recovery replay no longer re-runs `Limits` validation against configured values; the hard frame-size bound is the recovery guard.
 - `DataFile::sync` now respects the `Memory` durability mode.
 - `ops_to_records` now simulates job-state transitions within a batch so `LeaseJob` followed by `FailJob` in one atomic commit uses the updated attempt count.
+- `Store::jobs` now returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, and `terminal_at_ms`.
+- CLI `jobs list` and `export` include the new `JobInfo` fields.
 
 ## 0.2.1
 

@@ -51,6 +51,8 @@ let jobs = store.claim_jobs(request)?;
 * `fail_job(job_id, lease_token, error_summary, retry_after_ms, now_ms)` — retry or dead after `max_attempts`.
 * `cancel_job(job_id, lease_token, now_ms)` — explicit cancellation.
 
+`Store::jobs(now_ms, queue, state)` returns a `JobInfo` snapshot for each job, including `attempt`, `lease_expires_at_ms`, `worker_id`, `retry_after_ms`, and `terminal_at_ms` so callers can render queues without extra lookups.
+
 A stale lease token is rejected.
 
 ## Uncertain outcomes

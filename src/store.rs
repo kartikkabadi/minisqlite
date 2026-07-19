@@ -11,7 +11,8 @@ use crate::error::Error;
 use crate::event::{Event, PersistedEvent, StreamVersion};
 use crate::id::Id;
 use crate::jobs::{
-    ClaimRequest, ClaimedJob, JobInternalState, JobSpec, JobState, JobStateRecord, Resolution,
+    ClaimRequest, ClaimedJob, JobInfo, JobInternalState, JobSpec, JobState, JobStateRecord,
+    Resolution,
 };
 use crate::projection::{ProjectionEntry, ProjectionState};
 use crate::storage::file::DataFile;
@@ -359,14 +360,31 @@ impl Store {
         now_ms: i64,
         queue: Option<String>,
         state: Option<JobState>,
-    ) -> Vec<(Id, JobSpec, JobState)> {
+    ) -> Vec<JobInfo> {
         let guard = self.inner.read().unwrap();
         guard
             .jobs
             .values()
             .filter(|j| queue.as_ref().map(|q| &j.spec.queue == q).unwrap_or(true))
             .filter(|j| state.map(|s| j.state_at(now_ms) == s).unwrap_or(true))
-            .map(|j| (j.spec.job_id, j.spec.clone(), j.state_at(now_ms)))
+            .map(|j| JobInfo {
+                job_id: j.spec.job_id,
+                spec: j.spec.clone(),
+                state: j.state_at(now_ms),
+                attempt: j.attempt,
+                lease_expires_at_ms: if j.lease_expires_at_ms > 0 {
+                    Some(j.lease_expires_at_ms)
+                } else {
+                    None
+                },
+                worker_id: j.worker_id.clone(),
+                retry_after_ms: if j.retry_after_ms > 0 {
+                    Some(j.retry_after_ms)
+                } else {
+                    None
+                },
+                terminal_at_ms: j.terminal_at_ms,
+            })
             .collect()
     }
 
