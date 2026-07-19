@@ -896,8 +896,8 @@ impl StoreInner {
         frame_offset: u64,
         records: Vec<Record>,
     ) -> Result<CommitReceipt, Error> {
-        self.transaction_batches
-            .insert(batch.transaction_id, batch.clone());
+        // Apply the staged delta before making the transaction visible for idempotency,
+        // so a failure here does not leave a receiptless batch in the idempotency index.
         self.apply_records(&records, batch.transaction_id, frame_offset)?;
         self.transaction_seq += 1;
 
@@ -907,6 +907,8 @@ impl StoreInner {
             self.transaction_seq,
             frame_offset,
         );
+        self.transaction_batches
+            .insert(batch.transaction_id, batch.clone());
         self.transaction_receipts
             .insert(batch.transaction_id, receipt.clone());
         Ok(receipt)

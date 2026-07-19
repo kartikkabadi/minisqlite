@@ -33,6 +33,7 @@
 - `claim_jobs` now enforces partition ordering by claiming at most one ready job per partition per call.
 - `Record::JobFail` now stores and validates the attempt count on disk.
 - `Store::backup` fsyncs the destination parent directory on Unix after the atomic rename.
+- `Store::apply_commit` applies the staged delta before inserting the batch into the idempotency index so a failure cannot leave a receiptless batch.
 - Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
 - Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
 
