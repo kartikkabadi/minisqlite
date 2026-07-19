@@ -147,7 +147,47 @@ fn main() {
     let bad_ack = store.ack_job(job_id, token, None, now_ms());
     assert!(bad_ack.is_err());
 
-    // Flow D: Non-idempotent effect becomes uncertain after expiry.
+    // Flow D part 1: Idempotent effect can be reclaimed after lease expiry.
+    let idempotent_job = JobSpec::new(
+        Id::new(),
+        "provider",
+        "partition-idempotent",
+        b"idempotent-call".to_vec(),
+    )
+    .with_effect_mode(EffectMode::Idempotent)
+    .with_idempotency_key("idempotent-key-1");
+    let idempotent_id = idempotent_job.job_id;
+    store
+        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(idempotent_job))
+        .unwrap();
+
+    let mut idem_claim = ClaimRequest {
+        queue: "provider".into(),
+        worker_id: "worker-idem".into(),
+        now_ms: now_ms(),
+        lease_ms: 100,
+        limit: 1,
+    };
+    let idem_first = store.claim_jobs(idem_claim.clone()).unwrap();
+    assert_eq!(idem_first.len(), 1);
+    assert_eq!(idem_first[0].job_id, idempotent_id);
+
+    idem_claim.now_ms += 200;
+    let idem_second = store.claim_jobs(idem_claim).unwrap();
+    assert_eq!(idem_second.len(), 1);
+    assert_eq!(idem_second[0].job_id, idempotent_id);
+    assert_ne!(idem_second[0].lease_token, idem_first[0].lease_token);
+    store
+        .ack_job(
+            idempotent_id,
+            idem_second[0].lease_token,
+            None,
+            now_ms() + 200,
+        )
+        .unwrap();
+    println!("Flow D: idempotent job reclaimed and acknowledged after expiry");
+
+    // Flow D part 2: Non-idempotent effect becomes uncertain after expiry.
     let uncertain_job = JobSpec::new(Id::new(), "provider", "partition-2", b"call-api".to_vec())
         .with_effect_mode(EffectMode::UncertainOnLeaseExpiry)
         .with_max_attempts(1);
