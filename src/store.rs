@@ -986,9 +986,9 @@ impl StoreInner {
                 if entries.len() != state.data.len() {
                     return true;
                 }
-                entries.iter().any(|ProjectionEntry { key, value }| {
-                    state.data.get(key).map_or(true, |v| v != value)
-                })
+                entries
+                    .iter()
+                    .any(|ProjectionEntry { key, value }| state.data.get(key) != Some(value))
             }
             _ => false,
         }
