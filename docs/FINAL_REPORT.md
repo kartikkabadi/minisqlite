@@ -111,7 +111,7 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 
 Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 
-| Target | Result (10-second smoke run) |
+| Target | Result (30-second smoke run) |
 |---|---|
 | `header_decode` | Passed |
 | `frame_decode` | Passed |
