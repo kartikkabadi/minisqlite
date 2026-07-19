@@ -246,7 +246,7 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
             let limit = cmd_opts
                 .limit
                 .or_else(|| args_after_path.first().and_then(|s| s.parse().ok()))
-                .unwrap_or(10);
+                .unwrap_or(50);
             Command::EventsTail { path, limit }
         }
         ("events", Some("stream")) => {
@@ -257,7 +257,7 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
             let limit = cmd_opts
                 .limit
                 .or_else(|| args_after_path.get(1).and_then(|s| s.parse().ok()))
-                .unwrap_or(10);
+                .unwrap_or(100);
             Command::EventsStream {
                 path,
                 stream_id,
