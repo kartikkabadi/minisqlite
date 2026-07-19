@@ -18,6 +18,7 @@
 - Lease tokens are generated with `Id::new()` so they are not reused across process restarts.
 - Recovery replay no longer re-runs `Limits` validation against configured values; the hard frame-size bound is the recovery guard.
 - `DataFile::sync` now respects the `Memory` durability mode.
+- `ops_to_records` now simulates job-state transitions within a batch so `LeaseJob` followed by `FailJob` in one atomic commit uses the updated attempt count.
 
 ## 0.2.1
 

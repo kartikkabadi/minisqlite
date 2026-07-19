@@ -1162,6 +1162,10 @@ impl StoreInner {
         // Also ensure no duplicate event IDs within the batch.
         let mut seen_event_ids: HashMap<Id, &Event> = HashMap::new();
 
+        // Simulated job state so ops within the same batch see earlier job transitions
+        // (e.g., a lease immediately followed by a fail in one atomic commit).
+        let mut job_sim: HashMap<Id, JobStateRecord> = HashMap::new();
+
         for op in &batch.ops {
             match op {
                 Op::AppendEvent(e) => {
@@ -1258,12 +1262,23 @@ impl StoreInner {
                         effect_mode: job.effect_mode,
                         idempotency_key: job.idempotency_key.clone(),
                     });
+                    job_sim.insert(job.job_id, JobStateRecord::new(job.clone()));
                 }
                 Op::AckJob {
                     job_id,
                     lease_token,
                     result_digest,
                 } => {
+                    let mut job = job_sim
+                        .get(job_id)
+                        .or_else(|| self.jobs.get(job_id))
+                        .cloned()
+                        .ok_or(Error::JobNotFound(*job_id))?;
+                    job.state = JobInternalState::Succeeded;
+                    job.lease_token = None;
+                    job.result_digest = result_digest.clone();
+                    job.terminal_at_ms = Some(batch.now_ms);
+                    job_sim.insert(*job_id, job);
                     records.push(Record::JobAck {
                         job_id: *job_id,
                         lease_token: *lease_token,
@@ -1277,13 +1292,27 @@ impl StoreInner {
                     error_summary,
                     retry_after_ms,
                 } => {
-                    let job = self.jobs.get(job_id).ok_or(Error::JobNotFound(*job_id))?;
+                    let mut job = job_sim
+                        .get(job_id)
+                        .or_else(|| self.jobs.get(job_id))
+                        .cloned()
+                        .ok_or(Error::JobNotFound(*job_id))?;
                     let terminal = job.attempt >= job.spec.max_attempts;
                     let retry_after = if terminal {
                         0
                     } else {
                         retry_after_ms.unwrap_or(batch.now_ms + 1000)
                     };
+                    if terminal {
+                        job.state = JobInternalState::Dead;
+                        job.terminal_at_ms = Some(batch.now_ms);
+                    } else {
+                        job.state = JobInternalState::RetryWait;
+                        job.retry_after_ms = retry_after;
+                    }
+                    job.lease_token = None;
+                    job.error_summary = Some(error_summary.clone());
+                    job_sim.insert(*job_id, job);
                     records.push(Record::JobFail {
                         job_id: *job_id,
                         lease_token: *lease_token,
@@ -1297,6 +1326,15 @@ impl StoreInner {
                     job_id,
                     lease_token,
                 } => {
+                    let mut job = job_sim
+                        .get(job_id)
+                        .or_else(|| self.jobs.get(job_id))
+                        .cloned()
+                        .ok_or(Error::JobNotFound(*job_id))?;
+                    job.state = JobInternalState::Cancelled;
+                    job.lease_token = None;
+                    job.terminal_at_ms = Some(batch.now_ms);
+                    job_sim.insert(*job_id, job);
                     records.push(Record::JobCancel {
                         job_id: *job_id,
                         lease_token: *lease_token,
@@ -1304,6 +1342,27 @@ impl StoreInner {
                     });
                 }
                 Op::ResolveJob { job_id, resolution } => {
+                    let mut job = job_sim
+                        .get(job_id)
+                        .or_else(|| self.jobs.get(job_id))
+                        .cloned()
+                        .ok_or(Error::JobNotFound(*job_id))?;
+                    match resolution {
+                        Resolution::Retry => {
+                            job.state = JobInternalState::RetryWait;
+                            job.retry_after_ms = batch.now_ms;
+                        }
+                        Resolution::MarkSucceeded => {
+                            job.state = JobInternalState::Succeeded;
+                            job.terminal_at_ms = Some(batch.now_ms);
+                        }
+                        Resolution::MarkDead => {
+                            job.state = JobInternalState::Dead;
+                            job.terminal_at_ms = Some(batch.now_ms);
+                        }
+                    }
+                    job.lease_token = None;
+                    job_sim.insert(*job_id, job);
                     records.push(Record::JobResolve {
                         job_id: *job_id,
                         resolution: Self::resolution_to_record(*resolution),
@@ -1317,6 +1376,17 @@ impl StoreInner {
                     attempt,
                     lease_expires_at_ms,
                 } => {
+                    let mut job = job_sim
+                        .get(job_id)
+                        .or_else(|| self.jobs.get(job_id))
+                        .cloned()
+                        .ok_or(Error::JobNotFound(*job_id))?;
+                    job.state = JobInternalState::Leased;
+                    job.lease_token = Some(*lease_token);
+                    job.worker_id = Some(worker_id.clone());
+                    job.attempt = *attempt;
+                    job.lease_expires_at_ms = *lease_expires_at_ms;
+                    job_sim.insert(*job_id, job);
                     records.push(Record::JobLease {
                         job_id: *job_id,
                         lease_token: *lease_token,
