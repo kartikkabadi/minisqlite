@@ -18,23 +18,23 @@ cargo run --example benchmark --release
 
 | Durability | Events | Commit time | Reopen time | File size |
 |------------|--------|-------------|-------------|-----------|
-| Memory     | 1,000   | 2.3 ms      | 2.2 ms      | 182 KB    |
-| Memory     | 10,000  | 21.3 ms     | 22.3 ms     | 1.82 MB   |
-| Memory     | 100,000 | 234.2 ms    | 228.9 ms    | 18.2 MB   |
-| Memory     | 1,000,000 | 2.61 s    | 2.65 s      | 182 MB    |
+| Memory     | 1,000   | 2.4 ms      | 2.3 ms      | 182 KB    |
+| Memory     | 10,000  | 22.7 ms     | 23.4 ms     | 1.82 MB   |
+| Memory     | 100,000 | 235.9 ms    | 239.6 ms    | 18.2 MB   |
+| Memory     | 1,000,000 | 2.72 s    | 2.79 s      | 182 MB    |
 | Strict     | 1,000   | 2.2 ms      | 2.0 ms      | 182 KB    |
-| Strict     | 10,000  | 35.1 ms     | 19.8 ms     | 1.82 MB   |
-| Strict     | 100,000 | 220.4 ms    | 208.9 ms    | 18.2 MB   |
-| Strict     | 1,000,000 | 2.66 s    | 2.67 s      | 182 MB    |
+| Strict     | 10,000  | 23.2 ms     | 24.0 ms     | 1.82 MB   |
+| Strict     | 100,000 | 222.0 ms    | 206.6 ms    | 18.2 MB   |
+| Strict     | 1,000,000 | 2.79 s    | 2.77 s      | 182 MB    |
 
 ## Projection and job operations
 
 | Operation | Time |
 |-----------|------|
-| Replace 10,000 projection entries | 6.9 ms |
-| Prefix scan (100 matches out of 10,000) | 24 µs |
-| Enqueue 10,000 jobs | 20.1 ms |
-| Claim and acknowledge 10,000 jobs | 34.7 ms |
+| Replace 10,000 projection entries | 6.5 ms |
+| Prefix scan (100 matches out of 10,000) | 26 µs |
+| Enqueue 10,000 jobs | 21.9 ms |
+| Claim and acknowledge 10,000 jobs | 39.4 ms |
 
 ## Decision on snapshots and compaction
 
