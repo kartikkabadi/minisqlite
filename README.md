@@ -54,15 +54,20 @@ The API and file format may change.
 
 ## Install
 
+`v0.3.0-alpha.1` is not yet published. Build and install from this branch:
+
 ```bash
-cargo install minisqlite
+git clone https://github.com/kartikkabadi/minisqlite.git
+cd minisqlite
+git checkout feat/control-plane-state-engine
+cargo install --path .
 ```
 
-Or add as a library dependency:
+Or add as a library dependency from this branch:
 
 ```toml
 [dependencies]
-minisqlite = "0.3.0-alpha.1"
+minisqlite = { git = "https://github.com/kartikkabadi/minisqlite", branch = "feat/control-plane-state-engine" }
 ```
 
 ## Quick example
