@@ -26,6 +26,8 @@
 - `max_attempts == 0` is rejected at validation time.
 - Added transaction-level `correlation_id` and `metadata` via `CommitBatch::with_correlation_id` and `with_metadata`, persisted as the first `TransactionMeta` record in a frame and returned on `CommitReceipt` and `get_transaction`.
 - Added `tests/integration.rs` round-trip test for transaction-level metadata.
+- Refactored job state transitions into `JobStateRecord` methods (`lease`, `acknowledge`, `fail`, `cancel`, `resolve`) so validation, record encoding, and recovery replay all share one state machine.
+- Recovery replay now fails closed when a committed job record references a missing job, has a stale lease token, or has an inconsistent terminal flag.
 - Updated `docs/FORMAT.md` and `docs/FINAL_REPORT.md` to describe `TransactionMeta`.
 
 ## 0.2.1
