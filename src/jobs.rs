@@ -1,5 +1,6 @@
 use crate::config::EffectMode;
 use crate::id::Id;
+use crate::Error;
 
 /// Specification for a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +226,125 @@ impl JobStateRecord {
             }
             _ => false,
         }
+    }
+
+    /// Lease the job to a worker. Fails if the job is not ready.
+    pub fn lease(
+        &mut self,
+        now_ms: i64,
+        token: Id,
+        worker_id: impl Into<String>,
+        attempt: u32,
+        lease_expires_at_ms: i64,
+    ) -> Result<(), Error> {
+        if self.is_terminal() || !self.is_ready_at(now_ms) {
+            return Err(Error::Validation(format!(
+                "job {} is not ready for lease",
+                self.spec.job_id
+            )));
+        }
+        self.state = JobInternalState::Leased;
+        self.lease_token = Some(token);
+        self.worker_id = Some(worker_id.into());
+        self.attempt = attempt;
+        self.lease_expires_at_ms = lease_expires_at_ms;
+        Ok(())
+    }
+
+    /// Acknowledge the job with the given lease token. Fails if the token is stale or expired.
+    pub fn acknowledge(
+        &mut self,
+        now_ms: i64,
+        token: Id,
+        result_digest: Option<Vec<u8>>,
+    ) -> Result<(), Error> {
+        if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
+        self.state = JobInternalState::Succeeded;
+        self.result_digest = result_digest;
+        self.terminal_at_ms = Some(now_ms);
+        self.lease_token = None;
+        Ok(())
+    }
+
+    /// Mark the job as failed under the given lease token.
+    pub fn fail(
+        &mut self,
+        now_ms: i64,
+        token: Id,
+        error_summary: impl Into<String>,
+        retry_after_ms: Option<i64>,
+    ) -> Result<(), Error> {
+        if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
+        let terminal = self.attempt >= self.spec.max_attempts;
+        self.error_summary = Some(error_summary.into());
+        self.lease_token = None;
+        if terminal {
+            self.state = JobInternalState::Dead;
+            self.terminal_at_ms = Some(now_ms);
+        } else {
+            self.state = JobInternalState::RetryWait;
+            self.retry_after_ms = retry_after_ms.unwrap_or(now_ms + 1000);
+        }
+        Ok(())
+    }
+
+    /// Cancel the job. If a lease token is supplied, it must match an unexpired lease.
+    pub fn cancel(&mut self, now_ms: i64, lease_token: Option<Id>) -> Result<(), Error> {
+        if self.is_terminal() {
+            return Err(Error::Validation(format!(
+                "job {} is already terminal",
+                self.spec.job_id
+            )));
+        }
+        if let Some(token) = lease_token {
+            if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
+                return Err(Error::InvalidLease {
+                    job_id: self.spec.job_id,
+                });
+            }
+        } else if matches!(self.state, JobInternalState::Leased) {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
+        self.state = JobInternalState::Cancelled;
+        self.terminal_at_ms = Some(now_ms);
+        self.lease_token = None;
+        Ok(())
+    }
+
+    /// Resolve an uncertain job outcome.
+    pub fn resolve(&mut self, now_ms: i64, resolution: Resolution) -> Result<(), Error> {
+        if !self.is_uncertain_at(now_ms) {
+            return Err(Error::Validation(format!(
+                "job {} is not uncertain and cannot be resolved",
+                self.spec.job_id
+            )));
+        }
+        self.lease_token = None;
+        match resolution {
+            Resolution::Retry => {
+                self.state = JobInternalState::RetryWait;
+                self.retry_after_ms = now_ms;
+            }
+            Resolution::MarkSucceeded => {
+                self.state = JobInternalState::Succeeded;
+                self.terminal_at_ms = Some(now_ms);
+            }
+            Resolution::MarkDead => {
+                self.state = JobInternalState::Dead;
+                self.terminal_at_ms = Some(now_ms);
+            }
+        }
+        Ok(())
     }
 
     fn not_before(&self) -> i64 {

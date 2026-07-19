@@ -11,8 +11,7 @@ use crate::error::Error;
 use crate::event::{Event, PersistedEvent, StreamVersion};
 use crate::id::Id;
 use crate::jobs::{
-    ClaimRequest, ClaimedJob, JobInfo, JobInternalState, JobSpec, JobState, JobStateRecord,
-    Resolution,
+    ClaimRequest, ClaimedJob, JobInfo, JobSpec, JobState, JobStateRecord, Resolution,
 };
 use crate::projection::{ProjectionEntry, ProjectionState};
 use crate::storage::file::DataFile;
@@ -665,12 +664,22 @@ impl StoreInner {
                         effect_mode: *effect_mode,
                         idempotency_key: idempotency_key.clone(),
                     };
-                    if let Entry::Vacant(e) = self.jobs.entry(*job_id) {
-                        self.queue_partitions
-                            .entry((queue.clone(), partition.clone()))
-                            .or_default()
-                            .push(*job_id);
-                        e.insert(JobStateRecord::new(spec));
+                    match self.jobs.entry(*job_id) {
+                        Entry::Occupied(e) => {
+                            if e.get().spec != spec {
+                                return Err(Self::corruption(
+                                    format!("committed JobEnqueue spec mismatch for {job_id}"),
+                                    frame_offset,
+                                ));
+                            }
+                        }
+                        Entry::Vacant(e) => {
+                            self.queue_partitions
+                                .entry((queue.clone(), partition.clone()))
+                                .or_default()
+                                .push(*job_id);
+                            e.insert(JobStateRecord::new(spec));
+                        }
                     }
                 }
                 Record::JobLease {
@@ -679,84 +688,102 @@ impl StoreInner {
                     worker_id,
                     attempt,
                     lease_expires_at_ms,
-                    ..
+                    claimed_at_ms,
                 } => {
-                    if let Some(job) = self.jobs.get_mut(job_id) {
-                        job.state = JobInternalState::Leased;
-                        job.lease_token = Some(*lease_token);
-                        job.worker_id = Some(worker_id.clone());
-                        job.attempt = *attempt;
-                        job.lease_expires_at_ms = *lease_expires_at_ms;
-                    }
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobLease references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    job.lease(
+                        *claimed_at_ms,
+                        *lease_token,
+                        worker_id.clone(),
+                        *attempt,
+                        *lease_expires_at_ms,
+                    )
+                    .map_err(|e| {
+                        Self::corruption(format!("invalid JobLease in frame: {e}"), frame_offset)
+                    })?;
                 }
                 Record::JobAck {
                     job_id,
                     result_digest,
                     acknowledged_at_ms,
-                    ..
+                    lease_token,
                 } => {
-                    if let Some(job) = self.jobs.get_mut(job_id) {
-                        job.state = JobInternalState::Succeeded;
-                        job.result_digest = result_digest.clone();
-                        job.terminal_at_ms = Some(*acknowledged_at_ms);
-                        job.lease_token = None;
-                    }
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobAck references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    job.acknowledge(*acknowledged_at_ms, *lease_token, result_digest.clone())
+                        .map_err(|e| {
+                            Self::corruption(format!("invalid JobAck in frame: {e}"), frame_offset)
+                        })?;
                 }
                 Record::JobFail {
                     job_id,
+                    lease_token,
                     error_summary,
                     retry_after_ms,
                     terminal,
                     failed_at_ms,
-                    ..
                 } => {
-                    if let Some(job) = self.jobs.get_mut(job_id) {
-                        if *terminal {
-                            job.state = JobInternalState::Dead;
-                            job.terminal_at_ms = Some(*failed_at_ms);
-                        } else {
-                            job.state = JobInternalState::RetryWait;
-                            job.retry_after_ms = *retry_after_ms;
-                        }
-                        job.error_summary = Some(error_summary.clone());
-                        job.lease_token = None;
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobFail references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    job.fail(
+                        *failed_at_ms,
+                        *lease_token,
+                        error_summary.clone(),
+                        Some(*retry_after_ms),
+                    )
+                    .map_err(|e| {
+                        Self::corruption(format!("invalid JobFail in frame: {e}"), frame_offset)
+                    })?;
+                    if job.is_terminal() != *terminal {
+                        return Err(Self::corruption(
+                            format!("JobFail terminal flag mismatch for {job_id}"),
+                            frame_offset,
+                        ));
                     }
                 }
                 Record::JobCancel {
                     job_id,
+                    lease_token,
                     cancelled_at_ms,
-                    ..
                 } => {
-                    if let Some(job) = self.jobs.get_mut(job_id) {
-                        job.state = JobInternalState::Cancelled;
-                        job.terminal_at_ms = Some(*cancelled_at_ms);
-                        job.lease_token = None;
-                    }
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobCancel references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    job.cancel(*cancelled_at_ms, *lease_token).map_err(|e| {
+                        Self::corruption(format!("invalid JobCancel in frame: {e}"), frame_offset)
+                    })?;
                 }
                 Record::JobResolve {
                     job_id,
                     resolution,
                     resolved_at_ms,
                 } => {
-                    if let Some(job) = self.jobs.get_mut(job_id) {
-                        match resolution {
-                            RecordResolution::Retry => {
-                                job.state = JobInternalState::RetryWait;
-                                job.retry_after_ms = *resolved_at_ms;
-                                job.lease_token = None;
-                            }
-                            RecordResolution::MarkSucceeded => {
-                                job.state = JobInternalState::Succeeded;
-                                job.terminal_at_ms = Some(*resolved_at_ms);
-                                job.lease_token = None;
-                            }
-                            RecordResolution::MarkDead => {
-                                job.state = JobInternalState::Dead;
-                                job.terminal_at_ms = Some(*resolved_at_ms);
-                                job.lease_token = None;
-                            }
-                        }
-                    }
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobResolve references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    let resolution = Self::resolution_from_record(*resolution);
+                    job.resolve(*resolved_at_ms, resolution).map_err(|e| {
+                        Self::corruption(format!("invalid JobResolve in frame: {e}"), frame_offset)
+                    })?;
                 }
                 Record::TransactionMeta { .. } => {
                     // Transaction metadata is a framing record; it does not affect state.
@@ -1084,54 +1111,37 @@ impl StoreInner {
                     lease_expires_at_ms,
                 } => {
                     let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
-                    if job.is_terminal() || !job.is_ready_at(batch.now_ms) {
-                        return Err(Error::Validation(format!(
-                            "job {job_id} is not ready for lease"
-                        )));
-                    }
-                    job.state = JobInternalState::Leased;
-                    job.lease_token = Some(*lease_token);
-                    job.worker_id = Some(worker_id.clone());
-                    job.attempt = *attempt;
-                    job.lease_expires_at_ms = *lease_expires_at_ms;
+                    job.lease(
+                        batch.now_ms,
+                        *lease_token,
+                        worker_id.clone(),
+                        *attempt,
+                        *lease_expires_at_ms,
+                    )?;
                     simulated.insert(*job_id, job);
                 }
                 Op::AckJob {
                     job_id,
                     lease_token,
-                    ..
-                }
-                | Op::FailJob {
-                    job_id,
-                    lease_token,
-                    ..
+                    result_digest,
                 } => {
                     let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
-                    if job.lease_token != Some(*lease_token)
-                        || batch.now_ms >= job.lease_expires_at_ms
-                    {
-                        return Err(Error::InvalidLease { job_id: *job_id });
-                    }
-                    if let Op::FailJob {
-                        error_summary,
-                        retry_after_ms,
-                        ..
-                    } = op
-                    {
-                        let terminal = job.attempt >= job.spec.max_attempts;
-                        if terminal {
-                            job.state = JobInternalState::Dead;
-                            job.terminal_at_ms = Some(batch.now_ms);
-                        } else {
-                            job.state = JobInternalState::RetryWait;
-                            job.retry_after_ms = retry_after_ms.unwrap_or(batch.now_ms + 1000);
-                        }
-                        job.error_summary = Some(error_summary.clone());
-                    } else {
-                        job.state = JobInternalState::Succeeded;
-                        job.terminal_at_ms = Some(batch.now_ms);
-                    }
-                    job.lease_token = None;
+                    job.acknowledge(batch.now_ms, *lease_token, result_digest.clone())?;
+                    simulated.insert(*job_id, job);
+                }
+                Op::FailJob {
+                    job_id,
+                    lease_token,
+                    error_summary,
+                    retry_after_ms,
+                } => {
+                    let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
+                    job.fail(
+                        batch.now_ms,
+                        *lease_token,
+                        error_summary.clone(),
+                        *retry_after_ms,
+                    )?;
                     simulated.insert(*job_id, job);
                 }
                 Op::CancelJob {
@@ -1139,32 +1149,13 @@ impl StoreInner {
                     lease_token,
                 } => {
                     let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
-                    if job.is_terminal() {
-                        return Err(Error::Validation(format!(
-                            "job {job_id} is already terminal"
-                        )));
-                    }
-                    if let Some(token) = lease_token {
-                        if job.lease_token != Some(*token)
-                            || batch.now_ms >= job.lease_expires_at_ms
-                        {
-                            return Err(Error::InvalidLease { job_id: *job_id });
-                        }
-                    } else if matches!(job.state, JobInternalState::Leased) {
-                        return Err(Error::InvalidLease { job_id: *job_id });
-                    }
-                    job.state = JobInternalState::Cancelled;
-                    job.terminal_at_ms = Some(batch.now_ms);
-                    job.lease_token = None;
+                    job.cancel(batch.now_ms, *lease_token)?;
                     simulated.insert(*job_id, job);
                 }
-                Op::ResolveJob { job_id, .. } => {
-                    let job = self.get_job_or_simulated(&mut simulated, *job_id)?;
-                    if !job.is_uncertain_at(batch.now_ms) {
-                        return Err(Error::Validation(format!(
-                            "job {job_id} is not uncertain and cannot be resolved"
-                        )));
-                    }
+                Op::ResolveJob { job_id, resolution } => {
+                    let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
+                    job.resolve(batch.now_ms, *resolution)?;
+                    simulated.insert(*job_id, job);
                 }
                 _ => {}
             }
@@ -1324,10 +1315,7 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
-                    job.state = JobInternalState::Succeeded;
-                    job.lease_token = None;
-                    job.result_digest = result_digest.clone();
-                    job.terminal_at_ms = Some(batch.now_ms);
+                    job.acknowledge(batch.now_ms, *lease_token, result_digest.clone())?;
                     job_sim.insert(*job_id, job);
                     records.push(Record::JobAck {
                         job_id: *job_id,
@@ -1347,18 +1335,14 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
-                    let terminal = job.attempt >= job.spec.max_attempts;
-                    let retry_after = retry_after_ms.unwrap_or(batch.now_ms + 1000);
-                    if terminal {
-                        job.state = JobInternalState::Dead;
-                        job.terminal_at_ms = Some(batch.now_ms);
-                    } else {
-                        job.state = JobInternalState::RetryWait;
-                        job.retry_after_ms = retry_after;
-                    }
-                    job.lease_token = None;
-                    job.error_summary = Some(error_summary.clone());
-                    job_sim.insert(*job_id, job);
+                    job.fail(
+                        batch.now_ms,
+                        *lease_token,
+                        error_summary.clone(),
+                        *retry_after_ms,
+                    )?;
+                    let terminal = job.is_terminal();
+                    let retry_after = job.retry_after_ms;
                     records.push(Record::JobFail {
                         job_id: *job_id,
                         lease_token: *lease_token,
@@ -1367,6 +1351,7 @@ impl StoreInner {
                         terminal,
                         failed_at_ms: batch.now_ms,
                     });
+                    job_sim.insert(*job_id, job);
                 }
                 Op::CancelJob {
                     job_id,
@@ -1377,9 +1362,7 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
-                    job.state = JobInternalState::Cancelled;
-                    job.lease_token = None;
-                    job.terminal_at_ms = Some(batch.now_ms);
+                    job.cancel(batch.now_ms, *lease_token)?;
                     job_sim.insert(*job_id, job);
                     records.push(Record::JobCancel {
                         job_id: *job_id,
@@ -1393,21 +1376,7 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
-                    match resolution {
-                        Resolution::Retry => {
-                            job.state = JobInternalState::RetryWait;
-                            job.retry_after_ms = batch.now_ms;
-                        }
-                        Resolution::MarkSucceeded => {
-                            job.state = JobInternalState::Succeeded;
-                            job.terminal_at_ms = Some(batch.now_ms);
-                        }
-                        Resolution::MarkDead => {
-                            job.state = JobInternalState::Dead;
-                            job.terminal_at_ms = Some(batch.now_ms);
-                        }
-                    }
-                    job.lease_token = None;
+                    job.resolve(batch.now_ms, *resolution)?;
                     job_sim.insert(*job_id, job);
                     records.push(Record::JobResolve {
                         job_id: *job_id,
@@ -1427,11 +1396,13 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
-                    job.state = JobInternalState::Leased;
-                    job.lease_token = Some(*lease_token);
-                    job.worker_id = Some(worker_id.clone());
-                    job.attempt = *attempt;
-                    job.lease_expires_at_ms = *lease_expires_at_ms;
+                    job.lease(
+                        batch.now_ms,
+                        *lease_token,
+                        worker_id.clone(),
+                        *attempt,
+                        *lease_expires_at_ms,
+                    )?;
                     job_sim.insert(*job_id, job);
                     records.push(Record::JobLease {
                         job_id: *job_id,
@@ -1452,6 +1423,21 @@ impl StoreInner {
             Resolution::Retry => RecordResolution::Retry,
             Resolution::MarkSucceeded => RecordResolution::MarkSucceeded,
             Resolution::MarkDead => RecordResolution::MarkDead,
+        }
+    }
+
+    fn resolution_from_record(r: RecordResolution) -> Resolution {
+        match r {
+            RecordResolution::Retry => Resolution::Retry,
+            RecordResolution::MarkSucceeded => Resolution::MarkSucceeded,
+            RecordResolution::MarkDead => Resolution::MarkDead,
+        }
+    }
+
+    fn corruption(message: impl Into<String>, offset: u64) -> Error {
+        Error::Corruption {
+            message: message.into(),
+            offset,
         }
     }
 
