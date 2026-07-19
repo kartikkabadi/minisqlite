@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
@@ -313,25 +313,7 @@ impl Store {
             .projections
             .get(projection.as_ref())
             .ok_or_else(|| Error::ProjectionNotFound(projection.as_ref().to_string()))?;
-        if prefix.is_empty() {
-            return Ok(state
-                .data
-                .iter()
-                .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-                .collect());
-        }
-        match prefix_upper_bound(prefix) {
-            Some(upper) => Ok(state
-                .data
-                .range(prefix.to_vec()..upper)
-                .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-                .collect()),
-            None => Ok(state
-                .data
-                .range(prefix.to_vec()..)
-                .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-                .collect()),
-        }
+        Ok(state.scan_prefix(prefix))
     }
 
     /// Scan a projection over a key range.
@@ -346,11 +328,7 @@ impl Store {
             .projections
             .get(projection.as_ref())
             .ok_or_else(|| Error::ProjectionNotFound(projection.as_ref().to_string()))?;
-        Ok(state
-            .data
-            .range(start.to_vec()..end.to_vec())
-            .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-            .collect())
+        Ok(state.scan_range(start, end))
     }
 
     /// Return job records filtered by optional queue and state as of `now_ms`.
@@ -606,7 +584,7 @@ impl StoreInner {
                     value,
                 } => {
                     let state = self.projections.entry(projection.clone()).or_default();
-                    state.data.insert(key.clone(), value.clone());
+                    state.put(key.clone(), value.clone());
                     state.version = *version;
                 }
                 Record::ProjectionDelete {
@@ -615,7 +593,7 @@ impl StoreInner {
                     key,
                 } => {
                     if let Some(state) = self.projections.get_mut(projection) {
-                        state.data.remove(key);
+                        state.delete(key);
                         state.version = *version;
                     }
                 }
@@ -624,7 +602,7 @@ impl StoreInner {
                     new_version,
                 } => {
                     let state = self.projections.entry(projection.clone()).or_default();
-                    state.data.clear();
+                    state.clear();
                     state.version = *new_version;
                 }
                 Record::ProjectionReplace {
@@ -632,17 +610,13 @@ impl StoreInner {
                     new_version,
                     entries,
                 } => {
-                    let mut data = BTreeMap::new();
-                    for (k, v) in entries {
-                        data.insert(k.clone(), v.clone());
-                    }
-                    self.projections.insert(
-                        projection.clone(),
-                        ProjectionState {
-                            version: *new_version,
-                            data,
-                        },
-                    );
+                    let state = self.projections.entry(projection.clone()).or_default();
+                    let as_entries: Vec<ProjectionEntry> = entries
+                        .iter()
+                        .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
+                        .collect();
+                    state.replace(&as_entries);
+                    state.version = *new_version;
                 }
                 Record::JobEnqueue {
                     job_id,
@@ -1030,7 +1004,14 @@ impl StoreInner {
                 .cloned()
                 .unwrap_or_else(ProjectionState::new);
             let sim = simulated.entry(projection.clone()).or_insert(current);
-            if *version == sim.version && !Self::projection_op_changes_state(op, sim) {
+            let changes = match op {
+                Op::ProjectionPut { key, value, .. } => sim.put_changes(key, value),
+                Op::ProjectionDelete { key, .. } => sim.delete_changes(key),
+                Op::ProjectionClear { .. } => sim.clear_changes(),
+                Op::ProjectionReplace { entries, .. } => sim.replace_changes(entries),
+                _ => false,
+            };
+            if *version == sim.version && !changes {
                 continue;
             }
             if *version != sim.version + 1 {
@@ -1040,48 +1021,16 @@ impl StoreInner {
                     supplied: *version,
                 });
             }
-            Self::apply_projection_op_to_state(op, sim);
+            match op {
+                Op::ProjectionPut { key, value, .. } => sim.put(key.clone(), value.clone()),
+                Op::ProjectionDelete { key, .. } => sim.delete(key),
+                Op::ProjectionClear { .. } => sim.clear(),
+                Op::ProjectionReplace { entries, .. } => sim.replace(entries),
+                _ => {}
+            }
             sim.version = *version;
         }
         Ok(())
-    }
-
-    fn projection_op_changes_state(op: &Op, state: &ProjectionState) -> bool {
-        match op {
-            Op::ProjectionPut { key, value, .. } => state.data.get(key) != Some(value),
-            Op::ProjectionDelete { key, .. } => state.data.contains_key(key),
-            Op::ProjectionClear { .. } => !state.data.is_empty(),
-            Op::ProjectionReplace { entries, .. } => {
-                if entries.len() != state.data.len() {
-                    return true;
-                }
-                entries
-                    .iter()
-                    .any(|ProjectionEntry { key, value }| state.data.get(key) != Some(value))
-            }
-            _ => false,
-        }
-    }
-
-    fn apply_projection_op_to_state(op: &Op, state: &mut ProjectionState) {
-        match op {
-            Op::ProjectionPut { key, value, .. } => {
-                state.data.insert(key.clone(), value.clone());
-            }
-            Op::ProjectionDelete { key, .. } => {
-                state.data.remove(key);
-            }
-            Op::ProjectionClear { .. } => {
-                state.data.clear();
-            }
-            Op::ProjectionReplace { entries, .. } => {
-                state.data.clear();
-                for ProjectionEntry { key, value } in entries {
-                    state.data.insert(key.clone(), value.clone());
-                }
-            }
-            _ => {}
-        }
     }
 
     fn validate_job_ops(&self, batch: &CommitBatch) -> Result<(), Error> {
@@ -1528,24 +1477,6 @@ impl StoreInner {
         }
         Ok(claimed)
     }
-}
-
-/// Return the smallest byte string strictly greater than every string that starts with `prefix`.
-/// Returns `None` when `prefix` is empty or consists entirely of `0xff` bytes, meaning the scan
-/// is unbounded above.
-fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
-    if prefix.is_empty() {
-        return None;
-    }
-    let mut upper = prefix.to_vec();
-    for i in (0..upper.len()).rev() {
-        if upper[i] < 0xff {
-            upper[i] += 1;
-            upper.truncate(i + 1);
-            return Some(upper);
-        }
-    }
-    None
 }
 
 fn build_receipt(
