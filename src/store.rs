@@ -32,7 +32,7 @@ impl StoreBuilder {
     /// Create a builder for a store at `path`.
     pub fn new(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
-        let lock_path = path.with_extension("lock");
+        let lock_path = path.with_extension("mini.lock");
         Self {
             path,
             durability: Durability::default(),
