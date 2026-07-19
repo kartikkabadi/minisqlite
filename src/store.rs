@@ -442,6 +442,7 @@ impl Store {
             tmp_file.sync()?;
             drop(tmp_file);
             std::fs::rename(&tmp, &dest)?;
+            DataFile::sync_parent_dir(&dest)?;
             let mut backup_file = DataFile::open_or_create(&dest, Durability::Memory)?;
             let _scan = recovery::scan(&mut backup_file)?;
             Ok(())
