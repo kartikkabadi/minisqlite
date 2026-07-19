@@ -758,6 +758,8 @@ impl StoreInner {
         }
 
         self.validate_batch(&batch)?;
+        self.validate_projection_ops(&batch)?;
+        self.validate_job_ops(&batch)?;
 
         let records = self.ops_to_records(&batch)?;
         let payload_bytes = encode_records(&records);
@@ -774,9 +776,6 @@ impl StoreInner {
                 limit: self.limits.max_frame_size,
             });
         }
-
-        self.validate_projection_ops(&batch)?;
-        self.validate_job_ops(&batch)?;
 
         let frame_header = FrameHeader {
             version: 1,

@@ -46,12 +46,13 @@ A separate `.lock` file provides advisory single-owner locking via `fs2`.
 ## Durability path
 
 1. Validate the `CommitBatch` against memory state.
-2. Encode records to the transaction payload.
-3. Check transaction/event idempotency.
-4. Append one frame: header + payload + trailer.
-5. Sync the file in `Strict` mode.
-6. Apply records to memory.
-7. Return a stable `CommitReceipt`.
+2. Validate projection operations and job operations.
+3. Encode records to the transaction payload.
+4. Check transaction/event idempotency.
+5. Append one frame: header + payload + trailer.
+6. Sync the file in `Strict` mode.
+7. Apply records to memory.
+8. Return a stable `CommitReceipt`.
 
 ## Recovery
 
