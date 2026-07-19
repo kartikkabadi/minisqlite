@@ -87,12 +87,31 @@ fn main() {
         .commit(
             CommitBatch::new(Id::new(), 0)
                 .append_event(event)
-                .projection_put("users", 1, b"user:42".to_vec(), br#"{"name":"Ada"}"#.to_vec()),
+                .projection_put("users", 1, b"user:42".to_vec(), br#"{"name":"Ada"}"#.to_vec())
+                .enqueue_job(minisqlite::JobSpec::new(
+                    minisqlite::Id::new(),
+                    "emails",
+                    "welcome",
+                    b"user:42".to_vec(),
+                )),
         )
         .unwrap();
 
     let users = store.scan_projection_prefix("users", b"").unwrap();
     println!("{:?}", users);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut claimed = store.claim_jobs(minisqlite::ClaimRequest {
+        queue: "emails".into(),
+        worker_id: "worker-1".into(),
+        now_ms: now,
+        lease_ms: 30_000,
+        limit: 1,
+    });
+    println!("claimed {:?}", claimed);
 }
 ```
 
