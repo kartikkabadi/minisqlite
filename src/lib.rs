@@ -29,8 +29,12 @@
 //! store.commit(CommitBatch::new(tx, 0).append_event(event)).unwrap();
 //! ```
 
-pub(crate) mod codec;
-pub(crate) mod storage;
+/// Internal codec implementation. Not part of the stable public API.
+#[doc(hidden)]
+pub mod codec;
+/// Internal storage implementation. Not part of the stable public API.
+#[doc(hidden)]
+pub mod storage;
 
 pub mod config;
 pub mod error;

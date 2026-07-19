@@ -11,6 +11,7 @@ homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
 keywords = ["database", "embedded", "eventsourcing", "control-plane", "local-first"]
 categories = ["database-implementations"]
+exclude = ["fuzz"]
 
 [[bin]]
 name = "minisqlite"

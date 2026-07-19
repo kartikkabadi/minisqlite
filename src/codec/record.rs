@@ -331,7 +331,10 @@ impl Record {
                 let projection = r.read_string()?;
                 let new_version = r.read_u64()?;
                 let count = r.read_u32()? as usize;
-                let mut entries = Vec::with_capacity(count);
+                // Each entry needs at least two 4-byte length prefixes, so
+                // clamp capacity to the number that can actually fit in the body.
+                let max_count = r.remaining() / 8;
+                let mut entries = Vec::with_capacity(count.min(max_count));
                 for _ in 0..count {
                     let key = r.read_bytes()?;
                     let value = r.read_bytes()?;

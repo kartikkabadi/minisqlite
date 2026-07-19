@@ -67,6 +67,10 @@ impl Writer {
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 /// A small, fallible little-endian decoder over a byte slice.
