@@ -28,7 +28,7 @@ crc32fast = "1.4.2"
 fs2 = "0.4.3"
 
 [dependencies.serde]
-version = "1.0"
+version = "1.0.229"
 optional = true
 features = ["derive"]
 
