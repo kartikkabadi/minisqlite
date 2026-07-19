@@ -22,8 +22,26 @@ impl DataFile {
     /// Open or create the primary data file and validate its header.
     pub fn open_or_create(path: impl AsRef<Path>, durability: Durability) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
+
+        // Refuse to follow an existing symlink for the primary data path.
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.file_type().is_symlink() {
+                return Err(Error::Validation(
+                    "primary database path is a symlink".into(),
+                ));
+            }
+        }
+
         if let Some(parent) = path.parent() {
+            let parent_existed = parent.exists();
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                if !parent_existed {
+                    use std::fs::set_permissions;
+                    let _ = set_permissions(parent, Permissions::from_mode(0o700));
+                }
+            }
         }
 
         let mut file = OpenOptions::new()

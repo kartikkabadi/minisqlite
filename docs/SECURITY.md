@@ -16,6 +16,14 @@ An attacker with write access to the `.mini` file can construct valid frames tha
 On Unix, the primary data file and lock file are created with mode `0o600` (owner read/write only).
 This reduces the risk of other users reading or modifying the file, but it is not encryption.
 
+If the containing directory is created by the store, it is set to `0o700` so only the owner can
+list or access its contents.
+
+## Symlink handling
+
+Opening the primary data file will fail if the path is an existing symlink. This avoids
+accidentally writing through a symlink placed by another user.
+
 ## Payload privacy
 
 Event, projection, and job payloads are stored as opaque bytes.
