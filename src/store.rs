@@ -354,6 +354,8 @@ impl Store {
     }
 
     /// Return job records filtered by optional queue and state as of `now_ms`.
+    #[allow(unknown_lints)]
+    #[allow(clippy::unnecessary_map_or)]
     pub fn jobs(
         &self,
         now_ms: i64,
