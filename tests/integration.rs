@@ -610,6 +610,44 @@ fn transaction_id_conflicts_on_different_content() {
 }
 
 #[test]
+fn claim_jobs_respects_partition_ordering() {
+    let path = tmp_path("partition_ordering.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let first = JobSpec::new(Id::new(), "q", "p1", b"first".to_vec());
+    let second = JobSpec::new(Id::new(), "q", "p1", b"second".to_vec());
+    let other = JobSpec::new(Id::new(), "q", "p2", b"other".to_vec());
+
+    store
+        .commit(
+            CommitBatch::new(Id::new(), 0)
+                .enqueue_job(first)
+                .enqueue_job(second)
+                .enqueue_job(other),
+        )
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: 0,
+            lease_ms: 1000,
+            limit: 10,
+        })
+        .unwrap();
+
+    assert_eq!(claimed.len(), 2);
+    assert_eq!(claimed[0].partition, "p1");
+    assert_eq!(claimed[1].partition, "p2");
+}
+
+#[test]
 fn projection_prefix_with_all_ff_bytes() {
     let path = tmp_path("prefix_ff.mini");
     let _ = std::fs::remove_file(&path);

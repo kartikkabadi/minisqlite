@@ -1438,9 +1438,9 @@ impl StoreInner {
                     lease_expires_at_ms,
                     job.spec.clone(),
                 ));
-                if candidates.len() >= request.limit {
-                    break;
-                }
+                // Claim at most one ready job per partition per call so an earlier
+                // nonterminal job always blocks later jobs in the same partition.
+                break;
             }
         }
 
