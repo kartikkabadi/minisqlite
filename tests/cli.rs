@@ -61,9 +61,11 @@ fn cli_verify_and_doctor_succeed() {
 
     let (out, status) = run(&[
         path.to_str().unwrap(),
+        "--show-payloads",
         "projections",
-        "get",
+        "scan",
         "threads",
+        "--prefix",
         "thread-1",
     ]);
     assert!(status.success());

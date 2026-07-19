@@ -19,8 +19,6 @@ Commands:
   events stream <database> <stream-id> [LIMIT]
                                   Print events for a single stream.
   projections list <database>     List projections and versions.
-  projections get <database> <name> <key>
-                                  Read a single projection key.
   projections scan <database> <projection> [--prefix <prefix>]
                                   Scan a projection for keys with a prefix.
   jobs list <database> [--queue <queue>] [--state <state>]
@@ -73,11 +71,6 @@ enum Command {
     },
     ProjectionsList {
         path: String,
-    },
-    ProjectionsGet {
-        path: String,
-        name: String,
-        key: String,
     },
     ProjectionsScan {
         path: String,
@@ -143,7 +136,7 @@ fn is_events_subcommand(s: &str) -> bool {
 }
 
 fn is_projections_subcommand(s: &str) -> bool {
-    matches!(s, "list" | "get" | "scan")
+    matches!(s, "list" | "scan")
 }
 
 fn parse_args() -> Result<(GlobalOpts, Command), Error> {
@@ -265,16 +258,6 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
             }
         }
         ("projections", Some("list")) => Command::ProjectionsList { path },
-        ("projections", Some("get")) => {
-            if args_after_path.len() < 2 {
-                return Err(Error::Usage("projections get requires <name> <key>".into()));
-            }
-            Command::ProjectionsGet {
-                path,
-                name: args_after_path[0].clone(),
-                key: args_after_path[1].clone(),
-            }
-        }
         ("projections", Some("scan")) => {
             if args_after_path.is_empty() {
                 return Err(Error::Usage(
@@ -332,7 +315,7 @@ fn parse_command_first(
         }
         "projections" => {
             if positionals.len() < 2 || !is_projections_subcommand(&positionals[1]) {
-                return Err(Error::Usage("expected projections list|get|scan".into()));
+                return Err(Error::Usage("expected projections list|scan".into()));
             }
             cmd_tokens.push(positionals[1].clone());
             2
@@ -373,7 +356,7 @@ fn parse_path_first(positionals: &[String]) -> Result<(Vec<String>, String, Vec<
         }
         "projections" => {
             if positionals.len() < 3 || !is_projections_subcommand(&positionals[2]) {
-                return Err(Error::Usage("expected projections list|get|scan".into()));
+                return Err(Error::Usage("expected projections list|scan".into()));
             }
             cmd_tokens.push(positionals[2].clone());
             3
@@ -428,14 +411,6 @@ fn run() -> Result<(), Error> {
         Command::ProjectionsList { path } => {
             projections_list(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
         }
-        Command::ProjectionsGet { path, name, key } => projections_get(
-            &path,
-            opts.durability,
-            opts.lock_path.as_deref(),
-            opts.json,
-            &name,
-            &key,
-        ),
         Command::ProjectionsScan { path, name, prefix } => projections_scan(
             &path,
             opts.durability,
@@ -679,39 +654,6 @@ fn projections_list(
         } else {
             writeln!(stdout, "{} {}", name, version)?;
         }
-    }
-    Ok(())
-}
-
-fn projections_get(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-    name: &str,
-    key: &str,
-) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    match store.get_projection(name, key.as_bytes())? {
-        Some(v) => {
-            if json {
-                writeln!(
-                    &mut stdout,
-                    "{}",
-                    serde_json::json!({
-                        "projection": name,
-                        "key": key,
-                        "value": hex(&v),
-                    })
-                )?;
-            } else {
-                stdout.write_all(&v)?;
-                writeln!(stdout)?;
-            }
-        }
-        None => return Err(Error::ProjectionNotFound(name.into())),
     }
     Ok(())
 }
