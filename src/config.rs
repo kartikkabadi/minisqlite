@@ -1,3 +1,5 @@
+use crate::codec::frame::{FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE, MAX_FRAME_SIZE};
+
 /// Controls how strictly a commit synchronizes to durable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -31,6 +33,7 @@ pub enum EffectMode {
 /// These are intentionally conservative. The first workload is bounded control-plane metadata,
 /// not arbitrary blobs. Limits are enforced before any bytes are written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Limits {
     /// Maximum event payload in bytes.
     pub max_event_payload: usize,
@@ -161,6 +164,34 @@ impl Limits {
                 size: s.len(),
                 limit: self.max_summary_len,
             });
+        }
+        Ok(())
+    }
+
+    /// Validate that the configured limits fit within the hard frame-size bound and are
+    /// internally consistent.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.max_frame_size > MAX_FRAME_SIZE {
+            return Err(crate::Error::Validation(format!(
+                "max_frame_size {} exceeds hard limit {}",
+                self.max_frame_size, MAX_FRAME_SIZE
+            )));
+        }
+        if self.max_frame_size < FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE {
+            return Err(crate::Error::Validation(format!(
+                "max_frame_size {} is smaller than the minimum frame overhead",
+                self.max_frame_size
+            )));
+        }
+        if self.max_records_per_transaction == 0 {
+            return Err(crate::Error::Validation(
+                "max_records_per_transaction must be greater than 0".into(),
+            ));
+        }
+        if self.max_replace_entries == 0 {
+            return Err(crate::Error::Validation(
+                "max_replace_entries must be greater than 0".into(),
+            ));
         }
         Ok(())
     }

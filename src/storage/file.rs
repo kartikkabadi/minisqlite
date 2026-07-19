@@ -15,6 +15,7 @@ pub struct DataFile {
     file: File,
     pub durability: Durability,
     pub len: u64,
+    header: FileHeader,
 }
 
 impl DataFile {
@@ -40,7 +41,13 @@ impl DataFile {
 
         let len = file.seek(SeekFrom::End(0))?;
 
-        if len == 0 {
+        let file_len = if len == 0 {
+            FILE_HEADER_SIZE as u64
+        } else {
+            len
+        };
+
+        let header = if len == 0 {
             let now_ms = current_time_ms();
             let header = FileHeader::new(now_ms);
             let bytes = header.encode();
@@ -49,11 +56,7 @@ impl DataFile {
                 file.sync_all()?;
             }
             file.seek(SeekFrom::Start(0))?;
-            Ok(Self {
-                file,
-                durability,
-                len: FILE_HEADER_SIZE as u64,
-            })
+            header
         } else {
             if len < FILE_HEADER_SIZE as u64 {
                 return Err(Error::Corruption {
@@ -62,19 +65,25 @@ impl DataFile {
                 });
             }
             file.seek(SeekFrom::Start(0))?;
-            let mut header = [0u8; FILE_HEADER_SIZE];
-            file.read_exact(&mut header)?;
-            FileHeader::decode(&header)?;
-            Ok(Self {
-                file,
-                durability,
-                len,
-            })
-        }
+            let mut header_bytes = [0u8; FILE_HEADER_SIZE];
+            file.read_exact(&mut header_bytes)?;
+            FileHeader::decode(&header_bytes)?
+        };
+
+        Ok(Self {
+            file,
+            durability,
+            len: file_len,
+            header,
+        })
     }
 
     pub fn file_len(&self) -> u64 {
         self.len
+    }
+
+    pub fn format_version(&self) -> (u16, u16) {
+        (self.header.major, self.header.minor)
     }
 
     /// Read `n` bytes at `offset`.
@@ -85,6 +94,7 @@ impl DataFile {
         Ok(buf)
     }
 
+    #[cfg(test)]
     pub fn read_all(&mut self) -> Result<Vec<u8>, Error> {
         self.file.seek(SeekFrom::Start(0))?;
         let mut buf = Vec::new();

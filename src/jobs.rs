@@ -71,6 +71,7 @@ impl JobSpec {
 
 /// Current state of a job as derived from the durable record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum JobState {
     /// The job is waiting to be claimed.
     Pending,
@@ -114,6 +115,7 @@ pub struct ClaimedJob {
 
 /// Resolution for an uncertain job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Resolution {
     /// Retry the job from a clean state.
     Retry,
@@ -226,4 +228,73 @@ pub(crate) enum JobInternalState {
     Dead,
     Cancelled,
     Uncertain,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::id::Id;
+
+    fn spec(effect_mode: EffectMode) -> JobSpec {
+        JobSpec::new(Id::new(), "q", "p", b"work".to_vec()).with_effect_mode(effect_mode)
+    }
+
+    #[test]
+    fn pending_is_ready_after_not_before() {
+        let mut job = JobStateRecord::new(spec(EffectMode::Idempotent));
+        job.spec.not_before_ms = 100;
+        assert_eq!(job.state_at(99), JobState::Pending);
+        assert!(!job.is_ready_at(99));
+        assert_eq!(job.state_at(100), JobState::Pending);
+        assert!(job.is_ready_at(100));
+    }
+
+    #[test]
+    fn leased_is_ready_when_idempotent_lease_expires() {
+        let mut job = JobStateRecord::new(spec(EffectMode::Idempotent));
+        job.state = JobInternalState::Leased;
+        job.lease_expires_at_ms = 100;
+        assert_eq!(job.state_at(100), JobState::Leased);
+        assert!(!job.is_ready_at(99));
+        assert!(job.is_ready_at(100));
+    }
+
+    #[test]
+    fn leased_is_uncertain_when_non_idempotent_lease_expires() {
+        let mut job = JobStateRecord::new(spec(EffectMode::UncertainOnLeaseExpiry));
+        job.state = JobInternalState::Leased;
+        job.lease_expires_at_ms = 100;
+        assert_eq!(job.state_at(99), JobState::Leased);
+        assert!(!job.is_ready_at(99));
+        assert!(!job.is_ready_at(100));
+        assert!(job.is_uncertain_at(100));
+        assert_eq!(job.state_at(100), JobState::Uncertain);
+    }
+
+    #[test]
+    fn retry_wait_becomes_pending_after_retry_after() {
+        let mut job = JobStateRecord::new(spec(EffectMode::Idempotent));
+        job.state = JobInternalState::RetryWait;
+        job.retry_after_ms = 200;
+        assert_eq!(job.state_at(199), JobState::RetryWait);
+        assert!(!job.is_ready_at(199));
+        assert_eq!(job.state_at(200), JobState::Pending);
+        assert!(job.is_ready_at(200));
+    }
+
+    #[test]
+    fn terminal_states_are_not_ready() {
+        for state in [
+            JobInternalState::Succeeded,
+            JobInternalState::Dead,
+            JobInternalState::Cancelled,
+        ] {
+            let mut job = JobStateRecord::new(spec(EffectMode::Idempotent));
+            job.state = state;
+            job.lease_expires_at_ms = 0;
+            assert!(job.is_terminal());
+            assert!(!job.is_ready_at(i64::MAX));
+            assert!(!job.is_uncertain_at(i64::MAX));
+        }
+    }
 }

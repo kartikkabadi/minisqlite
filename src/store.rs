@@ -100,6 +100,7 @@ impl Store {
         limits: Limits,
         lock_path: PathBuf,
     ) -> Result<Self, Error> {
+        limits.validate()?;
         let lock = Lock::acquire(&lock_path)?;
         let mut data_file = DataFile::open_or_create(&path, durability)?;
         let scan = recovery::scan(&mut data_file)?;
@@ -390,6 +391,7 @@ impl Store {
         for j in guard.jobs.values() {
             *job_counts.entry(j.state_at(now_ms)).or_insert(0) += 1;
         }
+        let (format_version_major, format_version_minor) = guard.data_file.format_version();
         StoreStats {
             file_size: guard.data_file.file_len(),
             transaction_count: guard.transaction_seq,
@@ -402,6 +404,8 @@ impl Store {
             last_event_sequence: guard.high_water_sequence,
             recovered_tail: guard.recovered_tail,
             poisoned: guard.poisoned,
+            format_version_major,
+            format_version_minor,
         }
     }
 
@@ -413,22 +417,37 @@ impl Store {
     }
 
     /// Copy the primary file to `destination` with safe temporary-file semantics.
+    ///
+    /// The copy is written to a sibling temporary file, fsynced, and atomically renamed onto
+    /// `destination`. On any failure the temporary file is removed. The destination is then
+    /// reopened and scanned to prove it is a consistent copy.
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
         let mut guard = self.inner.lock().unwrap();
         guard.data_file.sync()?;
-        let src = guard.data_file.read_all()?;
+        let src_path = guard.path.clone();
         let dest = destination.as_ref().to_path_buf();
         let tmp = dest.with_extension("mini.tmp");
-        std::fs::write(&tmp, &src)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+
+        let result: Result<(), Error> = (|| {
+            std::fs::copy(&src_path, &tmp)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            }
+            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Memory)?;
+            tmp_file.sync()?;
+            drop(tmp_file);
+            std::fs::rename(&tmp, &dest)?;
+            let mut backup_file = DataFile::open_or_create(&dest, Durability::Memory)?;
+            let _scan = recovery::scan(&mut backup_file)?;
+            Ok(())
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
         }
-        std::fs::rename(&tmp, &dest)?;
-        let mut backup_file = DataFile::open_or_create(&dest, Durability::Memory)?;
-        let _scan = recovery::scan(&mut backup_file)?;
-        Ok(())
+        result
     }
 
     /// Return the file path.
@@ -1415,6 +1434,7 @@ fn current_time_ms() -> i64 {
 
 /// Summary statistics for an open store.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StoreStats {
     pub file_size: u64,
     pub transaction_count: u64,
@@ -1427,4 +1447,6 @@ pub struct StoreStats {
     pub last_event_sequence: u64,
     pub recovered_tail: bool,
     pub poisoned: bool,
+    pub format_version_major: u16,
+    pub format_version_minor: u16,
 }

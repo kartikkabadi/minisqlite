@@ -11,6 +11,10 @@ pub const FILE_HEADER_SIZE: usize = 64;
 pub const FRAME_HEADER_SIZE: usize = 64;
 pub const FRAME_TRAILER_SIZE: usize = 32;
 
+/// Hard upper bound on any transaction frame, including header, payload, and trailer.
+/// This protects the recovery scanner from allocating unbounded memory on a corrupted file.
+pub const MAX_FRAME_SIZE: usize = 64 << 20; // 64 MiB
+
 pub const FORMAT_MAJOR: u16 = 0;
 pub const FORMAT_MINOR: u16 = 1;
 
@@ -268,20 +272,43 @@ impl Frame {
         }
         let header_bytes: &[u8; FRAME_HEADER_SIZE] = bytes[..FRAME_HEADER_SIZE].try_into().unwrap();
         let header = FrameHeader::decode(header_bytes)?;
+
+        if header.total_frame_length as usize > MAX_FRAME_SIZE {
+            return Err(Error::Corruption {
+                message: "frame exceeds maximum allowed size".into(),
+                offset: 0,
+            });
+        }
+
+        let expected_total =
+            FRAME_HEADER_SIZE as u64 + header.payload_length as u64 + FRAME_TRAILER_SIZE as u64;
+        if header.total_frame_length != expected_total {
+            return Err(Error::Corruption {
+                message: "frame total length does not match header fields".into(),
+                offset: 0,
+            });
+        }
+
         if bytes.len() < header.total_frame_length as usize {
             return Err(Error::Corruption {
                 message: "frame truncated".into(),
                 offset: 0,
             });
         }
+
         let payload_start = FRAME_HEADER_SIZE;
         let payload_end = payload_start + header.payload_length as usize;
         let payload = bytes[payload_start..payload_end].to_vec();
         let trailer_start = payload_end;
-        let trailer_bytes: &[u8; FRAME_TRAILER_SIZE] = bytes
-            [trailer_start..trailer_start + FRAME_TRAILER_SIZE]
-            .try_into()
-            .unwrap();
+        let trailer_end = trailer_start + FRAME_TRAILER_SIZE;
+        if trailer_end > bytes.len() {
+            return Err(Error::Corruption {
+                message: "frame trailer truncated".into(),
+                offset: 0,
+            });
+        }
+        let trailer_bytes: &[u8; FRAME_TRAILER_SIZE] =
+            bytes[trailer_start..trailer_end].try_into().unwrap();
         let trailer = FrameTrailer::decode(trailer_bytes)?;
         if trailer.total_frame_length != header.total_frame_length {
             return Err(Error::Corruption {

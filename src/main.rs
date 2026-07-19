@@ -29,6 +29,7 @@ Commands:
   backup <DEST>          Atomically copy the primary file.
 
 Options:
+  -j, --json                       Emit machine-readable JSON output.
   -d, --durability strict|memory   Durability mode (default: strict).
   -l, --lock <PATH>                Custom lock-file path.
   -h, --help                       Print this help.
@@ -37,7 +38,33 @@ Options:
 fn main() {
     if let Err(e) = run() {
         eprintln!("{e}");
-        process::exit(1);
+        process::exit(exit_code(&e));
+    }
+}
+
+fn exit_code(error: &Error) -> i32 {
+    match error {
+        Error::Usage(_) => 2,
+        Error::NotMiniSQLite => 3,
+        Error::UnsupportedVersion { .. } => 4,
+        Error::Corruption { .. } => 5,
+        Error::AlreadyOpen | Error::LockUnavailable => 6,
+        Error::StorePoisoned { .. } => 7,
+        Error::Conflict { .. } => 8,
+        Error::DuplicateIdWithDifferentContent { .. } => 9,
+        Error::DuplicateEventId(_) => 10,
+        Error::DuplicateJobId(_) => 11,
+        Error::InvalidLease { .. } => 12,
+        Error::JobNotFound(_) => 13,
+        Error::ProjectionVersionMismatch { .. } => 14,
+        Error::PayloadTooLarge { .. } => 15,
+        Error::CommitOutcomeUncertain { .. } => 16,
+        Error::ProjectionNotFound(_) => 17,
+        Error::StreamNotFound(_) => 18,
+        Error::EventNotFound(_) => 19,
+        Error::TransactionNotFound(_) => 20,
+        Error::Validation(_) => 21,
+        Error::Io(_) => 22,
     }
 }
 
@@ -47,6 +74,7 @@ fn run() -> Result<(), Error> {
     let mut cmd: Option<String> = None;
     let mut durability = Durability::Strict;
     let mut lock_path: Option<String> = None;
+    let mut json = false;
 
     while let Some(arg) = parser.next().map_err(|e| Error::Usage(e.to_string()))? {
         match arg {
@@ -54,6 +82,7 @@ fn run() -> Result<(), Error> {
                 print!("{}", HELP);
                 return Ok(());
             }
+            Short('j') | Long("json") => json = true,
             Short('d') | Long("durability") => {
                 let value = parser.value().map_err(|e| Error::Usage(e.to_string()))?;
                 durability =
@@ -78,14 +107,14 @@ fn run() -> Result<(), Error> {
     let cmd = cmd.ok_or_else(|| Error::Usage("missing command".into()))?;
 
     match cmd.as_str() {
-        "doctor" => doctor(&path, durability, lock_path.as_deref()),
-        "verify" => verify(&path, durability, lock_path.as_deref()),
-        "stats" => stats(&path, durability, lock_path.as_deref()),
-        "events" => events(&mut parser, &path, durability, lock_path.as_deref()),
-        "projections" => projections(&mut parser, &path, durability, lock_path.as_deref()),
-        "jobs" => jobs(&mut parser, &path, durability, lock_path.as_deref()),
+        "doctor" => doctor(&path, durability, lock_path.as_deref(), json),
+        "verify" => verify(&path, durability, lock_path.as_deref(), json),
+        "stats" => stats(&path, durability, lock_path.as_deref(), json),
+        "events" => events(&mut parser, &path, durability, lock_path.as_deref(), json),
+        "projections" => projections(&mut parser, &path, durability, lock_path.as_deref(), json),
+        "jobs" => jobs(&mut parser, &path, durability, lock_path.as_deref(), json),
         "export" => export(&path, durability, lock_path.as_deref()),
-        "backup" => backup(&mut parser, &path, durability, lock_path.as_deref()),
+        "backup" => backup(&mut parser, &path, durability, lock_path.as_deref(), json),
         _ => Err(Error::Usage(format!("unknown command: {cmd}"))),
     }
 }
@@ -110,11 +139,38 @@ fn parse_durability(s: &str) -> Result<Durability, Error> {
     }
 }
 
-fn doctor(path: &str, durability: Durability, lock_path: Option<&str>) -> Result<(), Error> {
+fn doctor(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+) -> Result<(), Error> {
     let store = open_store(path, durability, lock_path)?;
     store.verify()?;
     let stats = store.stats();
+    if json {
+        let status = if stats.poisoned {
+            "poisoned"
+        } else if stats.recovered_tail {
+            "ok_tail_truncated"
+        } else {
+            "ok"
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": store.path().to_string_lossy(),
+                "status": status,
+                "stats": stats,
+            })
+        );
+        return Ok(());
+    }
     println!("path:          {}", store.path().display());
+    println!(
+        "format:        {}.{}",
+        stats.format_version_major, stats.format_version_minor
+    );
     println!("file_size:     {}", stats.file_size);
     println!("transactions:  {}", stats.transaction_count);
     println!("events:        {}", stats.event_count);
@@ -123,6 +179,9 @@ fn doctor(path: &str, durability: Durability, lock_path: Option<&str>) -> Result
     println!("jobs:          {}", stats.job_count);
     println!("last_tx_seq:   {}", stats.last_transaction_sequence);
     println!("last_event_seq:{}", stats.last_event_sequence);
+    for (state, count) in &stats.job_counts {
+        println!("jobs.{:?}        {}", state, count);
+    }
     if stats.poisoned {
         println!("status:        POISONED");
     } else if stats.recovered_tail {
@@ -133,16 +192,34 @@ fn doctor(path: &str, durability: Durability, lock_path: Option<&str>) -> Result
     Ok(())
 }
 
-fn verify(path: &str, durability: Durability, lock_path: Option<&str>) -> Result<(), Error> {
+fn verify(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+) -> Result<(), Error> {
     let store = open_store(path, durability, lock_path)?;
     store.verify()?;
-    println!("ok");
+    if json {
+        println!("{}", serde_json::json!({ "ok": true }));
+    } else {
+        println!("ok");
+    }
     Ok(())
 }
 
-fn stats(path: &str, durability: Durability, lock_path: Option<&str>) -> Result<(), Error> {
+fn stats(
+    path: &str,
+    durability: Durability,
+    lock_path: Option<&str>,
+    json: bool,
+) -> Result<(), Error> {
     let store = open_store(path, durability, lock_path)?;
     let stats = store.stats();
+    if json {
+        println!("{}", serde_json::to_string(&stats).unwrap());
+        return Ok(());
+    }
     println!("file_size {}", stats.file_size);
     println!("transaction_count {}", stats.transaction_count);
     println!("event_count {}", stats.event_count);
@@ -171,6 +248,7 @@ fn events(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
+    json: bool,
 ) -> Result<(), Error> {
     let sub = parser
         .value()
@@ -187,7 +265,11 @@ fn events(
             let limit = next_usize(parser, 10)?;
             let events = store.events_after(0, limit);
             for e in events {
-                writeln_event(&mut stdout, &e)?;
+                if json {
+                    writeln!(&mut stdout, "{}", event_json(&e))?;
+                } else {
+                    writeln_event(&mut stdout, &e)?;
+                }
             }
         }
         "stream" => {
@@ -199,7 +281,11 @@ fn events(
             let limit = next_usize(parser, 10)?;
             let events = store.stream_events(&stream_id, 0, limit);
             for e in events {
-                writeln_event(&mut stdout, &e)?;
+                if json {
+                    writeln!(&mut stdout, "{}", event_json(&e))?;
+                } else {
+                    writeln_event(&mut stdout, &e)?;
+                }
             }
         }
         _ => return Err(Error::Usage(format!("unknown events subcommand: {sub}"))),
@@ -212,6 +298,7 @@ fn projections(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
+    json: bool,
 ) -> Result<(), Error> {
     let sub = parser
         .value()
@@ -227,7 +314,15 @@ fn projections(
         "list" => {
             for name in store.projection_names() {
                 let version = store.projection_version(&name)?;
-                writeln!(stdout, "{} {}", name, version)?;
+                if json {
+                    writeln!(
+                        &mut stdout,
+                        "{}",
+                        serde_json::json!({"projection": name, "version": version})
+                    )?;
+                } else {
+                    writeln!(stdout, "{} {}", name, version)?;
+                }
             }
         }
         "get" => {
@@ -243,10 +338,24 @@ fn projections(
                 .map_err(|e| Error::Usage(e.to_string()))?;
             let value = store.get_projection(&name, key.as_bytes())?;
             match value {
-                Some(v) => stdout.write_all(&v)?,
+                Some(v) => {
+                    if json {
+                        writeln!(
+                            &mut stdout,
+                            "{}",
+                            serde_json::json!({
+                                "projection": name,
+                                "key": key,
+                                "value": hex(&v),
+                            })
+                        )?;
+                    } else {
+                        stdout.write_all(&v)?;
+                        writeln!(stdout)?;
+                    }
+                }
                 None => return Err(Error::ProjectionNotFound(name)),
             }
-            writeln!(stdout)?;
         }
         "scan" => {
             let name = parser
@@ -261,13 +370,25 @@ fn projections(
                 .unwrap_or_default();
             let entries = store.scan_projection_prefix(&name, prefix.as_bytes())?;
             for entry in entries {
-                writeln!(
-                    stdout,
-                    "{} {} {}",
-                    name,
-                    bytes_repr(&entry.key),
-                    bytes_repr(&entry.value)
-                )?;
+                if json {
+                    writeln!(
+                        &mut stdout,
+                        "{}",
+                        serde_json::json!({
+                            "projection": name,
+                            "key": String::from_utf8_lossy(&entry.key),
+                            "value": hex(&entry.value),
+                        })
+                    )?;
+                } else {
+                    writeln!(
+                        stdout,
+                        "{} {} {}",
+                        name,
+                        bytes_repr(&entry.key),
+                        bytes_repr(&entry.value)
+                    )?;
+                }
             }
         }
         _ => {
@@ -284,6 +405,7 @@ fn jobs(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
+    json: bool,
 ) -> Result<(), Error> {
     let mut state: Option<JobState> = None;
     let mut queue: Option<String> = None;
@@ -307,14 +429,31 @@ fn jobs(
     let now_ms = current_time_ms();
     let records = store.jobs(now_ms, queue.clone(), state);
     for (job_id, spec, job_state) in records {
-        println!(
-            "{} {:?} {} {} {}",
-            job_id,
-            job_state,
-            spec.queue,
-            spec.partition,
-            bytes_repr(&spec.payload)
-        );
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "job_id": job_id.to_hex(),
+                    "state": job_state_str(job_state),
+                    "queue": spec.queue,
+                    "partition": spec.partition,
+                    "payload": hex(&spec.payload),
+                    "max_attempts": spec.max_attempts,
+                    "effect_mode": effect_mode_str(spec.effect_mode),
+                    "not_before_ms": spec.not_before_ms,
+                    "idempotency_key": spec.idempotency_key,
+                })
+            );
+        } else {
+            println!(
+                "{} {:?} {} {} {}",
+                job_id,
+                job_state,
+                spec.queue,
+                spec.partition,
+                bytes_repr(&spec.payload)
+            );
+        }
     }
     Ok(())
 }
@@ -381,6 +520,7 @@ fn backup(
     path: &str,
     durability: Durability,
     lock_path: Option<&str>,
+    json: bool,
 ) -> Result<(), Error> {
     let dest = parser
         .value()
@@ -389,7 +529,11 @@ fn backup(
         .map_err(|e| Error::Usage(e.to_string()))?;
     let store = open_store(path, durability, lock_path)?;
     store.backup(&dest)?;
-    println!("backup written to {dest}");
+    if json {
+        println!("{}", serde_json::json!({ "destination": dest }));
+    } else {
+        println!("backup written to {dest}");
+    }
     Ok(())
 }
 
@@ -418,6 +562,25 @@ fn parse_job_state(s: &str) -> Result<JobState, Error> {
     }
 }
 
+fn job_state_str(state: JobState) -> &'static str {
+    match state {
+        JobState::Pending => "pending",
+        JobState::Leased => "leased",
+        JobState::RetryWait => "retry_wait",
+        JobState::Succeeded => "succeeded",
+        JobState::Dead => "dead",
+        JobState::Cancelled => "cancelled",
+        JobState::Uncertain => "uncertain",
+    }
+}
+
+fn effect_mode_str(mode: minisqlite::EffectMode) -> &'static str {
+    match mode {
+        minisqlite::EffectMode::Idempotent => "idempotent",
+        minisqlite::EffectMode::UncertainOnLeaseExpiry => "uncertain_on_lease_expiry",
+    }
+}
+
 fn writeln_event<W: Write>(out: &mut W, e: &minisqlite::PersistedEvent) -> Result<(), Error> {
     writeln!(
         out,
@@ -431,6 +594,27 @@ fn writeln_event<W: Write>(out: &mut W, e: &minisqlite::PersistedEvent) -> Resul
         bytes_repr(&e.event.payload)
     )?;
     Ok(())
+}
+
+fn event_json(e: &minisqlite::PersistedEvent) -> String {
+    serde_json::json!({
+        "global_sequence": e.global_sequence,
+        "stream_version": e.stream_version,
+        "transaction_id": e.transaction_id.to_hex(),
+        "frame_offset": e.frame_offset,
+        "event": {
+            "event_id": e.event.event_id.to_hex(),
+            "stream_id": e.event.stream_id,
+            "event_type": e.event.event_type,
+            "schema_version": e.event.schema_version,
+            "occurred_at_ms": e.event.occurred_at_ms,
+            "causation_id": e.event.causation_id.map(|id| id.to_hex()),
+            "correlation_id": e.event.correlation_id.map(|id| id.to_hex()),
+            "payload": hex(&e.event.payload),
+            "metadata": hex(&e.event.metadata),
+        }
+    })
+    .to_string()
 }
 
 fn bytes_repr(v: &[u8]) -> String {
