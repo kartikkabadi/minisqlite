@@ -1,7 +1,7 @@
 use crate::btree::BTree;
 use crate::catalog::{decode_index_schema, decode_table_schema, encode_index_schema, encode_table_schema};
 use crate::pager::Pager;
-use crate::sql::{Assignment, BinOp, ColSpec, ColumnConstraint, Expr, JoinClause, JoinType, Order, SelectCol, SelectStmt, Statement, TableConstraint, TableRef, UnaryOp};
+use crate::sql::{Assignment, BinOp, ColSpec, ColumnConstraint, Expr, JoinClause, JoinType, Order, Parser, SelectCol, SelectStmt, Statement, TableConstraint, TableRef, UnaryOp};
 use crate::types::{ColumnDef, IndexSchema, Row, TableSchema, TypeAffinity, Value, compare_values, decode_value, encode_value};
 use crate::functions::call_function;
 use crate::wal::WriteAheadLog;
@@ -149,6 +149,12 @@ impl Database {
         }
         self.pager.catalog_root = catalog.flush(&mut self.pager)?;
         Ok(())
+    }
+
+    pub fn execute_sql(&mut self, sql: &str) -> Result<ExecuteResult, String> {
+        let mut parser = Parser::new(sql);
+        let stmt = parser.parse()?;
+        self.execute(stmt)
     }
 
     pub fn execute(&mut self, stmt: Statement) -> Result<ExecuteResult, String> {

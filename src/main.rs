@@ -1,17 +1,6 @@
-mod btree;
-mod catalog;
-mod executor;
-mod functions;
-mod pager;
-mod sql;
-mod types;
-mod wal;
-
-use executor::{Database, ExecuteResult};
-use sql::Parser;
+use minisqlite::{Database, ExecuteResult, Parser, Value};
 use std::io::{self, BufRead, Write};
 use std::time::Instant;
-use types::Value;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
