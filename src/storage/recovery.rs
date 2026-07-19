@@ -262,7 +262,7 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
         let e = event_record(1, 1);
-        let payload = encode_records(&[e.clone()]);
+        let payload = encode_records(std::slice::from_ref(&e));
         let header = FrameHeader {
             version: 1,
             total_frame_length: 0,
