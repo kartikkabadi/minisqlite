@@ -462,6 +462,13 @@ impl Store {
         let guard = self.inner.lock().unwrap();
         guard.poisoned
     }
+
+    /// Close the store, flushing any pending writes and releasing the file lock.
+    pub fn close(self) -> Result<(), Error> {
+        let mut guard = self.inner.lock().unwrap();
+        guard.data_file.sync()?;
+        Ok(())
+    }
 }
 
 impl StoreInner {
