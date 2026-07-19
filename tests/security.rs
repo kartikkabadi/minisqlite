@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(unix)]
 use minisqlite::{Durability, StoreBuilder};
 
 #[test]
