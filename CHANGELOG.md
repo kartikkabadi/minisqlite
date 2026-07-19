@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- Polished public API and library documentation
+- Fixed all `cargo clippy` warnings and applied `cargo fmt`
+- Added `hex_encode` helper for consistent blob rendering
+- Improved README with crates.io badges, install instructions, and product positioning
+
 ## 0.2.0
 
 - Initial public release of `minisqlite`

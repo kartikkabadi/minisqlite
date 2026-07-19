@@ -385,7 +385,12 @@ impl Parser {
                 }
                 if let Some(Token::Keyword(kw)) = self.peek() {
                     let u = kw.to_uppercase();
-                    if u == "PRIMARY" || u == "UNIQUE" || u == "FOREIGN" || u == "CHECK" || u == "CONSTRAINT" {
+                    if u == "PRIMARY"
+                        || u == "UNIQUE"
+                        || u == "FOREIGN"
+                        || u == "CHECK"
+                        || u == "CONSTRAINT"
+                    {
                         constraints.push(self.parse_table_constraint()?);
                     } else {
                         columns.push(self.parse_column_def()?);
@@ -600,7 +605,9 @@ impl Parser {
             };
             Ok(ColumnConstraint::References { table, column })
         } else if self.match_keyword("AUTOINCREMENT") {
-            Ok(ColumnConstraint::PrimaryKey { autoincrement: true })
+            Ok(ColumnConstraint::PrimaryKey {
+                autoincrement: true,
+            })
         } else {
             Err("Expected column constraint".to_string())
         }
@@ -739,7 +746,10 @@ impl Parser {
         } else {
             None
         };
-        Ok(Statement::Delete { table, where_clause })
+        Ok(Statement::Delete {
+            table,
+            where_clause,
+        })
     }
 
     fn parse_ident_list(&mut self) -> Result<Vec<String>, String> {
@@ -759,7 +769,10 @@ impl Parser {
         let distinct = self.match_keyword("DISTINCT");
         let mut columns = Vec::new();
         if self.eat_punct('*') {
-            columns.push(SelectCol { expr: Expr::Star, alias: None });
+            columns.push(SelectCol {
+                expr: Expr::Star,
+                alias: None,
+            });
         } else {
             loop {
                 columns.push(self.parse_select_col()?);
@@ -887,7 +900,8 @@ impl Parser {
             // subquery
             let sub = self.parse_select()?;
             self.expect(Token::Punct(')'))?;
-            let alias = if self.match_keyword("AS") || matches!(self.peek(), Some(Token::Ident(_))) {
+            let alias = if self.match_keyword("AS") || matches!(self.peek(), Some(Token::Ident(_)))
+            {
                 Some(self.expect_ident()?)
             } else {
                 None
@@ -1059,9 +1073,7 @@ impl Parser {
         loop {
             let op = if self.eat_punct('=') {
                 Some(BinOp::Eq)
-            } else if self.eat_two_punct('!', '=') {
-                Some(BinOp::Neq)
-            } else if self.eat_two_punct('<', '>') {
+            } else if self.eat_two_punct('!', '=') || self.eat_two_punct('<', '>') {
                 Some(BinOp::Neq)
             } else if self.eat_two_punct('<', '=') {
                 Some(BinOp::Lte)
@@ -1252,7 +1264,11 @@ impl Parser {
                     Ok(Expr::Boolean(false))
                 } else if u == "CURRENT_TIMESTAMP" || u == "CURRENT_DATE" || u == "CURRENT_TIME" {
                     self.pos += 1;
-                    Ok(Expr::Function { name: u, args: Vec::new(), distinct: false })
+                    Ok(Expr::Function {
+                        name: u,
+                        args: Vec::new(),
+                        distinct: false,
+                    })
                 } else if u == "CASE" {
                     self.pos += 1;
                     let expr = if !self.match_keyword("WHEN") {
@@ -1431,7 +1447,11 @@ fn tokenize(input: &str) -> Vec<Token> {
             continue;
         }
         if c.is_ascii_digit()
-            || (c == '.' && chars.get(i + 1).map(|x| x.is_ascii_digit()).unwrap_or(false))
+            || (c == '.'
+                && chars
+                    .get(i + 1)
+                    .map(|x| x.is_ascii_digit())
+                    .unwrap_or(false))
         {
             let mut s = String::new();
             if c == '.' {
@@ -1450,7 +1470,14 @@ fn tokenize(input: &str) -> Vec<Token> {
                     dot_seen = true;
                     s.push(ch);
                     i += 1;
-                } else if (ch == 'e' || ch == 'E') && (chars.get(i + 1) == Some(&'+') || chars.get(i + 1) == Some(&'-') || chars.get(i + 1).map(|x| x.is_ascii_digit()).unwrap_or(false)) {
+                } else if (ch == 'e' || ch == 'E')
+                    && (chars.get(i + 1) == Some(&'+')
+                        || chars.get(i + 1) == Some(&'-')
+                        || chars
+                            .get(i + 1)
+                            .map(|x| x.is_ascii_digit())
+                            .unwrap_or(false))
+                {
                     s.push(ch);
                     i += 1;
                     if chars.get(i) == Some(&'+') || chars.get(i) == Some(&'-') {
@@ -1544,16 +1571,92 @@ fn token_to_string(t: &Token) -> String {
 static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let mut set = HashSet::new();
     for kw in [
-        "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "CREATE", "TABLE", "INDEX", "ON",
-        "JOIN", "INNER", "LEFT", "RIGHT", "CROSS", "OUTER", "GROUP", "BY", "HAVING", "ORDER",
-        "ASC", "DESC", "LIMIT", "OFFSET", "DISTINCT", "ALL", "AS", "AND", "OR", "NOT", "NULL",
-        "IS", "IN", "BETWEEN", "LIKE", "GLOB", "REGEXP", "MATCH", "ESCAPE", "CASE", "WHEN",
-        "THEN", "ELSE", "END", "CAST", "EXPLAIN", "PRAGMA", "VACUUM", "BEGIN", "COMMIT",
-        "ROLLBACK", "END", "TRANSACTION", "SAVEPOINT", "RELEASE", "DELETE", "UPDATE", "SET",
-        "ALTER", "ADD", "COLUMN", "DROP", "IF", "EXISTS", "UNIQUE", "PRIMARY", "KEY",
-        "AUTOINCREMENT", "DEFAULT", "CHECK", "REFERENCES", "FOREIGN", "CONSTRAINT", "TRUE",
-        "FALSE", "CURRENT_TIMESTAMP", "CURRENT_DATE", "CURRENT_TIME", "OR", "REPLACE",
-        "IGNORE", "ABORT", "FAIL", "WORK", "QUERY", "PLAN",
+        "SELECT",
+        "FROM",
+        "WHERE",
+        "INSERT",
+        "INTO",
+        "VALUES",
+        "CREATE",
+        "TABLE",
+        "INDEX",
+        "ON",
+        "JOIN",
+        "INNER",
+        "LEFT",
+        "RIGHT",
+        "CROSS",
+        "OUTER",
+        "GROUP",
+        "BY",
+        "HAVING",
+        "ORDER",
+        "ASC",
+        "DESC",
+        "LIMIT",
+        "OFFSET",
+        "DISTINCT",
+        "ALL",
+        "AS",
+        "AND",
+        "OR",
+        "NOT",
+        "NULL",
+        "IS",
+        "IN",
+        "BETWEEN",
+        "LIKE",
+        "GLOB",
+        "REGEXP",
+        "MATCH",
+        "ESCAPE",
+        "CASE",
+        "WHEN",
+        "THEN",
+        "ELSE",
+        "END",
+        "CAST",
+        "EXPLAIN",
+        "PRAGMA",
+        "VACUUM",
+        "BEGIN",
+        "COMMIT",
+        "ROLLBACK",
+        "END",
+        "TRANSACTION",
+        "SAVEPOINT",
+        "RELEASE",
+        "DELETE",
+        "UPDATE",
+        "SET",
+        "ALTER",
+        "ADD",
+        "COLUMN",
+        "DROP",
+        "IF",
+        "EXISTS",
+        "UNIQUE",
+        "PRIMARY",
+        "KEY",
+        "AUTOINCREMENT",
+        "DEFAULT",
+        "CHECK",
+        "REFERENCES",
+        "FOREIGN",
+        "CONSTRAINT",
+        "TRUE",
+        "FALSE",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_DATE",
+        "CURRENT_TIME",
+        "OR",
+        "REPLACE",
+        "IGNORE",
+        "ABORT",
+        "FAIL",
+        "WORK",
+        "QUERY",
+        "PLAN",
     ] {
         set.insert(kw);
     }
@@ -1562,9 +1665,30 @@ static KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 static TYPE_KEYWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     let mut set = HashSet::new();
     for kw in [
-        "INT", "INTEGER", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT", "INT2", "INT8",
-        "REAL", "DOUBLE", "FLOAT", "NUMERIC", "DECIMAL", "BOOLEAN", "DATE", "DATETIME",
-        "TEXT", "VARCHAR", "CHAR", "CLOB", "BLOB", "STRING", "TIMESTAMP", "TIME",
+        "INT",
+        "INTEGER",
+        "TINYINT",
+        "SMALLINT",
+        "MEDIUMINT",
+        "BIGINT",
+        "INT2",
+        "INT8",
+        "REAL",
+        "DOUBLE",
+        "FLOAT",
+        "NUMERIC",
+        "DECIMAL",
+        "BOOLEAN",
+        "DATE",
+        "DATETIME",
+        "TEXT",
+        "VARCHAR",
+        "CHAR",
+        "CLOB",
+        "BLOB",
+        "STRING",
+        "TIMESTAMP",
+        "TIME",
     ] {
         set.insert(kw);
     }

@@ -1,6 +1,17 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+#[doc(hidden)]
+pub fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = Vec::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        s.push(HEX[(byte >> 4) as usize]);
+        s.push(HEX[(byte & 0xf) as usize]);
+    }
+    String::from_utf8(s).unwrap()
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Null,
@@ -78,7 +89,7 @@ impl Eq for Value {}
 
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(compare_values(self, other))
+        Some(self.cmp(other))
     }
 }
 
@@ -101,13 +112,7 @@ impl fmt::Display for Value {
                 }
             }
             Value::Text(s) => write!(f, "{}", s),
-            Value::Blob(b) => {
-                write!(f, "x'")?;
-                for byte in b {
-                    write!(f, "{:02x}", byte)?;
-                }
-                write!(f, "'")
-            }
+            Value::Blob(b) => write!(f, "x'{}'", hex_encode(b)),
         }
     }
 }
@@ -165,41 +170,71 @@ pub fn decode_value(bytes: &[u8], offset: &mut usize) -> Option<Value> {
     match tag {
         0 => Some(Value::Null),
         1 => {
-            if *offset + 8 > bytes.len() { return None; }
+            if *offset + 8 > bytes.len() {
+                return None;
+            }
             let v = i64::from_be_bytes([
-                bytes[*offset], bytes[*offset + 1], bytes[*offset + 2], bytes[*offset + 3],
-                bytes[*offset + 4], bytes[*offset + 5], bytes[*offset + 6], bytes[*offset + 7],
+                bytes[*offset],
+                bytes[*offset + 1],
+                bytes[*offset + 2],
+                bytes[*offset + 3],
+                bytes[*offset + 4],
+                bytes[*offset + 5],
+                bytes[*offset + 6],
+                bytes[*offset + 7],
             ]);
             *offset += 8;
             Some(Value::Integer(v))
         }
         2 => {
-            if *offset + 8 > bytes.len() { return None; }
+            if *offset + 8 > bytes.len() {
+                return None;
+            }
             let bits = u64::from_be_bytes([
-                bytes[*offset], bytes[*offset + 1], bytes[*offset + 2], bytes[*offset + 3],
-                bytes[*offset + 4], bytes[*offset + 5], bytes[*offset + 6], bytes[*offset + 7],
+                bytes[*offset],
+                bytes[*offset + 1],
+                bytes[*offset + 2],
+                bytes[*offset + 3],
+                bytes[*offset + 4],
+                bytes[*offset + 5],
+                bytes[*offset + 6],
+                bytes[*offset + 7],
             ]);
             *offset += 8;
             Some(Value::Real(f64::from_bits(bits)))
         }
         3 => {
-            if *offset + 4 > bytes.len() { return None; }
+            if *offset + 4 > bytes.len() {
+                return None;
+            }
             let len = u32::from_be_bytes([
-                bytes[*offset], bytes[*offset + 1], bytes[*offset + 2], bytes[*offset + 3],
+                bytes[*offset],
+                bytes[*offset + 1],
+                bytes[*offset + 2],
+                bytes[*offset + 3],
             ]) as usize;
             *offset += 4;
-            if *offset + len > bytes.len() { return None; }
+            if *offset + len > bytes.len() {
+                return None;
+            }
             let s = String::from_utf8_lossy(&bytes[*offset..*offset + len]).to_string();
             *offset += len;
             Some(Value::Text(s))
         }
         4 => {
-            if *offset + 4 > bytes.len() { return None; }
+            if *offset + 4 > bytes.len() {
+                return None;
+            }
             let len = u32::from_be_bytes([
-                bytes[*offset], bytes[*offset + 1], bytes[*offset + 2], bytes[*offset + 3],
+                bytes[*offset],
+                bytes[*offset + 1],
+                bytes[*offset + 2],
+                bytes[*offset + 3],
             ]) as usize;
             *offset += 4;
-            if *offset + len > bytes.len() { return None; }
+            if *offset + len > bytes.len() {
+                return None;
+            }
             let b = bytes[*offset..*offset + len].to_vec();
             *offset += len;
             Some(Value::Blob(b))
@@ -226,10 +261,7 @@ impl TypeAffinity {
             TypeAffinity::Text
         } else if upper.contains("BLOB") || upper.is_empty() {
             TypeAffinity::Blob
-        } else if upper.contains("REAL")
-            || upper.contains("FLOA")
-            || upper.contains("DOUB")
-        {
+        } else if upper.contains("REAL") || upper.contains("FLOA") || upper.contains("DOUB") {
             TypeAffinity::Real
         } else {
             TypeAffinity::Numeric
@@ -239,13 +271,19 @@ impl TypeAffinity {
     pub fn apply(&self, val: &Value) -> Value {
         match self {
             TypeAffinity::Integer => match val {
-                Value::Text(s) => s.parse::<i64>().map(Value::Integer).unwrap_or_else(|_| val.clone()),
+                Value::Text(s) => s
+                    .parse::<i64>()
+                    .map(Value::Integer)
+                    .unwrap_or_else(|_| val.clone()),
                 Value::Real(f) => Value::Integer(*f as i64),
                 _ => val.clone(),
             },
             TypeAffinity::Real => match val {
                 Value::Integer(i) => Value::Real(*i as f64),
-                Value::Text(s) => s.parse::<f64>().map(Value::Real).unwrap_or_else(|_| val.clone()),
+                Value::Text(s) => s
+                    .parse::<f64>()
+                    .map(Value::Real)
+                    .unwrap_or_else(|_| val.clone()),
                 _ => val.clone(),
             },
             TypeAffinity::Text => match val {

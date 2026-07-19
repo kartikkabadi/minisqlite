@@ -1,9 +1,17 @@
 use crate::btree::BTree;
-use crate::catalog::{decode_index_schema, decode_table_schema, encode_index_schema, encode_table_schema};
-use crate::pager::Pager;
-use crate::sql::{Assignment, BinOp, ColSpec, ColumnConstraint, Expr, JoinClause, JoinType, Order, Parser, SelectCol, SelectStmt, Statement, TableConstraint, TableRef, UnaryOp};
-use crate::types::{ColumnDef, IndexSchema, Row, TableSchema, TypeAffinity, Value, compare_values, decode_value, encode_value};
+use crate::catalog::{
+    decode_index_schema, decode_table_schema, encode_index_schema, encode_table_schema,
+};
 use crate::functions::call_function;
+use crate::pager::Pager;
+use crate::sql::{
+    Assignment, BinOp, ColSpec, ColumnConstraint, Expr, JoinClause, JoinType, Order, Parser,
+    SelectCol, SelectStmt, Statement, TableConstraint, TableRef, UnaryOp,
+};
+use crate::types::{
+    compare_values, decode_value, encode_value, ColumnDef, IndexSchema, Row, TableSchema,
+    TypeAffinity, Value,
+};
 use crate::wal::WriteAheadLog;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -116,17 +124,27 @@ impl Database {
                 if let Some(schema) = decode_table_schema(payload) {
                     let mut btree = BTree::open(schema.root_page);
                     btree.load(&mut self.pager)?;
-                    let next_rowid = btree.scan().map(|(k, _)| decode_rowid_key(k)).max().unwrap_or(0) + 1;
+                    let next_rowid = btree
+                        .scan()
+                        .map(|(k, _)| decode_rowid_key(k))
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
                     self.tables.insert(
                         schema.name.clone(),
-                        Table { schema, btree, next_rowid },
+                        Table {
+                            schema,
+                            btree,
+                            next_rowid,
+                        },
                     );
                 }
             } else if key.starts_with(b"index:") {
                 if let Some(schema) = decode_index_schema(payload) {
                     let mut btree = BTree::open(schema.root_page);
                     btree.load(&mut self.pager)?;
-                    self.indexes.insert(schema.name.clone(), Index { schema, btree });
+                    self.indexes
+                        .insert(schema.name.clone(), Index { schema, btree });
                 }
             }
         }
@@ -159,22 +177,37 @@ impl Database {
 
     pub fn execute(&mut self, stmt: Statement) -> Result<ExecuteResult, String> {
         match stmt {
-            Statement::CreateTable { name, columns, if_not_exists, constraints } => {
-                self.create_table(name, columns, constraints, if_not_exists)
-            }
+            Statement::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+                constraints,
+            } => self.create_table(name, columns, constraints, if_not_exists),
             Statement::DropTable { name, if_exists } => self.drop_table(name, if_exists),
-            Statement::CreateIndex { name, table, columns, unique, if_not_exists } => {
-                self.create_index(name, table, columns, unique, if_not_exists)
-            }
+            Statement::CreateIndex {
+                name,
+                table,
+                columns,
+                unique,
+                if_not_exists,
+            } => self.create_index(name, table, columns, unique, if_not_exists),
             Statement::DropIndex { name, if_exists } => self.drop_index(name, if_exists),
-            Statement::Insert { table, columns, values, or_replace } => {
-                self.insert(table, columns, values, or_replace)
-            }
+            Statement::Insert {
+                table,
+                columns,
+                values,
+                or_replace,
+            } => self.insert(table, columns, values, or_replace),
             Statement::Select(select) => self.select(select),
-            Statement::Update { table, assignments, where_clause } => {
-                self.update(table, assignments, where_clause)
-            }
-            Statement::Delete { table, where_clause } => self.delete(table, where_clause),
+            Statement::Update {
+                table,
+                assignments,
+                where_clause,
+            } => self.update(table, assignments, where_clause),
+            Statement::Delete {
+                table,
+                where_clause,
+            } => self.delete(table, where_clause),
             Statement::AlterAddColumn { table, column } => self.alter_add_column(table, column),
             Statement::Begin => self.begin(),
             Statement::Commit => self.commit(),
@@ -185,7 +218,13 @@ impl Database {
         }
     }
 
-    fn create_table(&mut self, name: String, columns: Vec<ColSpec>, table_constraints: Vec<TableConstraint>, if_not_exists: bool) -> Result<ExecuteResult, String> {
+    fn create_table(
+        &mut self,
+        name: String,
+        columns: Vec<ColSpec>,
+        table_constraints: Vec<TableConstraint>,
+        if_not_exists: bool,
+    ) -> Result<ExecuteResult, String> {
         if self.tables.contains_key(&name) {
             if if_not_exists {
                 return Ok(ExecuteResult::Ok(format!("Table {} already exists", name)));
@@ -244,8 +283,13 @@ impl Database {
             schema.columns.push(col);
         }
         // INTEGER PRIMARY KEY is an alias for the rowid and auto-increments.
-        let pk_cols: Vec<usize> = schema.columns.iter().enumerate()
-            .filter(|(_, c)| c.primary_key).map(|(i, _)| i).collect();
+        let pk_cols: Vec<usize> = schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.primary_key)
+            .map(|(i, _)| i)
+            .collect();
         if pk_cols.len() == 1 {
             let i = pk_cols[0];
             if matches!(schema.columns[i].affinity, TypeAffinity::Integer) {
@@ -254,7 +298,11 @@ impl Database {
         }
         self.tables.insert(
             name.clone(),
-            Table { schema, btree, next_rowid: 1 },
+            Table {
+                schema,
+                btree,
+                next_rowid: 1,
+            },
         );
         self.save_catalog().map_err(|e| e.to_string())?;
         self.pager.flush().map_err(|e| e.to_string())?;
@@ -269,7 +317,8 @@ impl Database {
                 return Err(format!("Table {} not found", name));
             }
         }
-        let to_remove: Vec<String> = self.indexes
+        let to_remove: Vec<String> = self
+            .indexes
             .iter()
             .filter(|(_, idx)| idx.schema.table_name.eq_ignore_ascii_case(&name))
             .map(|(n, _)| n.clone())
@@ -283,7 +332,14 @@ impl Database {
         Ok(ExecuteResult::Ok(format!("Table {} dropped", name)))
     }
 
-    fn create_index(&mut self, name: String, table: String, columns: Vec<String>, unique: bool, if_not_exists: bool) -> Result<ExecuteResult, String> {
+    fn create_index(
+        &mut self,
+        name: String,
+        table: String,
+        columns: Vec<String>,
+        unique: bool,
+        if_not_exists: bool,
+    ) -> Result<ExecuteResult, String> {
         if self.indexes.contains_key(&name) {
             if if_not_exists {
                 return Ok(ExecuteResult::Ok(format!("Index {} already exists", name)));
@@ -291,14 +347,20 @@ impl Database {
                 return Err(format!("Index {} already exists", name));
             }
         }
-        let table_ref = self.tables.get(&table).ok_or_else(|| format!("Table {} not found", table))?;
+        let table_ref = self
+            .tables
+            .get(&table)
+            .ok_or_else(|| format!("Table {} not found", table))?;
         for c in &columns {
             if table_ref.schema.col_index(c).is_none() {
                 return Err(format!("Column {} not found in {}", c, table));
             }
         }
         let mut btree = BTree::create(&mut self.pager).map_err(|e| e.to_string())?;
-        let col_idx: Vec<usize> = columns.iter().map(|c| table_ref.schema.col_index(c).unwrap()).collect();
+        let col_idx: Vec<usize> = columns
+            .iter()
+            .map(|c| table_ref.schema.col_index(c).unwrap())
+            .collect();
         for (key, payload) in table_ref.btree.scan() {
             let row = decode_row(payload).ok_or("Corrupt row")?;
             let rowid = decode_rowid_key(key);
@@ -333,19 +395,33 @@ impl Database {
         Ok(ExecuteResult::Ok(format!("Index {} dropped", name)))
     }
 
-    fn insert(&mut self, table: String, columns: Option<Vec<String>>, values: Vec<Vec<Expr>>, or_replace: bool) -> Result<ExecuteResult, String> {
+    fn insert(
+        &mut self,
+        table: String,
+        columns: Option<Vec<String>>,
+        values: Vec<Vec<Expr>>,
+        or_replace: bool,
+    ) -> Result<ExecuteResult, String> {
         let table_name = table;
         let mut inserted = 0;
         for row_values in values {
             let col_names = columns.clone().unwrap_or_else(|| {
-                self.tables.get(&table_name).map(|t| t.schema.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default()
+                self.tables
+                    .get(&table_name)
+                    .map(|t| t.schema.columns.iter().map(|c| c.name.clone()).collect())
+                    .unwrap_or_default()
             });
             if row_values.len() != col_names.len() {
                 return Err("Column count mismatch".to_string());
             }
             let mut provided = HashMap::new();
             for (i, name) in col_names.iter().enumerate() {
-                let v = eval_expr(self, &row_values[i], &EvalContext::new(&[], &HashMap::new()), None)?;
+                let v = eval_expr(
+                    self,
+                    &row_values[i],
+                    &EvalContext::new(&[], &HashMap::new()),
+                    None,
+                )?;
                 provided.insert(name.clone(), v);
             }
 
@@ -382,20 +458,31 @@ impl Database {
                 }
             }
 
-            let mut rowid = pk_val.as_ref().and_then(Value::as_i64).unwrap_or(next_rowid);
-            if pk_idx.map_or(false, |i| schema.columns[i].autoincrement) && provided.get(&schema.columns[pk_idx.unwrap()].name).is_none() {
+            let mut rowid = pk_val
+                .as_ref()
+                .and_then(Value::as_i64)
+                .unwrap_or(next_rowid);
+            if pk_idx.map_or(false, |i| schema.columns[i].autoincrement)
+                && !provided.contains_key(&schema.columns[pk_idx.unwrap()].name)
+            {
                 rowid = rowid.max(autoinc_counter);
             }
 
             if let Some(i) = pk_idx {
-                if schema.columns[i].primary_key && schema.columns[i].autoincrement && matches!(schema.columns[i].affinity, TypeAffinity::Integer) {
+                if schema.columns[i].primary_key
+                    && schema.columns[i].autoincrement
+                    && matches!(schema.columns[i].affinity, TypeAffinity::Integer)
+                {
                     row[i] = Value::Integer(rowid);
                 }
             }
 
             let existing: Vec<(i64, Row)> = {
                 let t = self.tables.get(&table_name).ok_or("Table not found")?;
-                t.btree.scan().map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap())).collect()
+                t.btree
+                    .scan()
+                    .map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap()))
+                    .collect()
             };
 
             for (i, col) in schema.columns.iter().enumerate() {
@@ -408,7 +495,10 @@ impl Database {
                                     t.btree.delete(*eid);
                                     break;
                                 } else {
-                                    return Err(format!("PRIMARY KEY constraint failed: {}", col.name));
+                                    return Err(format!(
+                                        "PRIMARY KEY constraint failed: {}",
+                                        col.name
+                                    ));
                                 }
                             } else {
                                 return Err(format!("UNIQUE constraint failed: {}", col.name));
@@ -420,7 +510,9 @@ impl Database {
 
             {
                 let t = self.tables.get_mut(&table_name).unwrap();
-                if pk_idx.map_or(false, |i| t.schema.columns[i].autoincrement) && provided.get(&t.schema.columns[pk_idx.unwrap()].name).is_none() {
+                if pk_idx.map_or(false, |i| t.schema.columns[i].autoincrement)
+                    && !provided.contains_key(&t.schema.columns[pk_idx.unwrap()].name)
+                {
                     t.schema.autoinc_counter = t.schema.autoinc_counter.max(rowid + 1);
                 }
                 t.next_rowid = t.next_rowid.max(rowid + 1);
@@ -438,19 +530,31 @@ impl Database {
         let mut rows = eval_from(self, &select.from, &select.joins)?;
         if let Some(w) = &select.where_clause {
             let empty_aliases = HashMap::new();
-            rows.retain(|r| eval_expr(self, w, &EvalContext::new(r, &empty_aliases), None).unwrap_or(Value::Null).is_truthy());
+            rows.retain(|r| {
+                eval_expr(self, w, &EvalContext::new(r, &empty_aliases), None)
+                    .unwrap_or(Value::Null)
+                    .is_truthy()
+            });
         }
         let is_aggregate = !select.group_by.is_empty()
             || select.columns.iter().any(|c| has_aggregate(&c.expr))
-            || select.having.as_ref().map_or(false, |h| has_aggregate(h));
+            || select.having.as_ref().map_or(false, has_aggregate);
         let mut result: Vec<(Vec<Value>, HashMap<String, Value>)> = Vec::new();
         let first_ctx = rows.first().cloned().unwrap_or_default();
         if is_aggregate {
             let groups = group_rows(self, rows, &select.group_by)?;
             for group in groups {
-                let (values, aliases) = eval_select_columns(self, &select.columns, &group[0], Some(&group))?;
+                let (values, aliases) =
+                    eval_select_columns(self, &select.columns, &group[0], Some(&group))?;
                 if let Some(h) = &select.having {
-                    if !eval_expr(self, h, &EvalContext::new(&group[0], &aliases), Some(&group))?.is_truthy() {
+                    if !eval_expr(
+                        self,
+                        h,
+                        &EvalContext::new(&group[0], &aliases),
+                        Some(&group),
+                    )?
+                    .is_truthy()
+                    {
                         continue;
                     }
                 }
@@ -467,11 +571,15 @@ impl Database {
             result.retain(|(v, _)| seen.insert(v.clone()));
         }
         if !select.order_by.is_empty() {
-            result.sort_by(|(a, al_a), (b, al_b)| compare_result_rows(self, &select.order_by, a, al_a, b, al_b));
+            result.sort_by(|(a, al_a), (b, al_b)| {
+                compare_result_rows(self, &select.order_by, a, al_a, b, al_b)
+            });
         }
         let mut values: Vec<Vec<Value>> = result.into_iter().map(|(v, _)| v).collect();
         if let Some(limit_expr) = &select.limit {
-            let limit = eval_const_expr(limit_expr).and_then(|v| v.as_i64()).ok_or("LIMIT must be an integer")? as usize;
+            let limit = eval_const_expr(limit_expr)
+                .and_then(|v| v.as_i64())
+                .ok_or("LIMIT must be an integer")? as usize;
             let offset = if let Some(o) = &select.offset {
                 eval_const_expr(o).and_then(|v| v.as_i64()).unwrap_or(0) as usize
             } else {
@@ -480,28 +588,62 @@ impl Database {
             values = values.into_iter().skip(offset).take(limit).collect();
         }
         let header = make_header(self, &select.columns, &first_ctx, &select.from);
-        Ok(ExecuteResult::Rows { header, rows: values.into_iter().map(Row::from).collect() })
+        Ok(ExecuteResult::Rows {
+            header,
+            rows: values.into_iter().map(Row::from).collect(),
+        })
     }
 
-    fn update(&mut self, table: String, assignments: Vec<Assignment>, where_clause: Option<Expr>) -> Result<ExecuteResult, String> {
+    fn update(
+        &mut self,
+        table: String,
+        assignments: Vec<Assignment>,
+        where_clause: Option<Expr>,
+    ) -> Result<ExecuteResult, String> {
         let table_name = table;
         let snapshot: Vec<(i64, Row)> = {
             let t = self.tables.get(&table_name).ok_or("Table not found")?;
-            t.btree.scan().map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap())).collect()
+            t.btree
+                .scan()
+                .map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap()))
+                .collect()
         };
-        let schema = self.tables.get(&table_name).ok_or("Table not found")?.schema.clone();
+        let schema = self
+            .tables
+            .get(&table_name)
+            .ok_or("Table not found")?
+            .schema
+            .clone();
         let mut updates: Vec<(i64, Row)> = Vec::new();
         for (rowid, row) in snapshot {
-            let sr = SourceRow { table_name: table_name.clone(), alias: None, schema: Rc::new(schema.clone()), rowid, values: row.clone() };
+            let sr = SourceRow {
+                table_name: table_name.clone(),
+                alias: None,
+                schema: Rc::new(schema.clone()),
+                rowid,
+                values: row.clone(),
+            };
             if let Some(w) = &where_clause {
-                if !eval_expr(self, w, &EvalContext::new(&[sr.clone()], &HashMap::new()), None)?.is_truthy() {
+                if !eval_expr(
+                    self,
+                    w,
+                    &EvalContext::new(&[sr.clone()], &HashMap::new()),
+                    None,
+                )?
+                .is_truthy()
+                {
                     continue;
                 }
             }
             let mut new_row = row.clone();
             for a in &assignments {
                 let idx = schema.col_index(&a.column).ok_or("Column not found")?;
-                let v = eval_expr(self, &a.expr, &EvalContext::new(&[sr.clone()], &HashMap::new()), None)?;
+                let v = eval_expr(
+                    self,
+                    &a.expr,
+                    &EvalContext::new(&[sr.clone()], &HashMap::new()),
+                    None,
+                )?;
                 new_row[idx] = schema.columns[idx].affinity.apply(&v);
             }
             for (i, col) in schema.columns.iter().enumerate() {
@@ -523,18 +665,37 @@ impl Database {
         Ok(ExecuteResult::Ok(format!("{} row(s) updated", count)))
     }
 
-    fn delete(&mut self, table: String, where_clause: Option<Expr>) -> Result<ExecuteResult, String> {
+    fn delete(
+        &mut self,
+        table: String,
+        where_clause: Option<Expr>,
+    ) -> Result<ExecuteResult, String> {
         let table_name = table;
         let snapshot: Vec<(i64, Row)> = {
             let t = self.tables.get(&table_name).ok_or("Table not found")?;
-            t.btree.scan().map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap())).collect()
+            t.btree
+                .scan()
+                .map(|(k, p)| (decode_rowid_key(k), decode_row(p).unwrap()))
+                .collect()
         };
-        let schema = self.tables.get(&table_name).ok_or("Table not found")?.schema.clone();
+        let schema = self
+            .tables
+            .get(&table_name)
+            .ok_or("Table not found")?
+            .schema
+            .clone();
         let mut rowids: Vec<i64> = Vec::new();
         for (rowid, row) in snapshot {
-            let sr = SourceRow { table_name: table_name.clone(), alias: None, schema: Rc::new(schema.clone()), rowid, values: row };
+            let sr = SourceRow {
+                table_name: table_name.clone(),
+                alias: None,
+                schema: Rc::new(schema.clone()),
+                rowid,
+                values: row,
+            };
             if let Some(w) = &where_clause {
-                if !eval_expr(self, w, &EvalContext::new(&[sr], &HashMap::new()), None)?.is_truthy() {
+                if !eval_expr(self, w, &EvalContext::new(&[sr], &HashMap::new()), None)?.is_truthy()
+                {
                     continue;
                 }
             }
@@ -552,7 +713,11 @@ impl Database {
         Ok(ExecuteResult::Ok(format!("{} row(s) deleted", count)))
     }
 
-    fn alter_add_column(&mut self, table: String, column: ColSpec) -> Result<ExecuteResult, String> {
+    fn alter_add_column(
+        &mut self,
+        table: String,
+        column: ColSpec,
+    ) -> Result<ExecuteResult, String> {
         let table_name = table;
         let mut col = ColumnDef::new(&column.name, &column.type_name);
         for c in column.constraints {
@@ -709,7 +874,7 @@ impl Database {
 
     pub fn show_schemas(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for (_, table) in &self.tables {
+        for table in self.tables.values() {
             let cols: Vec<String> = table
                 .schema
                 .columns
@@ -731,7 +896,11 @@ impl Database {
                     s
                 })
                 .collect();
-            out.push(format!("CREATE TABLE {} ({})", table.schema.name, cols.join(", ")));
+            out.push(format!(
+                "CREATE TABLE {} ({})",
+                table.schema.name,
+                cols.join(", ")
+            ));
         }
         out
     }
@@ -761,15 +930,21 @@ impl Database {
     }
 
     pub fn get_stats(&self) -> Vec<(String, String)> {
-        let mut stats = Vec::new();
-        stats.push(("pagecount".to_string(), self.pager.page_count.to_string()));
-        stats.push(("tables".to_string(), self.tables.len().to_string()));
-        stats.push(("indexes".to_string(), self.indexes.len().to_string()));
-        stats.push(("freelistpages".to_string(), self.pager.freelist.len().to_string()));
-        stats
+        vec![
+            ("pagecount".to_string(), self.pager.page_count.to_string()),
+            ("tables".to_string(), self.tables.len().to_string()),
+            ("indexes".to_string(), self.indexes.len().to_string()),
+            (
+                "freelistpages".to_string(),
+                self.pager.freelist.len().to_string(),
+            ),
+        ]
     }
 
-    fn execute_select_rows(&mut self, select: &SelectStmt) -> Result<(Vec<String>, Vec<Row>), String> {
+    fn execute_select_rows(
+        &mut self,
+        select: &SelectStmt,
+    ) -> Result<(Vec<String>, Vec<Row>), String> {
         match self.select(select.clone())? {
             ExecuteResult::Rows { header, rows } => Ok((header, rows)),
             ExecuteResult::Ok(msg) => Err(format!("Subquery returned non-row result: {}", msg)),
@@ -820,19 +995,28 @@ fn eval_const_expr(expr: &Expr) -> Option<Value> {
         Expr::Real(f) => Some(Value::Real(*f)),
         Expr::Text(s) => Some(Value::Text(s.clone())),
         Expr::Blob(b) => Some(Value::Blob(b.clone())),
-        Expr::Unary { op: UnaryOp::Neg, expr } => {
-            eval_const_expr(expr).map(|v| match v {
-                Value::Integer(i) => Value::Integer(-i),
-                Value::Real(f) => Value::Real(-f),
-                _ => v,
-            })
-        }
-        Expr::Binary { left, op: BinOp::Add, right } => {
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => eval_const_expr(expr).map(|v| match v {
+            Value::Integer(i) => Value::Integer(-i),
+            Value::Real(f) => Value::Real(-f),
+            _ => v,
+        }),
+        Expr::Binary {
+            left,
+            op: BinOp::Add,
+            right,
+        } => {
             let a = eval_const_expr(left)?;
             let b = eval_const_expr(right)?;
             Some(add_values(&a, &b))
         }
-        Expr::Binary { left, op: BinOp::Sub, right } => {
+        Expr::Binary {
+            left,
+            op: BinOp::Sub,
+            right,
+        } => {
             let a = eval_const_expr(left)?;
             let b = eval_const_expr(right)?;
             Some(sub_values(&a, &b))
@@ -894,13 +1078,20 @@ fn mod_values(a: &Value, b: &Value) -> Value {
     }
 }
 
-fn eval_from(db: &mut Database, from: &Option<TableRef>, joins: &[JoinClause]) -> Result<Vec<Vec<SourceRow>>, String> {
+fn eval_from(
+    db: &mut Database,
+    from: &Option<TableRef>,
+    joins: &[JoinClause],
+) -> Result<Vec<Vec<SourceRow>>, String> {
     let mut rows: Vec<Vec<SourceRow>> = Vec::new();
     if let Some(f) = from {
         if f.subquery.is_some() {
             return Err("Subqueries in FROM are not supported".to_string());
         }
-        let table = db.tables.get(&f.name).ok_or_else(|| format!("Table {} not found", f.name))?;
+        let table = db
+            .tables
+            .get(&f.name)
+            .ok_or_else(|| format!("Table {} not found", f.name))?;
         for (key, payload) in table.btree.scan() {
             let row = decode_row(payload).ok_or("Corrupt row")?;
             let rowid = decode_rowid_key(key);
@@ -922,10 +1113,21 @@ fn eval_from(db: &mut Database, from: &Option<TableRef>, joins: &[JoinClause]) -
             return Err("Subqueries in JOIN are not supported".to_string());
         }
         let jrows: Vec<(i64, Row, Rc<TableSchema>)> = {
-            let jtable = db.tables.get(&jt.name).ok_or_else(|| format!("Table {} not found", jt.name))?;
-            jtable.btree.scan().map(|(key, payload)| {
-                (decode_rowid_key(key), decode_row(payload).unwrap(), Rc::new(jtable.schema.clone()))
-            }).collect()
+            let jtable = db
+                .tables
+                .get(&jt.name)
+                .ok_or_else(|| format!("Table {} not found", jt.name))?;
+            jtable
+                .btree
+                .scan()
+                .map(|(key, payload)| {
+                    (
+                        decode_rowid_key(key),
+                        decode_row(payload).unwrap(),
+                        Rc::new(jtable.schema.clone()),
+                    )
+                })
+                .collect()
         };
         let jschema_len = jrows.first().map(|(_, _, s)| s.columns.len()).unwrap_or(0);
         let mut new_rows = Vec::new();
@@ -957,7 +1159,14 @@ fn eval_from(db: &mut Database, from: &Option<TableRef>, joins: &[JoinClause]) -
                 combined.push(SourceRow {
                     table_name: jt.name.clone(),
                     alias: jt.alias.clone(),
-                    schema: jrows.first().map(|(_, _, s)| s.clone()).unwrap_or(Rc::new(TableSchema { name: jt.name.clone(), columns: Vec::new(), root_page: 0, autoinc_counter: 1 })),
+                    schema: jrows.first().map(|(_, _, s)| s.clone()).unwrap_or(Rc::new(
+                        TableSchema {
+                            name: jt.name.clone(),
+                            columns: Vec::new(),
+                            root_page: 0,
+                            autoinc_counter: 1,
+                        },
+                    )),
                     rowid: 0,
                     values: vec![Value::Null; jschema_len],
                 });
@@ -969,7 +1178,12 @@ fn eval_from(db: &mut Database, from: &Option<TableRef>, joins: &[JoinClause]) -
     Ok(rows)
 }
 
-fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option<&[Vec<SourceRow>]>) -> Result<Value, String> {
+fn eval_expr(
+    db: &mut Database,
+    expr: &Expr,
+    ctx: &EvalContext,
+    agg_rows: Option<&[Vec<SourceRow>]>,
+) -> Result<Value, String> {
     match expr {
         Expr::Null => Ok(Value::Null),
         Expr::Boolean(b) => Ok(Value::Integer(*b as i64)),
@@ -988,12 +1202,19 @@ fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option
             let r = eval_expr(db, right, ctx, agg_rows)?;
             apply_binary(op, &l, &r)
         }
-        Expr::Function { name, args, distinct } => {
+        Expr::Function {
+            name,
+            args,
+            distinct,
+        } => {
             if is_aggregate_fn(name) {
                 let group = agg_rows.ok_or("Aggregate function not in aggregate context")?;
                 compute_aggregate(db, name, args, *distinct, group)
             } else {
-                let vals: Result<Vec<Value>, String> = args.iter().map(|a| eval_expr(db, a, ctx, agg_rows)).collect();
+                let vals: Result<Vec<Value>, String> = args
+                    .iter()
+                    .map(|a| eval_expr(db, a, ctx, agg_rows))
+                    .collect();
                 Ok(call_function(name, &vals?))
             }
         }
@@ -1019,14 +1240,24 @@ fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option
             let v = eval_expr(db, expr, ctx, agg_rows)?;
             Ok(apply_cast(&v, type_name))
         }
-        Expr::Between { expr, negated, low, high } => {
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => {
             let v = eval_expr(db, expr, ctx, agg_rows)?;
             let l = eval_expr(db, low, ctx, agg_rows)?;
             let h = eval_expr(db, high, ctx, agg_rows)?;
-            let ord = compare_values(&v, &l) != Ordering::Less && compare_values(&v, &h) != Ordering::Greater;
+            let ord = compare_values(&v, &l) != Ordering::Less
+                && compare_values(&v, &h) != Ordering::Greater;
             Ok(Value::Integer(if *negated { !ord } else { ord } as i64))
         }
-        Expr::InList { expr, negated, list } => {
+        Expr::InList {
+            expr,
+            negated,
+            list,
+        } => {
             let v = eval_expr(db, expr, ctx, agg_rows)?;
             let mut found = false;
             for e in list {
@@ -1038,7 +1269,11 @@ fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option
             }
             Ok(Value::Integer(if *negated { !found } else { found } as i64))
         }
-        Expr::InSubquery { expr, negated, query } => {
+        Expr::InSubquery {
+            expr,
+            negated,
+            query,
+        } => {
             let v = eval_expr(db, expr, ctx, agg_rows)?;
             let (_, rows) = db.execute_select_rows(query)?;
             let mut found = false;
@@ -1050,7 +1285,12 @@ fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option
             }
             Ok(Value::Integer(if *negated { !found } else { found } as i64))
         }
-        Expr::Like { expr, negated, pattern, escape } => {
+        Expr::Like {
+            expr,
+            negated,
+            pattern,
+            escape,
+        } => {
             let v = eval_expr(db, expr, ctx, agg_rows)?;
             let p = eval_expr(db, pattern, ctx, agg_rows)?;
             let esc = if let Some(e) = escape {
@@ -1071,7 +1311,9 @@ fn eval_expr(db: &mut Database, expr: &Expr, ctx: &EvalContext, agg_rows: Option
         Expr::IsNull(e, negated) => {
             let v = eval_expr(db, e, ctx, agg_rows)?;
             let is_null = v.is_null();
-            Ok(Value::Integer(if *negated { !is_null } else { is_null } as i64))
+            Ok(Value::Integer(
+                if *negated { !is_null } else { is_null } as i64
+            ))
         }
         Expr::Subquery(query) => {
             let (_, rows) = db.execute_select_rows(query)?;
@@ -1127,7 +1369,10 @@ fn apply_unary(op: &UnaryOp, v: &Value) -> Value {
         },
         UnaryOp::Pos => v.clone(),
         UnaryOp::Not => Value::Integer((!v.is_truthy()) as i64),
-        UnaryOp::BitNot => v.as_i64().map(|i| Value::Integer(!i)).unwrap_or(Value::Null),
+        UnaryOp::BitNot => v
+            .as_i64()
+            .map(|i| Value::Integer(!i))
+            .unwrap_or(Value::Null),
     }
 }
 
@@ -1178,7 +1423,7 @@ fn apply_cast(v: &Value, type_name: &str) -> Value {
 fn like_match(value: &Value, pattern: &Value, escape: Option<&Value>) -> Result<bool, String> {
     let text = value.as_str().unwrap_or("");
     let pat = pattern.as_str().ok_or("LIKE pattern must be text")?;
-    let esc = escape.map(|v| v.as_str().unwrap_or("") .chars().next());
+    let esc = escape.map(|v| v.as_str().unwrap_or("").chars().next());
     Ok(sql_like(text, pat, esc.flatten()))
 }
 
@@ -1188,16 +1433,20 @@ fn sql_like(text: &str, pattern: &str, escape: Option<char>) -> bool {
     sql_like_recur(&t, 0, &p, 0, escape)
 }
 
-fn sql_like_recur(t: &Vec<char>, ti: usize, p: &Vec<char>, pi: usize, escape: Option<char>) -> bool {
+fn sql_like_recur(
+    t: &Vec<char>,
+    ti: usize,
+    p: &Vec<char>,
+    pi: usize,
+    escape: Option<char>,
+) -> bool {
     if pi == p.len() {
         return ti == t.len();
     }
     let pc = p[pi];
     if Some(pc) == escape {
-        if pi + 1 < p.len() {
-            if ti < t.len() && t[ti] == p[pi + 1] {
-                return sql_like_recur(t, ti + 1, p, pi + 2, escape);
-            }
+        if pi + 1 < p.len() && ti < t.len() && t[ti] == p[pi + 1] {
+            return sql_like_recur(t, ti + 1, p, pi + 2, escape);
         }
         return false;
     }
@@ -1211,7 +1460,11 @@ fn sql_like_recur(t: &Vec<char>, ti: usize, p: &Vec<char>, pi: usize, escape: Op
         return false;
     }
     if pc == '_' {
-        return if ti < t.len() { sql_like_recur(t, ti + 1, p, pi + 1, escape) } else { false };
+        return if ti < t.len() {
+            sql_like_recur(t, ti + 1, p, pi + 1, escape)
+        } else {
+            false
+        };
     }
     if ti < t.len() && t[ti] == pc {
         sql_like_recur(t, ti + 1, p, pi + 1, escape)
@@ -1228,15 +1481,26 @@ fn has_aggregate(expr: &Expr) -> bool {
         Expr::Alias(inner, _) => has_aggregate(inner),
         Expr::Case { expr, when, else_ } => {
             expr.as_ref().map_or(false, |e| has_aggregate(e))
-                || when.iter().any(|(a, b)| has_aggregate(a) || has_aggregate(b))
+                || when
+                    .iter()
+                    .any(|(a, b)| has_aggregate(a) || has_aggregate(b))
                 || else_.as_ref().map_or(false, |e| has_aggregate(e))
         }
         Expr::Cast { expr, .. } => has_aggregate(expr),
-        Expr::Between { expr, low, high, .. } => has_aggregate(expr) || has_aggregate(low) || has_aggregate(high),
-        Expr::InList { expr, list, .. } => has_aggregate(expr) || list.iter().any(|e| has_aggregate(e)),
+        Expr::Between {
+            expr, low, high, ..
+        } => has_aggregate(expr) || has_aggregate(low) || has_aggregate(high),
+        Expr::InList { expr, list, .. } => has_aggregate(expr) || list.iter().any(has_aggregate),
         Expr::InSubquery { expr, .. } => has_aggregate(expr),
-        Expr::Like { expr, pattern, escape, .. } => {
-            has_aggregate(expr) || has_aggregate(pattern) || escape.as_ref().map_or(false, |e| has_aggregate(e))
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            has_aggregate(expr)
+                || has_aggregate(pattern)
+                || escape.as_ref().map_or(false, |e| has_aggregate(e))
         }
         Expr::IsNull(e, _) => has_aggregate(e),
         Expr::Exists(_) | Expr::Subquery(_) => false,
@@ -1252,7 +1516,11 @@ fn is_aggregate_fn(name: &str) -> bool {
     )
 }
 
-fn group_rows(db: &mut Database, rows: Vec<Vec<SourceRow>>, group_by: &[Expr]) -> Result<Vec<Vec<Vec<SourceRow>>>, String> {
+fn group_rows(
+    db: &mut Database,
+    rows: Vec<Vec<SourceRow>>,
+    group_by: &[Expr],
+) -> Result<Vec<Vec<Vec<SourceRow>>>, String> {
     if group_by.is_empty() {
         return Ok(vec![rows]);
     }
@@ -1268,7 +1536,13 @@ fn group_rows(db: &mut Database, rows: Vec<Vec<SourceRow>>, group_by: &[Expr]) -
     Ok(map.into_values().collect())
 }
 
-fn compute_aggregate(db: &mut Database, name: &str, args: &[Expr], distinct: bool, group: &[Vec<SourceRow>]) -> Result<Value, String> {
+fn compute_aggregate(
+    db: &mut Database,
+    name: &str,
+    args: &[Expr],
+    distinct: bool,
+    group: &[Vec<SourceRow>],
+) -> Result<Value, String> {
     let upper = name.to_uppercase();
     let empty = HashMap::new();
     match upper.as_str() {
@@ -1305,18 +1579,20 @@ fn compute_aggregate(db: &mut Database, name: &str, args: &[Expr], distinct: boo
                 }
             }
             if count == 0 {
-                return if upper == "TOTAL" { Ok(Value::Real(0.0)) } else { Ok(Value::Null) };
+                return if upper == "TOTAL" {
+                    Ok(Value::Real(0.0))
+                } else {
+                    Ok(Value::Null)
+                };
             }
             if upper == "AVG" {
                 Ok(Value::Real(total / count as f64))
             } else if upper == "TOTAL" {
                 Ok(Value::Real(total))
+            } else if all_int && total.fract() == 0.0 {
+                Ok(Value::Integer(total as i64))
             } else {
-                if all_int && total.fract() == 0.0 {
-                    Ok(Value::Integer(total as i64))
-                } else {
-                    Ok(Value::Real(total))
-                }
+                Ok(Value::Real(total))
             }
         }
         "MIN" | "MAX" => {
@@ -1330,7 +1606,11 @@ fn compute_aggregate(db: &mut Database, name: &str, args: &[Expr], distinct: boo
             if vals.is_empty() {
                 return Ok(Value::Null);
             }
-            let ord = if upper == "MIN" { Ordering::Less } else { Ordering::Greater };
+            let ord = if upper == "MIN" {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            };
             let mut best = vals[0].clone();
             for v in vals.iter().skip(1) {
                 if compare_values(v, &best) == ord {
@@ -1342,7 +1622,9 @@ fn compute_aggregate(db: &mut Database, name: &str, args: &[Expr], distinct: boo
         "GROUP_CONCAT" => {
             let sep = if args.len() >= 2 {
                 eval_expr(db, &args[1], &EvalContext::new(&group[0], &empty), None)?
-                    .as_str().unwrap_or(",").to_string()
+                    .as_str()
+                    .unwrap_or(",")
+                    .to_string()
             } else {
                 ",".to_string()
             };
@@ -1363,7 +1645,12 @@ fn compute_aggregate(db: &mut Database, name: &str, args: &[Expr], distinct: boo
     }
 }
 
-fn eval_select_columns(db: &mut Database, columns: &[SelectCol], ctx: &[SourceRow], agg_rows: Option<&[Vec<SourceRow>]>) -> Result<(Vec<Value>, HashMap<String, Value>), String> {
+fn eval_select_columns(
+    db: &mut Database,
+    columns: &[SelectCol],
+    ctx: &[SourceRow],
+    agg_rows: Option<&[Vec<SourceRow>]>,
+) -> Result<(Vec<Value>, HashMap<String, Value>), String> {
     let mut values = Vec::new();
     let mut aliases = HashMap::new();
     for col in columns {
@@ -1380,7 +1667,12 @@ fn eval_select_columns(db: &mut Database, columns: &[SelectCol], ctx: &[SourceRo
     Ok((values, aliases))
 }
 
-fn eval_select_column(db: &mut Database, col: &SelectCol, ctx: &[SourceRow], agg_rows: Option<&[Vec<SourceRow>]>) -> Result<Vec<Value>, String> {
+fn eval_select_column(
+    db: &mut Database,
+    col: &SelectCol,
+    ctx: &[SourceRow],
+    agg_rows: Option<&[Vec<SourceRow>]>,
+) -> Result<Vec<Value>, String> {
     match &col.expr {
         Expr::Star => {
             let mut out = Vec::new();
@@ -1402,16 +1694,29 @@ fn eval_select_column(db: &mut Database, col: &SelectCol, ctx: &[SourceRow], agg
                     return Ok((0..sr.values.len()).map(|i| rowid_value(sr, i)).collect());
                 }
             }
-            Err(format!("Table {} not found", table.as_ref().unwrap_or(&"*".to_string())))
+            Err(format!(
+                "Table {} not found",
+                table.as_ref().unwrap_or(&"*".to_string())
+            ))
         }
         _ => {
             let empty = HashMap::new();
-            Ok(vec![eval_expr(db, &col.expr, &EvalContext::new(ctx, &empty), agg_rows)?])
+            Ok(vec![eval_expr(
+                db,
+                &col.expr,
+                &EvalContext::new(ctx, &empty),
+                agg_rows,
+            )?])
         }
     }
 }
 
-fn make_header(db: &Database, columns: &[SelectCol], ctx: &[SourceRow], from: &Option<TableRef>) -> Vec<String> {
+fn make_header(
+    db: &Database,
+    columns: &[SelectCol],
+    ctx: &[SourceRow],
+    from: &Option<TableRef>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for col in columns {
         if let Some(alias) = &col.alias {
@@ -1474,19 +1779,33 @@ fn expr_to_name(expr: &Expr) -> String {
         Expr::Integer(i) => i.to_string(),
         Expr::Real(f) => f.to_string(),
         Expr::Text(s) => s.clone(),
-        Expr::Blob(b) => format!("x'{}'", b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
+        Expr::Blob(b) => format!("x'{}'", crate::types::hex_encode(b)),
         Expr::Column { table: None, name } => name.clone(),
-        Expr::Column { table: Some(t), name } => format!("{}.{}", t, name),
-        Expr::Function { name, args, distinct } => {
+        Expr::Column {
+            table: Some(t),
+            name,
+        } => format!("{}.{}", t, name),
+        Expr::Function {
+            name,
+            args,
+            distinct,
+        } => {
             let mut s = name.clone();
             s.push('(');
-            if *distinct { s.push_str("DISTINCT "); }
+            if *distinct {
+                s.push_str("DISTINCT ");
+            }
             s.push_str(&args.iter().map(expr_to_name).collect::<Vec<_>>().join(", "));
             s.push(')');
             s
         }
         Expr::Unary { op, expr } => format!("{}{}", unary_op_str(op), expr_to_name(expr)),
-        Expr::Binary { left, op, right } => format!("{} {} {}", expr_to_name(left), bin_op_str(op), expr_to_name(right)),
+        Expr::Binary { left, op, right } => format!(
+            "{} {} {}",
+            expr_to_name(left),
+            bin_op_str(op),
+            expr_to_name(right)
+        ),
         Expr::Case { .. } => "CASE".to_string(),
         Expr::Cast { .. } => "CAST".to_string(),
         Expr::Between { .. } => "BETWEEN".to_string(),
@@ -1530,7 +1849,14 @@ fn bin_op_str(op: &BinOp) -> &'static str {
     }
 }
 
-fn compare_result_rows(db: &mut Database, order_by: &[(Expr, Order)], _a: &[Value], al_a: &HashMap<String, Value>, _b: &[Value], al_b: &HashMap<String, Value>) -> Ordering {
+fn compare_result_rows(
+    db: &mut Database,
+    order_by: &[(Expr, Order)],
+    _a: &[Value],
+    al_a: &HashMap<String, Value>,
+    _b: &[Value],
+    al_b: &HashMap<String, Value>,
+) -> Ordering {
     for (expr, order) in order_by {
         let ctx_a = EvalContext::new(&[], al_a);
         let va = eval_expr(db, expr, &ctx_a, None).unwrap_or(Value::Null);
