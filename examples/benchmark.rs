@@ -9,7 +9,7 @@ fn main() {
 
     for durability in [Durability::Memory, Durability::Strict] {
         println!("\n=== {durability:?} durability ===");
-        let counts = [1_000, 10_000, 100_000];
+        let counts = [1_000, 10_000, 100_000, 1_000_000];
         for &n in &counts {
             let path = base.join(format!("{durability:?}_{n}.mini").to_lowercase());
 
