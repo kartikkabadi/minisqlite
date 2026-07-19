@@ -1,6 +1,7 @@
 # minisqlite
 
-[![Crates.io](https://img.shields.io/crates/v/minisqlite.svg)](https://crates.io/crates/minisqlite)
+[![Crates.io](https://img.shields.io/crates/v/minisqlite?logo=rust&label=crates.io)](https://crates.io/crates/minisqlite)
+[![Docs.rs](https://img.shields.io/docsrs/minisqlite?logo=rust&label=docs.rs)](https://docs.rs/minisqlite)
 [![CI](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml)
 
 A minimal, from-scratch SQLite-like relational database engine written in Rust.

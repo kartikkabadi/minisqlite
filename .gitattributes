@@ -1,0 +1,2 @@
+# Treat sample SQL scripts as vendored so they don't skew language statistics.
+*.sql linguist-vendored
