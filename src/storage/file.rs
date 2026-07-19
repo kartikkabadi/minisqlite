@@ -1,9 +1,9 @@
-use std::fs::{File, OpenOptions, Permissions};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 use crate::codec::frame::{FileHeader, FILE_HEADER_SIZE};
 use crate::config::Durability;
