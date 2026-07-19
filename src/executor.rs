@@ -1477,7 +1477,14 @@ fn expr_to_name(expr: &Expr) -> String {
         Expr::Blob(b) => format!("x'{}'", b.iter().map(|x| format!("{:02x}", x)).collect::<String>()),
         Expr::Column { table: None, name } => name.clone(),
         Expr::Column { table: Some(t), name } => format!("{}.{}", t, name),
-        Expr::Function { name, .. } => name.clone(),
+        Expr::Function { name, args, distinct } => {
+            let mut s = name.clone();
+            s.push('(');
+            if *distinct { s.push_str("DISTINCT "); }
+            s.push_str(&args.iter().map(expr_to_name).collect::<Vec<_>>().join(", "));
+            s.push(')');
+            s
+        }
         Expr::Unary { op, expr } => format!("{}{}", unary_op_str(op), expr_to_name(expr)),
         Expr::Binary { left, op, right } => format!("{} {} {}", expr_to_name(left), bin_op_str(op), expr_to_name(right)),
         Expr::Case { .. } => "CASE".to_string(),
