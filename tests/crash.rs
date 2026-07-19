@@ -132,3 +132,58 @@ fn crash_after_memory_apply_recovers() {
     run_failpoint("after-memory-apply", &path);
     assert_valid_state(&path);
 }
+
+fn run_failpoint_with_output(failpoint: &str, path: &std::path::Path) -> String {
+    let output = Command::new(crash_driver_path())
+        .arg(path)
+        .arg(failpoint)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to spawn crash driver; run `cargo build --bin crash_driver --features failpoint` first");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn assert_first_commit_only(path: &std::path::Path) {
+    let store = StoreBuilder::new(path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    assert_eq!(store.high_water_sequence(), 1);
+    assert_eq!(store.stream_version("stream"), Some(1));
+    assert_eq!(
+        store.get_projection("state", b"key").unwrap().as_deref(),
+        Some(b"first".as_slice())
+    );
+    assert_eq!(store.stats().job_count, 1);
+}
+
+#[test]
+fn disk_full_short_write_returns_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("short-write.mini");
+    let out = run_failpoint_with_output("append-error", &path);
+    assert!(out.contains("Io"), "expected Io error, got: {out}");
+    assert_first_commit_only(&path);
+}
+
+#[test]
+fn sync_failure_returns_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sync-fail.mini");
+    let out = run_failpoint_with_output("sync-error", &path);
+    assert!(out.contains("Io"), "expected Io error, got: {out}");
+    assert_first_commit_only(&path);
+}
+
+#[test]
+fn rollback_failure_returns_uncertain_outcome() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("rollback-fail.mini");
+    let out = run_failpoint_with_output("rollback-error", &path);
+    assert!(
+        out.contains("CommitOutcomeUncertain"),
+        "expected uncertain outcome, got: {out}"
+    );
+    assert_first_commit_only(&path);
+}

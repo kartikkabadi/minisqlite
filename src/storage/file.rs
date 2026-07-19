@@ -33,11 +33,11 @@ impl DataFile {
         }
 
         if let Some(parent) = path.parent() {
-            let parent_existed = parent.exists();
+            let _parent_existed = parent.exists();
             std::fs::create_dir_all(parent)?;
             #[cfg(unix)]
             {
-                if !parent_existed {
+                if !_parent_existed {
                     use std::fs::set_permissions;
                     let _ = set_permissions(parent, Permissions::from_mode(0o700));
                 }
@@ -166,6 +166,21 @@ impl DataFile {
                         self.file.sync_all()?;
                         std::process::abort();
                     }
+                    "append-error" => {
+                        let split = (frame_bytes.len() / 2).max(1);
+                        self.file.write_all(&frame_bytes[..split])?;
+                        return Err(Error::Io("simulated disk-full short write".into()));
+                    }
+                    "sync-error" => {
+                        self.file.write_all(frame_bytes)?;
+                        self.file.flush()?;
+                        return Err(Error::Io("simulated sync failure".into()));
+                    }
+                    "rollback-error" => {
+                        let split = (frame_bytes.len() / 2).max(1);
+                        self.file.write_all(&frame_bytes[..split])?;
+                        return Err(Error::Io("simulated short write".into()));
+                    }
                     _ => {}
                 }
             }
@@ -188,6 +203,14 @@ impl DataFile {
     }
 
     pub fn truncate(&mut self, len: u64) -> Result<(), Error> {
+        #[cfg(feature = "failpoint")]
+        {
+            if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+                == Some(std::ffi::OsStr::new("rollback-error"))
+            {
+                return Err(Error::Io("simulated truncate failure".into()));
+            }
+        }
         self.file.set_len(len)?;
         self.file.seek(SeekFrom::Start(len))?;
         if self.durability.requires_sync() {

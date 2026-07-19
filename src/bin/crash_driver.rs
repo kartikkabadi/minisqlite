@@ -19,7 +19,6 @@ fn main() {
     let path = &args[1];
     let failpoint = &args[2];
 
-    // Initial successful commit.
     let store = StoreBuilder::new(path)
         .durability(Durability::Strict)
         .open()
@@ -50,6 +49,10 @@ fn main() {
                 .with_effect_mode(EffectMode::UncertainOnLeaseExpiry),
         );
 
-    // This call may abort the process depending on the failpoint.
-    let _ = store.commit(second);
+    // Crash failpoints abort the process inside commit. Uncertain-outcome failpoints
+    // return an error; report it so the test harness can verify the outcome.
+    match store.commit(second) {
+        Ok(_) => {}
+        Err(e) => println!("{e:?}"),
+    }
 }
