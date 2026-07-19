@@ -77,7 +77,30 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::frame::FileHeader;
     use crate::config::Durability;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn random_trailing_bytes_never_panics(suffix in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let tmp = std::env::temp_dir().join(format!("minisqlite_recfuzz_{}", std::process::id()));
+            let _ = std::fs::remove_file(&tmp);
+            {
+                let header = FileHeader::new(0);
+                std::fs::write(&tmp, header.encode()).unwrap();
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
+                f.write_all(&suffix).unwrap();
+            }
+            if let Ok(mut file) = DataFile::open_or_create(&tmp, Durability::Memory) {
+                let _ = scan(&mut file);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 
     #[test]
     fn empty_file_has_no_frames() {

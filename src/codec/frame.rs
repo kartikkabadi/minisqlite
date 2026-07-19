@@ -318,6 +318,25 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn file_header_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+            let mut buf = [0u8; FILE_HEADER_SIZE];
+            for (i, b) in bytes.iter().enumerate().take(FILE_HEADER_SIZE) {
+                buf[i] = *b;
+            }
+            let _ = FileHeader::decode(&buf);
+        }
+
+        #[test]
+        fn frame_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = Frame::decode(&bytes);
+        }
+    }
 
     #[test]
     fn file_header_roundtrip() {

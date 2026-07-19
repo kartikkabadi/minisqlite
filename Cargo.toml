@@ -16,6 +16,11 @@ categories = ["database-implementations"]
 name = "minisqlite"
 path = "src/main.rs"
 
+[[bin]]
+name = "crash_driver"
+path = "src/bin/crash_driver.rs"
+required-features = ["failpoint"]
+
 [dependencies]
 crc32fast = "1.4.2"
 fs2 = "0.4.3"

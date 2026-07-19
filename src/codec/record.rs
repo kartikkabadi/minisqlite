@@ -474,6 +474,16 @@ pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn records_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = decode_records(&bytes);
+        }
+    }
 
     #[test]
     fn roundtrip_records() {
