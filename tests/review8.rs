@@ -158,101 +158,79 @@ fn claim_jobs_uncertain_returns_proposed_claims_and_recoverable_tokens() {
 }
 
 #[test]
-fn claim_jobs_limit_one_uses_strict_lexicographic_priority() {
+fn claim_jobs_limit_one_round_robins_partitions_durably() {
     let _guard = FAILPOINT_LOCK.lock().unwrap();
     let tmp = TempDir::new();
-    let path = tmp.path().join("lex.mini");
+    let path = tmp.path().join("rr.mini");
 
-    fn run_phase(store: &minisqlite::Store, a1: Id, a2: Id, b1: Id) {
-        // Enqueue b before a, but lexicographic order still puts a first.
-        store
-            .commit(
-                CommitBatch::new(Id::new().unwrap(), 0)
-                    .enqueue_job(JobSpec::new(b1, "q", "b", b"b1".to_vec()))
-                    .enqueue_job(JobSpec::new(a1, "q", "a", b"a1".to_vec())),
-            )
-            .unwrap();
-
-        // First limit=1 claim: a is lexicographically first.
-        let first = store
-            .claim_jobs(ClaimRequest {
-                queue: "q".into(),
-                worker_id: "w".into(),
-                now_ms: 0,
-                lease_ms: 1000,
-                limit: 1,
-            })
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first.claims()[0].partition, "a");
-        assert_eq!(first.claims()[0].job_id, a1);
-
-        // Acknowledge a1 and add another a while b is still waiting.
-        // With no active lease in a, a2 is still lexicographically preferred over b1.
-        store
-            .ack_job(a1, first.claims()[0].lease_token, None, 1)
-            .unwrap();
-        store
-            .commit(
-                CommitBatch::new(Id::new().unwrap(), 1).enqueue_job(JobSpec::new(
-                    a2,
-                    "q",
-                    "a",
-                    b"a2".to_vec(),
-                )),
-            )
-            .unwrap();
-
-        let second = store
-            .claim_jobs(ClaimRequest {
-                queue: "q".into(),
-                worker_id: "w".into(),
-                now_ms: 1,
-                lease_ms: 1000,
-                limit: 1,
-            })
-            .unwrap();
-        assert_eq!(second.len(), 1);
-        assert_eq!(second.claims()[0].partition, "a");
-        assert_eq!(second.claims()[0].job_id, a2);
-
-        // Acknowledge a2. Now b1 is the only ready job.
-        store
-            .ack_job(a2, second.claims()[0].lease_token, None, 2)
-            .unwrap();
-        let third = store
-            .claim_jobs(ClaimRequest {
-                queue: "q".into(),
-                worker_id: "w".into(),
-                now_ms: 2,
-                lease_ms: 1000,
-                limit: 1,
-            })
-            .unwrap();
-        assert_eq!(third.len(), 1);
-        assert_eq!(third.claims()[0].partition, "b");
-        assert_eq!(third.claims()[0].job_id, b1);
-
-        store
-            .ack_job(b1, third.claims()[0].lease_token, None, 3)
-            .unwrap();
-    }
-
-    let store = StoreBuilder::new(&path).open().unwrap();
     let a1 = Id::new().unwrap();
     let a2 = Id::new().unwrap();
+    let a3 = Id::new().unwrap();
     let b1 = Id::new().unwrap();
-    run_phase(&store, a1, a2, b1);
+    let b2 = Id::new().unwrap();
+
+    let store = StoreBuilder::new(&path).open().unwrap();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0)
+                .enqueue_job(JobSpec::new(b1, "q", "b", b"b1".to_vec()))
+                .enqueue_job(JobSpec::new(a1, "q", "a", b"a1".to_vec()))
+                .enqueue_job(JobSpec::new(a2, "q", "a", b"a2".to_vec()))
+                .enqueue_job(JobSpec::new(b2, "q", "b", b"b2".to_vec())),
+        )
+        .unwrap();
+
+    let claim = |store: &minisqlite::Store, now_ms: i64| {
+        store
+            .claim_jobs(ClaimRequest {
+                queue: "q".into(),
+                worker_id: "w".into(),
+                now_ms,
+                lease_ms: 1000,
+                limit: 1,
+            })
+            .unwrap()
+    };
+
+    // Round-robin fairness: a, then b, then a again, even though partition "a"
+    // always has ready work.
+    let first = claim(&store, 0);
+    assert_eq!(first.claims()[0].partition, "a");
+    assert_eq!(first.claims()[0].job_id, a1);
+    store
+        .ack_job(a1, first.claims()[0].lease_token, None, 1)
+        .unwrap();
+
+    let second = claim(&store, 1);
+    assert_eq!(second.claims()[0].partition, "b");
+    assert_eq!(second.claims()[0].job_id, b1);
+    store
+        .ack_job(b1, second.claims()[0].lease_token, None, 2)
+        .unwrap();
+
+    let third = claim(&store, 2);
+    assert_eq!(third.claims()[0].partition, "a");
+    assert_eq!(third.claims()[0].job_id, a2);
+    let a2_token = third.claims()[0].lease_token;
     drop(store);
 
-    // Reopen and replay: the behavior must be deterministic from durable state.
+    // The round-robin cursor is rebuilt from durable state on reopen: after
+    // acknowledging a2 (cursor at "a"), the next claim prefers "b" over ready
+    // work in "a".
     let store = StoreBuilder::new(&path).open().unwrap();
-    let a3 = Id::new().unwrap();
-    let a4 = Id::new().unwrap();
-    let b2 = Id::new().unwrap();
-    run_phase(&store, a3, a4, b2);
+    store.ack_job(a2, a2_token, None, 3).unwrap();
+    store
+        .commit(CommitBatch::new(Id::new().unwrap(), 3).enqueue_job(JobSpec::new(
+            a3,
+            "q",
+            "a",
+            b"a3".to_vec(),
+        )))
+        .unwrap();
+    let fourth = claim(&store, 4);
+    assert_eq!(fourth.claims()[0].partition, "b");
+    assert_eq!(fourth.claims()[0].job_id, b2);
 }
-
 #[test]
 fn duplicate_enqueue_preserves_lease_token_for_ack_and_fail() {
     let _guard = FAILPOINT_LOCK.lock().unwrap();
