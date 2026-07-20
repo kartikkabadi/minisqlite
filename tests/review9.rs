@@ -106,6 +106,9 @@ mod verify_stability {
 
     #[test]
     fn verify_refuses_store_owned_by_a_writer() {
+        // Serialize with failpoint tests: process-global failpoints from a
+        // concurrently running test could otherwise make this commit uncertain.
+        let _guard = FAILPOINT_LOCK.lock().unwrap();
         let tmp = TempDir::new();
         let path = tmp.path().join("verify_locked.mini");
         let store = StoreBuilder::new(&path).open().unwrap();
