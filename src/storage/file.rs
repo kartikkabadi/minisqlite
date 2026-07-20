@@ -371,15 +371,47 @@ impl DataFile {
             {
                 return Err(Error::Io("simulated truncate failure".into()));
             }
+            if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+                == Some(std::ffi::OsStr::new("truncate-before-sync"))
+            {
+                self.file.set_len(len)?;
+                self.file.seek(SeekFrom::Start(len))?;
+                let actual = self.file.metadata().map(|m| m.len()).unwrap_or(len);
+                self.len = actual;
+                return Err(Error::RepairOutcomeUncertain {
+                    requested: len,
+                    actual,
+                });
+            }
         }
         self.file.set_len(len)?;
         self.file.seek(SeekFrom::Start(len))?;
         if self.durability.requires_sync() {
-            self.file.sync_all()?;
+            if let Err(_e) = self.file.sync_all() {
+                let actual = self.file.metadata().map(|m| m.len()).unwrap_or(len);
+                self.len = actual;
+                return Err(Error::RepairOutcomeUncertain {
+                    requested: len,
+                    actual,
+                });
+            }
         }
         self.len = len;
         Ok(())
     }
+}
+
+/// Publish `src` as `dst` without replacing an existing file.
+///
+/// Uses `hard_link` + `remove_file` so the publication is atomic and fails if `dst`
+/// already exists, including when `dst` is a dangling symlink. `src` and `dst` must be on
+/// the same filesystem; callers create the temporary `src` in the destination directory.
+pub(crate) fn rename_no_replace(
+    src: impl AsRef<Path>,
+    dst: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    std::fs::hard_link(src.as_ref(), dst.as_ref())?;
+    std::fs::remove_file(src.as_ref())
 }
 
 #[cfg(unix)]

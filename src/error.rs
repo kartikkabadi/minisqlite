@@ -30,6 +30,9 @@ pub enum Error {
     /// A validation check failed before any durable state was changed.
     Validation(String),
 
+    /// A truncation (repair) may or may not have become durable. Reopen to verify.
+    RepairOutcomeUncertain { requested: u64, actual: u64 },
+
     /// An event or projection stream version conflict.
     Conflict {
         stream_id: String,
@@ -109,6 +112,10 @@ impl fmt::Display for Error {
                 write!(f, "store poisoned by transaction {transaction_id}; reopen to verify")
             }
             Error::Validation(msg) => write!(f, "validation error: {msg}"),
+            Error::RepairOutcomeUncertain { requested, actual } => write!(
+                f,
+                "repair outcome uncertain: requested truncate to {requested}, actual file length {actual}; reopen to verify"
+            ),
             Error::Conflict {
                 stream_id,
                 expected,
