@@ -283,6 +283,139 @@ fn cli_repair_reports_uncertain_outcome_when_sync_fails() {
 }
 
 #[test]
+fn cli_export_streams_paged_events_projections_and_jobs() {
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("export_paged.mini");
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    // More events than one export page (256), to exercise sequence-paged reads.
+    for chunk in 0..3 {
+        let mut batch = CommitBatch::new(Id::new().unwrap(), 0);
+        for _ in 0..100 {
+            batch = batch.append_event(Event::with_json_payload(
+                Id::new().unwrap(),
+                "s",
+                "e",
+                0,
+                b"{}",
+            ));
+        }
+        if chunk == 0 {
+            batch = batch
+                .projection_put("proj", 1, b"a".to_vec(), b"1".to_vec())
+                .projection_put("proj", 2, b"b".to_vec(), b"2".to_vec())
+                .enqueue_job(JobSpec::new(Id::new().unwrap(), "q", "p", b"w1".to_vec()))
+                .enqueue_job(JobSpec::new(Id::new().unwrap(), "q", "p", b"w2".to_vec()));
+        }
+        store.commit(batch).unwrap();
+    }
+    drop(store);
+
+    let (out, status) = run(&[path.to_str().unwrap(), "export"]);
+    assert!(status.success());
+    let events: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("\"type\":\"event\""))
+        .collect();
+    assert_eq!(events.len(), 300);
+    // Events are exported in global-sequence order across page boundaries.
+    let sequences: Vec<u64> = events
+        .iter()
+        .map(|l| {
+            let start = l.find("\"global_sequence\":").unwrap() + 18;
+            l[start..]
+                .split(&[',', '}'][..])
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(sequences, (1..=300).collect::<Vec<u64>>());
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("\"type\":\"projection\""))
+            .count(),
+        1
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("\"type\":\"projection_entry\""))
+            .count(),
+        2
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("\"type\":\"job\""))
+            .count(),
+        2
+    );
+}
+
+/// Export must stream in bounded pages: a child process with a capped address
+/// space exports a store holding a ~256 MiB projection. The old implementation
+/// materialized every projection entry (plus hex-encoded JSON copies) at once
+/// and would exceed the cap.
+#[cfg(unix)]
+#[test]
+fn cli_export_streams_under_constrained_address_space() {
+    use std::os::unix::process::CommandExt;
+
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("export_big.mini");
+    const VALUE_LEN: usize = 4 * 1024 * 1024 - 1024;
+    const ENTRY_COUNT: usize = 64;
+    const CHILD_RLIMIT_AS_BYTES: u64 = 900 << 20;
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    for chunk in 0..(ENTRY_COUNT / 2) {
+        let mut batch = CommitBatch::new(Id::new().unwrap(), 0);
+        for i in 0..2 {
+            let idx = chunk * 2 + i;
+            let key = format!("key-{idx:04}").into_bytes();
+            batch = batch.projection_put("big", idx as u64 + 1, key, vec![idx as u8; VALUE_LEN]);
+        }
+        store.commit(batch).unwrap();
+    }
+    drop(store);
+
+    let mut cmd = Command::new(bin_path());
+    cmd.args([path.to_str().unwrap(), "export"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    unsafe {
+        cmd.pre_exec(|| {
+            let lim = libc::rlimit {
+                rlim_cur: CHILD_RLIMIT_AS_BYTES,
+                rlim_max: CHILD_RLIMIT_AS_BYTES,
+            };
+            if libc::setrlimit(libc::RLIMIT_AS, &lim) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "export failed under constrained address space: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.contains("\"type\":\"projection_entry\""))
+            .count(),
+        ENTRY_COUNT
+    );
+}
+
+#[test]
 fn cli_jobs_round_trip() {
     let tmp = common::TempDir::new();
     let path = tmp.path().join("jobs_cli.mini");

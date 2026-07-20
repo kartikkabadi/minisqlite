@@ -498,39 +498,42 @@ impl Store {
             .values()
             .filter(|j| queue.as_ref().map(|q| &j.spec.queue == q).unwrap_or(true))
             .filter(|j| state.map(|s| j.state_at(now_ms) == s).unwrap_or(true))
-            .map(|j| {
-                let state = j.state_at(now_ms);
-                let is_terminal = matches!(
-                    state,
-                    JobState::Succeeded | JobState::Dead | JobState::Cancelled
-                );
-                JobInfo {
-                    job_id: j.spec.job_id,
-                    spec: j.spec.clone(),
-                    state,
-                    attempt: j.attempt,
-                    lease_expires_at_ms: if is_terminal || j.lease_expires_at_ms == 0 {
-                        None
-                    } else {
-                        Some(j.lease_expires_at_ms)
-                    },
-                    worker_id: if is_terminal {
-                        None
-                    } else {
-                        j.worker_id.clone()
-                    },
-                    retry_after_ms: if is_terminal || j.retry_after_ms == 0 {
-                        None
-                    } else {
-                        Some(j.retry_after_ms)
-                    },
-                    lease_token: if is_terminal { None } else { j.lease_token },
-                    terminal_at_ms: j.terminal_at_ms,
-                    result_digest: j.result_digest.clone(),
-                    error_summary: j.error_summary.clone(),
-                }
-            })
+            .map(|j| job_info(j, now_ms))
             .collect()
+    }
+
+    /// Return up to `limit` jobs ordered by job id, starting strictly after `after_job_id`
+    /// (or from the smallest id when `None`). Only ids are held while ordering, so paging
+    /// through a large job table never materializes every job record at once.
+    pub fn jobs_page(&self, now_ms: i64, after_job_id: Option<Id>, limit: usize) -> Vec<JobInfo> {
+        let guard = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        let mut ids: Vec<Id> = guard
+            .jobs
+            .keys()
+            .filter(|id| after_job_id.is_none_or(|after| **id > after))
+            .copied()
+            .collect();
+        ids.sort_unstable();
+        ids.truncate(limit);
+        ids.iter()
+            .map(|id| job_info(&guard.jobs[id], now_ms))
+            .collect()
+    }
+
+    /// Return up to `limit` projection entries with keys strictly greater than `after_key`
+    /// (or from the first key when `None`).
+    pub fn scan_projection_page(
+        &self,
+        projection: impl AsRef<str>,
+        after_key: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<ProjectionEntry>, Error> {
+        let guard = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        let state = guard
+            .projections
+            .get(projection.as_ref())
+            .ok_or_else(|| Error::ProjectionNotFound(projection.as_ref().to_string()))?;
+        Ok(state.scan_page(after_key, limit))
     }
 
     /// Return the job state for a single job at `now_ms`.
@@ -2190,6 +2193,39 @@ fn validate_immutable_invariants(batch: &CommitBatch) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+fn job_info(j: &JobStateRecord, now_ms: i64) -> JobInfo {
+    let state = j.state_at(now_ms);
+    let is_terminal = matches!(
+        state,
+        JobState::Succeeded | JobState::Dead | JobState::Cancelled
+    );
+    JobInfo {
+        job_id: j.spec.job_id,
+        spec: j.spec.clone(),
+        state,
+        attempt: j.attempt,
+        lease_expires_at_ms: if is_terminal || j.lease_expires_at_ms == 0 {
+            None
+        } else {
+            Some(j.lease_expires_at_ms)
+        },
+        worker_id: if is_terminal {
+            None
+        } else {
+            j.worker_id.clone()
+        },
+        retry_after_ms: if is_terminal || j.retry_after_ms == 0 {
+            None
+        } else {
+            Some(j.retry_after_ms)
+        },
+        lease_token: if is_terminal { None } else { j.lease_token },
+        terminal_at_ms: j.terminal_at_ms,
+        result_digest: j.result_digest.clone(),
+        error_summary: j.error_summary.clone(),
+    }
 }
 
 fn build_receipt(

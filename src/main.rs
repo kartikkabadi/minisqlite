@@ -25,7 +25,9 @@ Commands:
                                   List jobs, optionally filtered.
   repair <database> [--force]     Report a recoverable torn tail; --force truncates it.
   export <database> [--format jsonl]
-                                  Dump a JSONL snapshot.
+                                  Stream a JSONL diagnostic dump (not a restorable
+                                  snapshot: lease tokens, per-transaction metadata and
+                                  atomic transaction boundaries are omitted).
   backup <database> <destination>   Atomically copy the primary file.
 
 Options:
@@ -785,73 +787,105 @@ fn repair(path: &str, durability: Durability, json: bool, force: bool) -> Result
     Ok(())
 }
 
+/// Page size for the export streams. Each page is dropped before the next is fetched,
+/// so export memory is bounded by one page plus the per-line JSON buffer.
+const EXPORT_PAGE: usize = 256;
+
+/// Stream a JSONL diagnostic dump. This is not a restorable snapshot: job lease
+/// tokens, per-transaction metadata/correlation, commit timestamps and atomic
+/// transaction boundaries are not exported.
 fn export(path: &str, durability: Durability) -> Result<(), Error> {
     let store = open_store(path, durability)?;
     let now_ms = current_time_ms();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
-    for e in store.events_after(0, usize::MAX) {
-        let line = serde_json::json!({
-            "type": "event",
-            "transaction_id": e.transaction_id.to_hex(),
-            "global_sequence": e.global_sequence,
-            "stream_version": e.stream_version,
-            "event_id": e.event.event_id.to_hex(),
-            "stream_id": e.event.stream_id,
-            "event_type": e.event.event_type,
-            "schema_version": e.event.schema_version,
-            "occurred_at_ms": e.event.occurred_at_ms,
-            "causation_id": e.event.causation_id.map(|id| id.to_hex()),
-            "correlation_id": e.event.correlation_id.map(|id| id.to_hex()),
-            "payload": hex(&e.event.payload),
-            "metadata": hex(&e.event.metadata),
-        });
-        writeln!(out, "{line}")?;
+    let mut last_sequence = 0u64;
+    loop {
+        let page = store.events_after(last_sequence, EXPORT_PAGE);
+        if page.is_empty() {
+            break;
+        }
+        for e in &page {
+            last_sequence = e.global_sequence;
+            let line = serde_json::json!({
+                "type": "event",
+                "transaction_id": e.transaction_id.to_hex(),
+                "global_sequence": e.global_sequence,
+                "stream_version": e.stream_version,
+                "event_id": e.event.event_id.to_hex(),
+                "stream_id": e.event.stream_id,
+                "event_type": e.event.event_type,
+                "schema_version": e.event.schema_version,
+                "occurred_at_ms": e.event.occurred_at_ms,
+                "causation_id": e.event.causation_id.map(|id| id.to_hex()),
+                "correlation_id": e.event.correlation_id.map(|id| id.to_hex()),
+                "payload": hex(&e.event.payload),
+                "metadata": hex(&e.event.metadata),
+            });
+            writeln!(out, "{line}")?;
+        }
     }
 
     for name in store.projection_names() {
         let version = store.projection_version(&name)?;
-        let entries: Vec<_> = store
-            .scan_projection_prefix(&name, b"")?
-            .into_iter()
-            .map(|entry| {
-                serde_json::json!({
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({
+                "type": "projection",
+                "projection": name,
+                "version": version,
+            })
+        )?;
+        let mut after_key: Option<Vec<u8>> = None;
+        loop {
+            let page = store.scan_projection_page(&name, after_key.as_deref(), EXPORT_PAGE)?;
+            if page.is_empty() {
+                break;
+            }
+            for entry in &page {
+                let line = serde_json::json!({
+                    "type": "projection_entry",
+                    "projection": name,
                     "key": hex(&entry.key),
                     "value": hex(&entry.value),
-                })
-            })
-            .collect();
-        let line = serde_json::json!({
-            "type": "projection",
-            "projection": name,
-            "version": version,
-            "entries": entries,
-        });
-        writeln!(out, "{line}")?;
+                });
+                writeln!(out, "{line}")?;
+            }
+            after_key = page.last().map(|e| e.key.clone());
+        }
     }
 
-    for info in store.jobs(now_ms, None, None) {
-        let line = serde_json::json!({
-            "type": "job",
-            "job_id": info.job_id.to_hex(),
-            "state": job_state_str(info.state),
-            "queue": info.spec.queue,
-            "partition": info.spec.partition,
-            "payload": hex(&info.spec.payload),
-            "not_before_ms": info.spec.not_before_ms,
-            "max_attempts": info.spec.max_attempts,
-            "effect_mode": effect_mode_str(info.spec.effect_mode),
-            "idempotency_key": info.spec.idempotency_key,
-            "attempt": info.attempt,
-            "worker_id": info.worker_id,
-            "lease_expires_at_ms": info.lease_expires_at_ms,
-            "retry_after_ms": info.retry_after_ms,
-            "terminal_at_ms": info.terminal_at_ms,
-            "result_digest": info.result_digest.as_deref().map(hex),
-            "error_summary": info.error_summary,
-        });
-        writeln!(out, "{line}")?;
+    let mut after_job = None;
+    loop {
+        let page = store.jobs_page(now_ms, after_job, EXPORT_PAGE);
+        if page.is_empty() {
+            break;
+        }
+        for info in &page {
+            let line = serde_json::json!({
+                "type": "job",
+                "job_id": info.job_id.to_hex(),
+                "state": job_state_str(info.state),
+                "queue": info.spec.queue,
+                "partition": info.spec.partition,
+                "payload": hex(&info.spec.payload),
+                "not_before_ms": info.spec.not_before_ms,
+                "max_attempts": info.spec.max_attempts,
+                "effect_mode": effect_mode_str(info.spec.effect_mode),
+                "idempotency_key": info.spec.idempotency_key,
+                "attempt": info.attempt,
+                "worker_id": info.worker_id,
+                "lease_expires_at_ms": info.lease_expires_at_ms,
+                "retry_after_ms": info.retry_after_ms,
+                "terminal_at_ms": info.terminal_at_ms,
+                "result_digest": info.result_digest.as_deref().map(hex),
+                "error_summary": info.error_summary,
+            });
+            writeln!(out, "{line}")?;
+        }
+        after_job = page.last().map(|i| i.job_id);
     }
 
     Ok(())

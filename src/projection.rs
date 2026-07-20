@@ -81,6 +81,21 @@ impl ProjectionState {
         }
     }
 
+    /// Return up to `limit` entries with keys strictly greater than `after_key`
+    /// (or from the first key when `after_key` is `None`).
+    pub fn scan_page(&self, after_key: Option<&[u8]>, limit: usize) -> Vec<ProjectionEntry> {
+        use std::ops::Bound;
+        let lower = match after_key {
+            Some(k) => Bound::Excluded(k.to_vec()),
+            None => Bound::Unbounded,
+        };
+        self.data
+            .range((lower, Bound::Unbounded))
+            .take(limit)
+            .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
+            .collect()
+    }
+
     pub fn scan_range(&self, start: &[u8], end: &[u8]) -> Vec<ProjectionEntry> {
         if start >= end {
             return Vec::new();
