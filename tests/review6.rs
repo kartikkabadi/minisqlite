@@ -211,11 +211,11 @@ fn verify_and_open_existing_are_non_mutating_on_torn_tail() {
     drop(file);
     let size_torn = std::fs::metadata(&path).unwrap().len();
 
-    // Read-only verify must not modify the file.
+    // Read-only verify must not modify the file and must report the torn tail.
     let verify_result = StoreBuilder::new(&path).verify();
     assert!(
-        verify_result.is_ok(),
-        "verify must report valid prefix: {verify_result:?}",
+        matches!(verify_result, Err(minisqlite::Error::StoreNeedsRepair)),
+        "verify must report un-repaired tail: {verify_result:?}",
         verify_result = verify_result.map(|_| ()).map_err(|e| e.to_string())
     );
     let size_after_verify = std::fs::metadata(&path).unwrap().len();
