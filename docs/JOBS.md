@@ -29,6 +29,9 @@ store.commit(CommitBatch::new(tx, now_ms).enqueue_job(job))?;
 `not_before_ms` schedules future work.
 `idempotency_key` is an application-level key for the external effect.
 
+The default `EffectMode` is `UncertainOnLeaseExpiry`: an expired lease is never silently
+reclaimed. Reclaim-on-expiry must be opted into explicitly with `EffectMode::Idempotent`.
+
 ## Claiming
 
 ```rust
@@ -45,11 +48,12 @@ for job in outcome.claims() {
 }
 ```
 
-* `claim_jobs` returns `ClaimOutcome::Committed { transaction_id, claims }` on a durable commit, or `ClaimOutcome::Uncertain { transaction_id, claims }` when the frame was written but the in-memory apply could not be confirmed (the caller can reopen and use the returned lease tokens if the frame is present).
-* Claims are ordered by `(queue, partition)` lexicographically and then by insertion order within a partition.
+* `claim_jobs` returns `ClaimOutcome::Noop` when the queue is empty or no job is ready; no durable transaction is written and no transaction ID is allocated. Otherwise it returns `ClaimOutcome::Committed { transaction_id, claims }` on a durable commit, or `ClaimOutcome::Uncertain { transaction_id, claims }` when the frame was written but the in-memory apply could not be confirmed (the caller can reopen and use the returned lease tokens if the frame is present). Use `outcome.claims()` and `outcome.transaction_id()` to inspect the result.
+* Partitions within a queue are served round-robin: a durable per-queue cursor records the last partition served, and each request starts from the next partition in lexicographic rotation. Per-partition head indexes skip terminal jobs. Both structures are rebuilt from the journal on replay, so fairness is stable across reopen.
+* Within a partition, jobs are claimed in insertion order.
 * Only one ready job per partition is claimed per request, up to `limit` total.
 * A new lease token is generated for every claim.
-* Strict lexicographic ordering means a `limit=1` caller always receives a job from the earliest partition with a ready job. Later partitions can be starved if earlier partitions are continuously replenished; there is no round-robin or durable cursor fairness.
+* Round-robin rotation means repeated `limit=1` callers cycle across partitions instead of starving later partitions when earlier ones are continuously replenished.
 * Expired final-attempt jobs are maintained with a fixed-size `JobExpire` record that is independent of `max_summary_len` and `max_frame_size`.
 * `claim_jobs` builds one atomic `CommitBatch` containing all maintenance and candidate lease ops; if the configured `max_records_per_transaction` or `max_frame_size` does not fit everything, it commits a safe bounded prefix and makes progress without leaving a partial durable state.
 
@@ -65,7 +69,7 @@ A stale lease token is rejected.
 
 ## Uncertain outcomes
 
-When `EffectMode::UncertainOnLeaseExpiry` is used and a lease expires:
+When `EffectMode::UncertainOnLeaseExpiry` (the default) is used and a lease expires:
 
 * The job becomes `Uncertain`.
 * It is not silently retried.
