@@ -485,7 +485,7 @@ impl Store {
         };
 
         let result: Result<(), Error> = (|| {
-            std::fs::copy(&src_path, &tmp)?;
+            guard.data_file.copy_to(&tmp)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;

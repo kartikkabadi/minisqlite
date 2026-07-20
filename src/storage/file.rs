@@ -231,6 +231,25 @@ impl DataFile {
         Ok(())
     }
 
+    /// Copy the entire contents of the locked primary file to `dest`.
+    ///
+    /// The copy reads from the already-open `File` handle so it works on Windows even though
+    /// the file is exclusively locked; `std::fs::copy` would fail with ERROR_LOCK_VIOLATION.
+    pub fn copy_to(&mut self, dest: impl AsRef<Path>) -> std::io::Result<()> {
+        self.file.flush()?;
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut dest_file = OpenOptions::new().write(true).open(dest.as_ref())?;
+        let copied = std::io::copy(&mut self.file, &mut dest_file)?;
+        if copied != self.len {
+            return Err(std::io::Error::other(format!(
+                "copy length mismatch: copied {copied} bytes, expected {}",
+                self.len
+            )));
+        }
+        dest_file.sync_all()?;
+        Ok(())
+    }
+
     /// fsync the parent directory of `path` on Unix. This makes the directory entry for
     /// an atomic rename or a newly created file durable on typical POSIX file systems.
     pub fn sync_parent_dir(_path: impl AsRef<Path>) -> std::io::Result<()> {
