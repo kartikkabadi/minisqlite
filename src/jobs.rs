@@ -112,6 +112,7 @@ pub struct JobInfo {
     pub worker_id: Option<String>,
     pub retry_after_ms: Option<i64>,
     pub terminal_at_ms: Option<i64>,
+    pub lease_token: Option<Id>,
     pub result_digest: Option<Vec<u8>>,
     pub error_summary: Option<String>,
 }
@@ -129,6 +130,79 @@ pub struct ClaimedJob {
     pub attempt: u32,
     pub lease_expires_at_ms: i64,
     pub idempotency_key: Option<String>,
+}
+
+/// Outcome of a `claim_jobs` call.
+///
+/// Even when the commit is uncertain, the proposed `ClaimedJob` values are returned so the
+/// caller can recover the lease tokens after reopening and verifying the transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ClaimOutcome {
+    Committed {
+        transaction_id: Id,
+        claims: Vec<ClaimedJob>,
+    },
+    Uncertain {
+        transaction_id: Id,
+        claims: Vec<ClaimedJob>,
+    },
+}
+
+impl ClaimOutcome {
+    pub fn transaction_id(&self) -> Id {
+        match self {
+            Self::Committed { transaction_id, .. } | Self::Uncertain { transaction_id, .. } => {
+                *transaction_id
+            }
+        }
+    }
+
+    pub fn claims(&self) -> &[ClaimedJob] {
+        match self {
+            Self::Committed { claims, .. } | Self::Uncertain { claims, .. } => claims,
+        }
+    }
+
+    pub fn is_committed(&self) -> bool {
+        matches!(self, Self::Committed { .. })
+    }
+
+    pub fn is_uncertain(&self) -> bool {
+        matches!(self, Self::Uncertain { .. })
+    }
+
+    pub fn into_claims(self) -> Vec<ClaimedJob> {
+        match self {
+            Self::Committed { claims, .. } | Self::Uncertain { claims, .. } => claims,
+        }
+    }
+}
+
+impl std::ops::Deref for ClaimOutcome {
+    type Target = [ClaimedJob];
+
+    fn deref(&self) -> &Self::Target {
+        self.claims()
+    }
+}
+
+impl IntoIterator for ClaimOutcome {
+    type Item = ClaimedJob;
+    type IntoIter = std::vec::IntoIter<ClaimedJob>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_claims().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a ClaimOutcome {
+    type Item = &'a ClaimedJob;
+    type IntoIter = std::slice::Iter<'a, ClaimedJob>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.claims().iter()
+    }
 }
 
 /// Resolution for an uncertain job.

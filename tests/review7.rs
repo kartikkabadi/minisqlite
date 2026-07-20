@@ -330,7 +330,7 @@ fn claim_jobs_exact_lease_fits_minimum_160_byte_frame() {
 }
 
 #[test]
-fn claim_jobs_budgets_per_partition_and_avoids_starvation() {
+fn claim_jobs_budgets_per_partition_and_makes_progress() {
     let tmp = tmp_dir();
     let path = tmp.path().join("fair.mini");
     let limits = Limits {

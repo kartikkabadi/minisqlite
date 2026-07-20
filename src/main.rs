@@ -121,6 +121,7 @@ fn exit_code(error: &Error) -> i32 {
         Error::Io(_) => 22,
         Error::StoreNeedsRepair => 23,
         Error::RepairOutcomeUncertain { .. } => 24,
+        Error::BackupOutcomeUncertain { .. } => 25,
     }
 }
 

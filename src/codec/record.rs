@@ -25,6 +25,16 @@ const RECORD_SUPPORTED_FLAGS: u8 = 0;
 /// `Limits::max_records_per_transaction`.
 pub const MAX_RECORDS_PER_FRAME: u32 = 1 << 20; // 1,048,576
 
+/// Hard ceiling on the number of entries in a single `ProjectionReplace` record.
+///
+/// A 64 MiB frame could theoretically hold roughly 8 million empty key/value pairs,
+/// but the vector metadata for that many entries alone would exceed 200 MiB. This
+/// conservative hard ceiling keeps a single replace record well under ~30 MiB of
+/// transient metadata and is enforced by the decoder before any large allocation
+/// is attempted. It is independent of the smaller user-tunable
+/// `Limits::max_replace_entries`.
+pub const MAX_REPLACE_ENTRIES_PER_RECORD: u32 = 1_000_000;
+
 /// Smallest possible encoded record size (an empty `TransactionMeta` record).
 /// Used to bound `expected_count` by payload geometry before allocating memory.
 const MIN_ENCODED_RECORD_SIZE: usize = 12;
@@ -390,10 +400,24 @@ impl Record {
                 let projection = r.read_string()?;
                 let new_version = r.read_u64()?;
                 let count = r.read_u32()? as usize;
+                if count > MAX_REPLACE_ENTRIES_PER_RECORD as usize {
+                    return Err(Error::Corruption {
+                        message: format!(
+                            "projection replace entry count {count} exceeds hard ceiling {MAX_REPLACE_ENTRIES_PER_RECORD}"
+                        ),
+                        offset: r.pos as u64,
+                    });
+                }
                 // Each entry needs at least two 4-byte length prefixes, so
                 // clamp capacity to the number that can actually fit in the body.
                 let max_count = r.remaining() / 8;
-                let mut entries = Vec::with_capacity(count.min(max_count));
+                let capacity = count.min(max_count);
+                let mut entries = Vec::new();
+                if let Err(e) = entries.try_reserve_exact(capacity) {
+                    return Err(Error::Validation(format!(
+                        "cannot allocate projection replace entries: {e}"
+                    )));
+                }
                 for _ in 0..count {
                     let key = r.read_bytes()?;
                     let value = r.read_bytes()?;

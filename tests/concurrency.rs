@@ -201,7 +201,7 @@ fn partition_ordering_is_stable_under_concurrent_claims() {
     }
     store.commit(batch).unwrap();
 
-    let mut claimed = store
+    let claimed = store
         .claim_jobs(ClaimRequest {
             queue: "q".into(),
             worker_id: "w".into(),
@@ -212,6 +212,6 @@ fn partition_ordering_is_stable_under_concurrent_claims() {
         .unwrap();
 
     assert_eq!(claimed.len(), 3);
-    let partitions: Vec<_> = claimed.drain(..).map(|c| c.partition).collect();
+    let partitions: Vec<_> = claimed.into_iter().map(|c| c.partition).collect();
     assert_eq!(partitions, vec!["a", "b", "c"]);
 }

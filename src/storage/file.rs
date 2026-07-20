@@ -387,6 +387,19 @@ impl DataFile {
         self.file.set_len(len)?;
         self.file.seek(SeekFrom::Start(len))?;
         if self.durability.requires_sync() {
+            #[cfg(feature = "failpoint")]
+            {
+                if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+                    == Some(std::ffi::OsStr::new("truncate-sync-error"))
+                {
+                    let actual = self.file.metadata().map(|m| m.len()).unwrap_or(len);
+                    self.len = actual;
+                    return Err(Error::RepairOutcomeUncertain {
+                        requested: len,
+                        actual,
+                    });
+                }
+            }
             if let Err(_e) = self.file.sync_all() {
                 let actual = self.file.metadata().map(|m| m.len()).unwrap_or(len);
                 self.len = actual;
@@ -403,15 +416,76 @@ impl DataFile {
 
 /// Publish `src` as `dst` without replacing an existing file.
 ///
-/// Uses `hard_link` + `remove_file` so the publication is atomic and fails if `dst`
-/// already exists, including when `dst` is a dangling symlink. `src` and `dst` must be on
-/// the same filesystem; callers create the temporary `src` in the destination directory.
-pub(crate) fn rename_no_replace(
-    src: impl AsRef<Path>,
-    dst: impl AsRef<Path>,
-) -> std::io::Result<()> {
-    std::fs::hard_link(src.as_ref(), dst.as_ref())?;
-    std::fs::remove_file(src.as_ref())
+/// Uses `hard_link` + `remove_file` so the publication cannot overwrite an existing
+/// `dst`, including a dangling symlink. `src` and `dst` must be on the same filesystem;
+/// callers create the temporary `src` in the destination directory.
+///
+/// The function is stage-aware: if the link succeeds but the source cannot be removed,
+/// it attempts to roll back by removing `dst`. If rollback succeeds, the destination was
+/// not published and an ordinary `Io` error is returned. If rollback cannot be proved,
+/// `Error::BackupOutcomeUncertain` is returned because `dst` may already be visible.
+pub(crate) fn rename_no_replace(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> Result<(), Error> {
+    let src = src.as_ref();
+    let dst = dst.as_ref();
+    std::fs::hard_link(src, dst).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::Validation(format!(
+                "backup destination already exists: {}",
+                dst.display()
+            ))
+        } else {
+            Error::Io(e.to_string())
+        }
+    })?;
+
+    #[cfg(feature = "failpoint")]
+    {
+        if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+            == Some(std::ffi::OsStr::new("backup-after-link"))
+        {
+            return Err(Error::BackupOutcomeUncertain {
+                message: format!(
+                    "link to {} succeeded but unlink of {} was not attempted",
+                    dst.display(),
+                    src.display()
+                ),
+            });
+        }
+    }
+
+    if let Err(e) = std::fs::remove_file(src) {
+        // `dst` may already be visible to other processes. Try to roll back.
+        let rollback = std::fs::remove_file(dst);
+        // Best-effort cleanup of the source link; ignore failures here.
+        let _ = std::fs::remove_file(src);
+        if rollback.is_err() {
+            return Err(Error::BackupOutcomeUncertain {
+                message: format!(
+                    "backup destination {} may be visible but source {} could not be removed: {}",
+                    dst.display(),
+                    src.display(),
+                    e
+                ),
+            });
+        }
+        return Err(Error::Io(e.to_string()));
+    }
+
+    #[cfg(feature = "failpoint")]
+    {
+        if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+            == Some(std::ffi::OsStr::new("backup-after-publication"))
+        {
+            return Err(Error::BackupOutcomeUncertain {
+                message: format!(
+                    "backup {} is published but durability is unconfirmed",
+                    dst.display()
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(unix)]

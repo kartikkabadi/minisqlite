@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::event::{Event, PersistedEvent, StreamVersion};
 use crate::id::Id;
 use crate::jobs::{
-    ClaimRequest, ClaimedJob, JobInfo, JobSpec, JobState, JobStateRecord, Resolution,
+    ClaimOutcome, ClaimRequest, ClaimedJob, JobInfo, JobSpec, JobState, JobStateRecord, Resolution,
 };
 use crate::projection::{ProjectionEntry, ProjectionState};
 use crate::storage::file::{rename_no_replace, DataFile};
@@ -97,6 +97,7 @@ struct StoreInner {
     data_file: Option<DataFile>,
     limits: Limits,
     poisoned: bool,
+    poisoned_transaction_id: Id,
     transaction_seq: u64,
     high_water_sequence: u64,
     events: Vec<PersistedEvent>,
@@ -131,6 +132,7 @@ impl StoreInner {
             data_file: None,
             limits,
             poisoned: false,
+            poisoned_transaction_id: Id::ZERO,
             transaction_seq: 0,
             high_water_sequence: 0,
             events: Vec::new(),
@@ -167,6 +169,7 @@ impl Store {
             data_file: None,
             limits,
             poisoned: false,
+            poisoned_transaction_id: Id::ZERO,
             transaction_seq: 0,
             high_water_sequence: 0,
             events: Vec::new(),
@@ -223,7 +226,7 @@ impl Store {
     }
 
     /// Claim ready jobs from a queue.
-    pub fn claim_jobs(&self, request: ClaimRequest) -> Result<Vec<ClaimedJob>, Error> {
+    pub fn claim_jobs(&self, request: ClaimRequest) -> Result<ClaimOutcome, Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
         guard.claim_jobs(request)
     }
@@ -450,6 +453,7 @@ impl Store {
                     } else {
                         Some(j.retry_after_ms)
                     },
+                    lease_token: if is_terminal { None } else { j.lease_token },
                     terminal_at_ms: j.terminal_at_ms,
                     result_digest: j.result_digest.clone(),
                     error_summary: j.error_summary.clone(),
@@ -531,10 +535,18 @@ impl Store {
     ///
     /// The copy is written to a sibling temporary file, fsynced, scanned, and atomically
     /// published onto `destination` using a hard-link + unlink so the operation fails if
-    /// `destination` already exists (including a dangling symlink). On any failure the
-    /// temporary file is removed. Overwriting a live store is refused to protect the namespace.
+    /// `destination` already exists (including a dangling symlink). Overwriting a live store is
+    /// refused to protect the namespace.
+    ///
+    /// Backups are refused while the store is poisoned, because an uncertain commit may have
+    /// appended a durable frame that is not yet reflected in the tracked valid offset.
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        if guard.poisoned {
+            return Err(Error::StorePoisoned {
+                transaction_id: guard.poisoned_transaction_id,
+            });
+        }
         guard.df_mut().sync()?;
         // Use the resolved canonical path that `DataFile` actually opened, not the original
         // caller spelling. This makes the same-file check robust against `chdir` and relative
@@ -617,21 +629,24 @@ impl Store {
             let _scan = recovery::scan(&mut tmp_file, |_, _| Ok(()))?;
             tmp_file.sync()?;
             drop(tmp_file);
-            rename_no_replace(&tmp, &dest_canonical).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AlreadyExists {
-                    Error::Validation(format!(
-                        "backup destination already exists: {}",
-                        dest_canonical.display()
-                    ))
-                } else {
-                    Error::Io(e.to_string())
+            rename_no_replace(&tmp, &dest_canonical)?;
+            // If the directory sync fails after publication, the destination exists but may not
+            // be durable on crash. The caller must reopen to verify; do not remove `tmp`
+            // because it has already been unlinked by the successful rename.
+            DataFile::sync_parent_dir(&dest_canonical).map_err(|e| {
+                Error::BackupOutcomeUncertain {
+                    message: format!(
+                        "backup {} published but parent directory sync failed: {}",
+                        dest_canonical.display(),
+                        e
+                    ),
                 }
             })?;
-            DataFile::sync_parent_dir(&dest_canonical)?;
             Ok(())
         })();
 
-        if result.is_err() {
+        // Only clean up the temporary file when we can prove publication did not happen.
+        if !matches!(result, Err(Error::BackupOutcomeUncertain { .. })) {
             let _ = std::fs::remove_file(&tmp);
         }
         result
@@ -1104,11 +1119,29 @@ impl StoreInner {
                 return Err(Error::Io(e.to_string()));
             }
             self.poisoned = true;
+            self.poisoned_transaction_id = batch.transaction_id;
             return Err(Error::CommitOutcomeUncertain {
                 transaction_id: batch.transaction_id,
                 original_file_len,
                 source: e.to_string(),
             });
+        }
+
+        // Failpoint: commit succeeded durably, but simulate an uncertain outcome before
+        // applying the in-memory state. This is used to test claim-specific recovery.
+        #[cfg(feature = "failpoint")]
+        {
+            if std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+                == Some(std::ffi::OsStr::new("commit-uncertain"))
+            {
+                self.poisoned = true;
+                self.poisoned_transaction_id = batch.transaction_id;
+                return Err(Error::CommitOutcomeUncertain {
+                    transaction_id: batch.transaction_id,
+                    original_file_len,
+                    source: "simulated commit uncertainty".into(),
+                });
+            }
         }
 
         // Failpoint: before memory apply.
@@ -1558,7 +1591,11 @@ impl StoreInner {
                         effect_mode: job.effect_mode,
                         idempotency_key: job.idempotency_key.clone(),
                     });
-                    job_sim.insert(job.job_id, JobStateRecord::new(job.clone()));
+                    // Preserve the existing durable or already-simulated state for identical
+                    // re-enqueues; validation has already rejected spec mismatches.
+                    if !job_sim.contains_key(&job.job_id) && !self.jobs.contains_key(&job.job_id) {
+                        job_sim.insert(job.job_id, JobStateRecord::new(job.clone()));
+                    }
                 }
                 Op::AckJob {
                     job_id,
@@ -1715,10 +1752,10 @@ impl StoreInner {
         }
     }
 
-    fn claim_jobs(&mut self, request: ClaimRequest) -> Result<Vec<ClaimedJob>, Error> {
+    fn claim_jobs(&mut self, request: ClaimRequest) -> Result<ClaimOutcome, Error> {
         if self.poisoned {
             return Err(Error::StorePoisoned {
-                transaction_id: Id::ZERO,
+                transaction_id: self.poisoned_transaction_id,
             });
         }
         if self.needs_repair {
@@ -1855,11 +1892,25 @@ impl StoreInner {
             }
         }
 
-        if !batch.ops.is_empty() {
-            self.commit(batch)?;
+        if batch.ops.is_empty() {
+            return Ok(ClaimOutcome::Committed {
+                transaction_id: batch.transaction_id,
+                claims: Vec::new(),
+            });
         }
 
-        Ok(claimed)
+        let transaction_id = batch.transaction_id;
+        match self.commit(batch) {
+            Ok(receipt) => Ok(ClaimOutcome::Committed {
+                transaction_id: receipt.transaction_id,
+                claims: claimed,
+            }),
+            Err(Error::CommitOutcomeUncertain { .. }) => Ok(ClaimOutcome::Uncertain {
+                transaction_id,
+                claims: claimed,
+            }),
+            Err(e) => Err(e),
+        }
     }
 }
 

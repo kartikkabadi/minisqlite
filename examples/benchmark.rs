@@ -5,9 +5,21 @@ use minisqlite::{
 };
 
 fn main() {
-    let base = std::env::temp_dir().join(format!("minisqlite_bench_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(&base).unwrap();
+    // Create a uniquely-owned temporary directory with a random suffix. We use `create_dir`
+    // (not `create_dir_all`) so a pre-existing path that we did not create is never reused.
+    let base = loop {
+        let suffix = Id::new().unwrap().to_hex();
+        let candidate = std::env::temp_dir().join(format!(
+            "minisqlite_bench_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("cannot create benchmark directory: {e}"),
+        }
+    };
 
     for durability in [Durability::Memory, Durability::Strict] {
         println!("\n=== {durability:?} durability ===");
@@ -138,6 +150,6 @@ fn main() {
 
     drop(store);
 
-    let _ = std::fs::remove_dir_all(&base);
+    std::fs::remove_dir_all(&base).unwrap();
     println!("\nAt these scales, replay remains acceptable. Snapshots are not required yet.");
 }

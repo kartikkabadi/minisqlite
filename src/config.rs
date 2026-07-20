@@ -1,5 +1,5 @@
 use crate::codec::frame::{FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE, MAX_FRAME_SIZE};
-use crate::codec::record::MAX_RECORDS_PER_FRAME;
+use crate::codec::record::{MAX_RECORDS_PER_FRAME, MAX_REPLACE_ENTRIES_PER_RECORD};
 
 /// Controls how strictly a commit synchronizes to durable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,6 +212,12 @@ impl Limits {
             return Err(crate::Error::Validation(
                 "max_replace_entries must be greater than 0".into(),
             ));
+        }
+        if self.max_replace_entries > MAX_REPLACE_ENTRIES_PER_RECORD as usize {
+            return Err(crate::Error::Validation(format!(
+                "max_replace_entries {} exceeds hard format ceiling {}",
+                self.max_replace_entries, MAX_REPLACE_ENTRIES_PER_RECORD
+            )));
         }
         Ok(())
     }

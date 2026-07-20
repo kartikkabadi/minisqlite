@@ -33,6 +33,10 @@ pub enum Error {
     /// A truncation (repair) may or may not have become durable. Reopen to verify.
     RepairOutcomeUncertain { requested: u64, actual: u64 },
 
+    /// A backup may or may not have been fully published. The destination may already
+    /// exist; the temporary source may still exist. Reopen to verify.
+    BackupOutcomeUncertain { message: String },
+
     /// An event or projection stream version conflict.
     Conflict {
         stream_id: String,
@@ -115,6 +119,10 @@ impl fmt::Display for Error {
             Error::RepairOutcomeUncertain { requested, actual } => write!(
                 f,
                 "repair outcome uncertain: requested truncate to {requested}, actual file length {actual}; reopen to verify"
+            ),
+            Error::BackupOutcomeUncertain { message } => write!(
+                f,
+                "backup outcome uncertain: {message}; reopen to verify"
             ),
             Error::Conflict {
                 stream_id,
