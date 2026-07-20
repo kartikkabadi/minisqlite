@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Complete.
+All PR review findings have been addressed and the full verification suite passes. The PR remains open and unmerged per the review instruction.
 
 `minisqlite` has been rebuilt as a from-scratch, append-only control-plane state engine for local-first AI applications. The legacy SQL engine has been deleted and replaced by an original single-file, CRC32-framed journal with atomic transactions, materialized projections, durable jobs with leases/retries/uncertain outcomes, explicit crash recovery, and an operational CLI.
 
@@ -86,15 +86,15 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 
 | Failpoint | Expected recovered state | Result |
 |---|---|---|
-| before append | old state | Passed |
-| partial header | old state | Passed |
-| during payload | old state | Passed |
-| after payload | old state | Passed |
-| after trailer | old state | Passed |
-| before sync | old state | Passed |
-| after sync | new state after reopen | Passed |
-| before memory apply | new state after reopen | Passed |
-| after memory apply | new state after reopen | Passed |
+| before append | old state; child aborts | Passed |
+| partial header | old state; child aborts | Passed |
+| during payload | old state; child aborts | Passed |
+| after payload | old state; child aborts | Passed |
+| after trailer | old or new state (full write without fsync); child aborts | Passed |
+| before sync | old or new state (full write without fsync); child aborts | Passed |
+| after sync | new state after reopen; child aborts | Passed |
+| before memory apply | new state after reopen; child aborts | Passed |
+| after memory apply | new state after reopen; child aborts | Passed |
 | disk-full short write | old state, commit returns Io error | Passed |
 | sync failure | old state, commit returns Io error | Passed |
 | rollback failure | old state, commit returns CommitOutcomeUncertain | Passed |
