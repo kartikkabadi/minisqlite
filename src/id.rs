@@ -1,6 +1,9 @@
 use std::fmt;
-use std::io::{self, Read};
+use std::io;
+#[cfg(unix)]
+use std::io::Read;
 use std::str::FromStr;
+#[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
 
 /// A 128-bit opaque identifier used for transaction IDs, event IDs, job IDs, and lease tokens.
@@ -150,10 +153,9 @@ fn secure_random(buf: &mut [u8]) -> io::Result<()> {
             )
         };
         if status < 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("BCryptGenRandom failed with status {status}"),
-            ));
+            return Err(io::Error::other(format!(
+            "BCryptGenRandom failed with status {status}"
+        )));
         }
         Ok(())
     }

@@ -233,9 +233,9 @@ impl DataFile {
 
     /// fsync the parent directory of `path` on Unix. This makes the directory entry for
     /// an atomic rename or a newly created file durable on typical POSIX file systems.
-    pub fn sync_parent_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
+    pub fn sync_parent_dir(_path: impl AsRef<Path>) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(parent) = path.as_ref().parent() {
+        if let Some(parent) = _path.as_ref().parent() {
             if !parent.as_os_str().is_empty() {
                 let dir = File::open(parent)?;
                 dir.sync_all()?;
