@@ -28,6 +28,13 @@ Reopening a store invokes `storage::recovery::scan`:
    * Verify trailer magic and frame checksum.
    * Verify trailer sequence and length match the header.
    * Decode records with the hard `MAX_RECORDS_PER_FRAME` ceiling before allocation.
+   * Bound decoded-record memory by measured in-memory cost: `MAX_RECORD_MEMORY`
+     (96 MiB) per record and `MAX_TRANSACTION_MEMORY` (256 MiB) per frame, so a
+     valid on-disk frame cannot amplify into unbounded heap usage during replay.
+   * All decode-path allocations are fallible (`try_reserve`/`try_reserve_exact`);
+     allocation failure is a typed error, never an abort.
+   * Frame lengths are validated as `u64` against `MAX_FRAME_SIZE` before any
+     `usize` conversion, with checked offset arithmetic.
 4. Return the scan result (valid prefix, tail-truncated flag, last valid offset).
 
 ## Verification
@@ -43,6 +50,10 @@ the offset of the offending frame.
 `Store::verify()` does the same on an already-open store. It fails immediately with
 `Error::StoreNeedsRepair` if the store was opened with an un-repaired tail.
 
+Both verification paths observe a stable snapshot of the file, so verifying while a
+writer is actively appending cannot report spurious corruption from a partially
+written frame.
+
 ## Incomplete final frame
 
 If the final frame is structurally incomplete, the scanner stops at the last complete
@@ -52,6 +63,11 @@ valid frame and records `recovered_tail = true`.
 * `open_existing` leaves the forensic tail on disk and sets `needs_repair`; writes are
   blocked until `Store::repair()` is called explicitly. This separates read-only
   verification from repair.
+* The `minisqlite repair <database>` CLI command performs the explicit repair. It
+  reports the current file length, the last valid offset, and the bytes removed;
+  `--force` skips the confirmation prompt and JSON output is available. A clean file
+  is a no-op, an uncertain truncation surfaces as `RepairOutcomeUncertain`, and
+  complete-frame corruption is refused (fail closed), never "repaired" away.
 
 No earlier frame is affected because the format is append-only and frames are self-contained.
 
@@ -71,7 +87,9 @@ carrying the offending frame offset.
 
 * Events are appended with global sequence and stream version.
 * Projection operations update the in-memory `BTreeMap`.
-* Job operations update job state, lease tokens, and queue-partition ordering.
+* Job operations update job state, lease tokens, queue-partition ordering, and the
+  durable round-robin structures (per-queue cursors and per-partition head indexes),
+  so claim fairness is identical after reopen.
 
 The file is the source of truth; memory is a derived view. Committed frames are decoded
 using the hard frame-size bound, so replay does not reject older records just because the
@@ -89,6 +107,8 @@ configured `Limits` have changed.
 If an append or sync fails, the store attempts to truncate the file back to its original
 length. If the truncate is confirmed, the commit is definitely failed. If the truncate
 cannot be confirmed, the store is poisoned and `CommitOutcomeUncertain` is returned.
+The store records the transaction ID that caused the poisoning; every subsequent
+`StorePoisoned` error reports that original ID, not the ID of the rejected write.
 
 When the internal commit of `Store::claim_jobs` returns `CommitOutcomeUncertain`, the public
 API returns `ClaimOutcome::Uncertain { transaction_id, claims }`. The caller receives the
