@@ -856,3 +856,186 @@ fn duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn backup_temp_path_cannot_collide_with_primary_file() {
+    // The old deterministic temp name (dest.with_extension("mini.tmp")) would unlink the
+    // live database if it happened to be named `foo.mini.tmp` and the destination was
+    // `foo.mini`. With a collision-resistant sibling temp, the live file survives.
+    let tmp = tmp_path("backup_collision");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let primary = tmp.join("store.mini.tmp");
+    let dest = tmp.join("store.mini");
+
+    let store = StoreBuilder::new(&primary)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
+                Id::new(),
+                "s",
+                "e",
+                1,
+                now_ms(),
+                None,
+                None,
+                b"payload",
+                b"",
+            )),
+        )
+        .unwrap();
+
+    store.backup(&dest).unwrap();
+
+    assert!(primary.exists(), "live primary file must not be deleted");
+    assert!(dest.exists(), "backup destination must exist");
+
+    let backup_store = StoreBuilder::new(&dest)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    assert_eq!(backup_store.high_water_sequence(), 1);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn backup_does_not_remove_preexisting_temp_file() {
+    let tmp = tmp_path("backup_sentinel");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let primary = tmp.join("primary.mini");
+    let dest = tmp.join("backup.mini");
+    let sentinel = tmp.join("backup.mini.tmp");
+
+    std::fs::write(&sentinel, b"do not delete").unwrap();
+
+    let store = StoreBuilder::new(&primary)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
+                Id::new(),
+                "s",
+                "e",
+                1,
+                now_ms(),
+                None,
+                None,
+                b"payload",
+                b"",
+            )),
+        )
+        .unwrap();
+
+    store.backup(&dest).unwrap();
+
+    assert!(dest.exists(), "backup destination must exist");
+    assert!(
+        sentinel.exists(),
+        "pre-existing temp sentinel must not be removed"
+    );
+    assert_eq!(
+        std::fs::read(&sentinel).unwrap(),
+        b"do not delete",
+        "sentinel content must be unchanged"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn fail_job_default_retry_overflow_is_rejected() {
+    let path = tmp_path("fail_overflow.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let job_id = Id::new();
+    store
+        .commit(
+            CommitBatch::new(Id::new(), i64::MAX - 500)
+                .enqueue_job(JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_max_attempts(3)),
+        )
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: i64::MAX - 500,
+            lease_ms: 100,
+            limit: 1,
+        })
+        .unwrap();
+    let lease_token = claimed[0].lease_token;
+
+    let result = store.commit(CommitBatch::new(Id::new(), i64::MAX - 500).fail_job(
+        job_id,
+        lease_token,
+        "boom",
+        None,
+    ));
+    assert!(
+        result.is_err(),
+        "default retry_after_ms would overflow and must be rejected"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn fail_job_explicit_default_retry_is_idempotent_across_reopen() {
+    let path = tmp_path("fail_default_idempotent.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let job_id = Id::new();
+    let now = now_ms();
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now)
+                .enqueue_job(JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_max_attempts(3)),
+        )
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: now,
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    let lease_token = claimed[0].lease_token;
+
+    let tx = Id::new();
+    let batch = CommitBatch::new(tx, now).fail_job(job_id, lease_token, "boom", Some(now + 1000));
+    let receipt1 = store.commit(batch.clone()).unwrap();
+
+    drop(store);
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let receipt2 = store.commit(batch).unwrap();
+    assert_eq!(receipt1, receipt2);
+
+    let _ = std::fs::remove_file(&path);
+}

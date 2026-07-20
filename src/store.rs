@@ -1,7 +1,10 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::codec::encode_records;
 use crate::codec::frame::{Frame, FrameHeader, FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE};
@@ -18,6 +21,8 @@ use crate::storage::file::DataFile;
 use crate::storage::lock::Lock;
 use crate::storage::recovery;
 use crate::transaction::{CommitBatch, CommitReceipt, Op};
+
+static BACKUP_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Builder for opening a `Store`.
 #[derive(Debug, Clone)]
@@ -462,8 +467,39 @@ impl Store {
             ));
         }
 
-        let tmp = dest.with_extension("mini.tmp");
-        let _ = std::fs::remove_file(&tmp);
+        let parent = dest
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let name = dest
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_else(|| "backup".into());
+        let pid = std::process::id();
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+
+        let tmp = loop {
+            let counter = BACKUP_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate = parent.join(format!("{name}.mini.tmp.{pid}.{time}.{counter}"));
+            if candidate == src_path || candidate == dest {
+                continue;
+            }
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => {
+                    drop(file);
+                    break candidate;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(Error::Io(e.to_string())),
+            }
+        };
 
         let result: Result<(), Error> = (|| {
             std::fs::copy(&src_path, &tmp)?;

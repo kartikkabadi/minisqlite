@@ -291,7 +291,12 @@ impl JobStateRecord {
             self.terminal_at_ms = Some(now_ms);
         } else {
             self.state = JobInternalState::RetryWait;
-            self.retry_after_ms = retry_after_ms.unwrap_or(now_ms + 1000);
+            self.retry_after_ms = match retry_after_ms {
+                Some(v) => v,
+                None => now_ms
+                    .checked_add(1000)
+                    .ok_or_else(|| Error::Validation("retry after time overflow".into()))?,
+            };
         }
         Ok(())
     }

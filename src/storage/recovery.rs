@@ -25,26 +25,18 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
     let mut tail_truncated = false;
 
     while offset < file_len {
-        let header_bytes = match data_file.read_at(offset, FRAME_HEADER_SIZE) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                // Short read before a complete header: incomplete tail.
-                tail_truncated = true;
-                break;
-            }
-        };
+        // A torn tail must be shorter than a complete frame header. Once the file
+        // metadata reports enough bytes, any read failure is an I/O error, not a
+        // recoverable tail.
+        if file_len - offset < FRAME_HEADER_SIZE as u64 {
+            tail_truncated = true;
+            break;
+        }
 
-        let header =
-            match FrameHeader::decode(header_bytes[..FRAME_HEADER_SIZE].try_into().unwrap()) {
-                Ok(h) => h,
-                Err(e) => {
-                    if offset + FRAME_HEADER_SIZE as u64 > file_len {
-                        tail_truncated = true;
-                        break;
-                    }
-                    return Err(with_offset(e, offset));
-                }
-            };
+        let header_bytes = data_file.read_at(offset, FRAME_HEADER_SIZE)?;
+
+        let header = FrameHeader::decode(header_bytes[..FRAME_HEADER_SIZE].try_into().unwrap())
+            .map_err(|e| with_offset(e, offset))?;
 
         if header.total_frame_length < (FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE) as u64 {
             return Err(Error::Corruption {

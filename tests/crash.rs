@@ -185,6 +185,35 @@ fn run_failpoint_with_output(failpoint: &str, path: &std::path::Path) -> String 
 }
 
 #[test]
+fn header_read_error_does_not_truncate_store() {
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("header_read.mini");
+    let output = Command::new(crash_driver_path())
+        .arg(&path)
+        .arg("header-read-error")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .expect("failed to spawn crash driver; run `cargo build --bin crash_driver --features failpoint` first");
+
+    assert!(!output.status.success(), "expected child to fail");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        out.contains("Io") || out.contains("simulated frame header read error"),
+        "expected Io error, got: {out}"
+    );
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    assert!(!store.is_poisoned());
+    assert_eq!(store.high_water_sequence(), 1);
+    assert_eq!(store.stream_version("stream"), Some(1));
+    assert_eq!(store.stats().job_count, 1);
+}
+
+#[test]
 fn disk_full_short_write_returns_error() {
     let tmp = common::TempDir::new();
     let path = tmp.path().join("short-write.mini");

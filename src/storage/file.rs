@@ -106,6 +106,14 @@ impl DataFile {
 
     /// Read `n` bytes at `offset`.
     pub fn read_at(&mut self, offset: u64, n: usize) -> Result<Vec<u8>, Error> {
+        #[cfg(feature = "failpoint")]
+        if offset >= FILE_HEADER_SIZE as u64
+            && std::env::var_os("MINISQLITE_FAILPOINT").as_deref()
+                == Some(std::ffi::OsStr::new("header-read-error"))
+        {
+            return Err(Error::Io("simulated frame header read error".into()));
+        }
+
         self.file.seek(SeekFrom::Start(offset))?;
         let mut buf = vec![0u8; n];
         self.file.read_exact(&mut buf)?;

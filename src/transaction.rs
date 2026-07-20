@@ -205,8 +205,8 @@ impl CommitBatch {
     }
 
     /// Record a job failure. The store will decide retry or dead based on `max_attempts`.
-    /// `retry_after_ms` defaults to `now_ms + 1000`; an explicit value equal to the default is
-    /// normalized so the on-disk record round-trips cleanly.
+    /// `retry_after_ms` is `None` to use the default (`now_ms + 1000`), which is validated and
+    /// resolved when the batch is committed.
     pub fn fail_job(
         mut self,
         job_id: Id,
@@ -214,11 +214,6 @@ impl CommitBatch {
         error_summary: impl Into<String>,
         retry_after_ms: Option<i64>,
     ) -> Self {
-        let default_retry = self.now_ms + 1000;
-        let retry_after_ms = match retry_after_ms {
-            Some(v) if v == default_retry => None,
-            other => other,
-        };
         self.ops.push_back(Op::FailJob {
             job_id,
             lease_token,
@@ -266,10 +261,17 @@ impl CommitBatch {
     /// The timestamp is an application-supplied wall-clock value; expected versions are
     /// preconditions, not durable content.
     pub(crate) fn logical_eq(&self, other: &CommitBatch) -> bool {
-        self.transaction_id == other.transaction_id
-            && self.correlation_id == other.correlation_id
-            && self.metadata == other.metadata
-            && self.ops == other.ops
+        if self.transaction_id != other.transaction_id
+            || self.correlation_id != other.correlation_id
+            || self.metadata != other.metadata
+            || self.ops.len() != other.ops.len()
+        {
+            return false;
+        }
+        self.ops
+            .iter()
+            .zip(other.ops.iter())
+            .all(|(a, b)| op_logical_eq(a, self.now_ms, b, other.now_ms))
     }
 
     /// Reconstruct a `CommitBatch` from the durable records of a committed frame.
@@ -426,7 +428,7 @@ fn op_from_record(record: Record, now_ms: i64) -> Result<Op, Error> {
             // The on-disk record stores the effective retry time. The public `Op::FailJob` uses
             // `None` to mean "default to now_ms + 1000"; normalize that case here so idempotent
             // re-commits with the same transaction id compare equal.
-            let retry_after_ms = if record_retry == now_ms + 1000 {
+            let retry_after_ms = if now_ms.checked_add(1000) == Some(record_retry) {
                 None
             } else {
                 Some(record_retry)
@@ -464,5 +466,36 @@ fn resolution_from_record(r: RecordResolution) -> Resolution {
         RecordResolution::Retry => Resolution::Retry,
         RecordResolution::MarkSucceeded => Resolution::MarkSucceeded,
         RecordResolution::MarkDead => Resolution::MarkDead,
+    }
+}
+
+fn fail_retry_eq(a: Option<i64>, a_now: i64, b: Option<i64>, b_now: i64) -> bool {
+    let a_eff = a.or_else(|| a_now.checked_add(1000));
+    let b_eff = b.or_else(|| b_now.checked_add(1000));
+    a_eff == b_eff
+}
+
+fn op_logical_eq(a: &Op, a_now: i64, b: &Op, b_now: i64) -> bool {
+    match (a, b) {
+        (
+            Op::FailJob {
+                job_id,
+                lease_token,
+                error_summary,
+                retry_after_ms,
+            },
+            Op::FailJob {
+                job_id: b_job_id,
+                lease_token: b_lease_token,
+                error_summary: b_error_summary,
+                retry_after_ms: b_retry_after_ms,
+            },
+        ) => {
+            job_id == b_job_id
+                && lease_token == b_lease_token
+                && error_summary == b_error_summary
+                && fail_retry_eq(*retry_after_ms, a_now, *b_retry_after_ms, b_now)
+        }
+        _ => a == b,
     }
 }
