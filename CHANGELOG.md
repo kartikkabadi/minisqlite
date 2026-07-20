@@ -72,6 +72,22 @@
 - Documented strict lexicographic partition ordering (no round-robin fairness) in `docs/JOBS.md` and `docs/INVARIANTS.md`.
 - Added `tests/review8.rs` adversarial regression tests covering all Review #8 findings.
 
+### Review #9 safety and hardening
+
+- `EffectMode::UncertainOnLeaseExpiry` is now the default; idempotent retry-on-expiry must be opted into explicitly with `EffectMode::Idempotent`.
+- `ClaimOutcome` gained a `Noop` variant: claiming from an empty queue (or when no ops are ready) performs no durable transaction and allocates no transaction ID.
+- `Store::claim_jobs` delays transaction-ID allocation until there are ops to commit and uses durable round-robin partition fairness via per-queue cursors and per-partition head indexes, both rebuilt from the journal on replay and stable across reopen. This replaces the previous strict lexicographic priority.
+- Hard in-memory allocation ceilings for decoded records: `MAX_RECORD_MEMORY` (96 MiB per record) and `MAX_TRANSACTION_MEMORY` (256 MiB per transaction frame), enforced from the measured in-memory cost (`Record::in_memory_cost`) so metadata-amplification attacks (e.g. many maximal `ProjectionReplace` records) are rejected even when the on-disk frame is within `MAX_FRAME_SIZE`.
+- Fallible allocation throughout the decode/encode paths: `Reader::read_bytes`, frame payload decoding, and `encode_records` use `try_reserve`/`try_reserve_exact` and return `Error::Validation` instead of aborting on allocation failure; `encode_records` is now fallible.
+- Frame decoding compares `u64` lengths against `MAX_FRAME_SIZE as u64` before converting, uses `usize::try_from` and `checked_add` for all offset arithmetic, and a `compile_error!` rejects targets with less than 32-bit pointers; crafted oversized headers are rejected without panic.
+- Projection mutations are validated against a borrowed base plus a per-batch overlay/delta; replacements are canonicalized once and the staged map is reused, eliminating per-op deep clones of `ProjectionState`.
+- `Store::verify`/`StoreBuilder::verify` are stable against an active writer via a shared snapshot protocol instead of racing the appender.
+- New `minisqlite repair <database>` CLI command reporting current length, last valid offset, and bytes removed, with `--force` and JSON output.
+- CLI JSON export is now a streaming/iterable dump: events are written in bounded pages by global sequence, projections are streamed, and jobs are paginated, so export memory is bounded regardless of store size. Export is documented as a diagnostic dump, not a byte-exact restorable snapshot.
+- `StorePoisoned` errors consistently carry the original poisoning transaction ID (`poisoned_transaction_id`), stable across subsequent rejected writes.
+- Fixed the concurrency test barrier to gate before commit, with exact typed conflict assertions and a synchronized conflict race test.
+- Added `tests/review9_codec.rs` constrained-RSS child-process regression tests (exact-cap and near-64-MiB valid frames decode under a limited address space; one-byte-over frames and metadata amplification are rejected) and further adversarial regressions for each Review #9 finding.
+
 ## 0.2.1
 
 - Polished public API and library documentation
