@@ -18,6 +18,9 @@ pub const MAX_FRAME_SIZE: usize = 64 << 20; // 64 MiB
 pub const FORMAT_MAJOR: u16 = 0;
 pub const FORMAT_MINOR: u16 = 1;
 
+/// Combined frame format version used in every `FrameHeader`.
+pub const FRAME_FORMAT_VERSION: u16 = (FORMAT_MAJOR << 8) | FORMAT_MINOR;
+
 /// Fixed file header.
 ///
 /// Layout (64 bytes, little-endian):
@@ -159,6 +162,12 @@ impl FrameHeader {
         }
         let mut r = Reader::new(&bytes[8..60]);
         let version = r.read_u16()?;
+        if version != FRAME_FORMAT_VERSION {
+            return Err(Error::Corruption {
+                message: format!("unsupported frame format version {version}"),
+                offset: 0,
+            });
+        }
         let total_frame_length = r.read_u64()?;
         let transaction_sequence = r.read_u64()?;
         let transaction_id = r.read_id()?;
@@ -384,7 +393,7 @@ mod tests {
     #[test]
     fn frame_roundtrip() {
         let header = FrameHeader {
-            version: 1,
+            version: FRAME_FORMAT_VERSION,
             total_frame_length: 0,
             transaction_sequence: 7,
             transaction_id: Id::from(99u128),
@@ -397,5 +406,26 @@ mod tests {
         let decoded = Frame::decode(&encoded).unwrap();
         assert_eq!(decoded.payload, b"hello");
         assert_eq!(decoded.header.transaction_sequence, 7);
+    }
+
+    #[test]
+    fn unknown_frame_version_is_rejected() {
+        let mut header = FrameHeader {
+            version: FRAME_FORMAT_VERSION,
+            total_frame_length: 0,
+            transaction_sequence: 7,
+            transaction_id: Id::from(99u128),
+            commit_timestamp_ms: 123,
+            record_count: 0,
+            payload_length: 0,
+        };
+        header.version = FRAME_FORMAT_VERSION + 1;
+        let frame = Frame::new(header, b"hello".to_vec());
+        let encoded = frame.encode();
+        let result = Frame::decode(&encoded);
+        assert!(
+            result.is_err(),
+            "expected unsupported frame version to fail"
+        );
     }
 }

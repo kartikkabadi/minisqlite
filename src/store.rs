@@ -91,6 +91,21 @@ struct StoreInner {
     recovered_tail: bool,
 }
 
+#[cfg(unix)]
+fn is_same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let ma = std::fs::metadata(a)?;
+    let mb = std::fs::metadata(b)?;
+    Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
+}
+
+#[cfg(not(unix))]
+fn is_same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
+    let ca = std::fs::canonicalize(a)?;
+    let cb = std::fs::canonicalize(b)?;
+    Ok(ca == cb)
+}
+
 impl Store {
     fn open(
         path: PathBuf,
@@ -427,7 +442,28 @@ impl Store {
         guard.data_file.sync()?;
         let src_path = guard.path.clone();
         let dest = destination.as_ref().to_path_buf();
+
+        if dest == src_path {
+            return Err(Error::Validation(
+                "backup destination cannot be the primary data file".into(),
+            ));
+        }
+        if is_same_file(&src_path, &dest).unwrap_or(false) {
+            return Err(Error::Validation(
+                "backup destination cannot be the same file as the primary data file".into(),
+            ));
+        }
+        if std::fs::symlink_metadata(&dest)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Error::Validation(
+                "backup destination cannot be a symlink".into(),
+            ));
+        }
+
         let tmp = dest.with_extension("mini.tmp");
+        let _ = std::fs::remove_file(&tmp);
 
         let result: Result<(), Error> = (|| {
             std::fs::copy(&src_path, &tmp)?;
@@ -436,12 +472,14 @@ impl Store {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
             }
-            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Memory)?;
+            // Open with Strict durability so `sync()` performs an fsync on the copied bytes
+            // before the atomic rename, satisfying the documented durability guarantee.
+            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Strict)?;
             tmp_file.sync()?;
             drop(tmp_file);
             std::fs::rename(&tmp, &dest)?;
             DataFile::sync_parent_dir(&dest)?;
-            let mut backup_file = DataFile::open_or_create(&dest, Durability::Memory)?;
+            let mut backup_file = DataFile::open_or_create(&dest, Durability::Strict)?;
             let _scan = recovery::scan(&mut backup_file)?;
             Ok(())
         })();
@@ -587,10 +625,9 @@ impl StoreInner {
                     version,
                     key,
                 } => {
-                    if let Some(state) = self.projections.get_mut(projection) {
-                        state.delete(key);
-                        state.version = *version;
-                    }
+                    let state = self.projections.entry(projection.clone()).or_default();
+                    state.delete(key);
+                    state.version = *version;
                 }
                 Record::ProjectionClear {
                     projection,
@@ -823,7 +860,7 @@ impl StoreInner {
         }
 
         let frame_header = FrameHeader {
-            version: 1,
+            version: crate::codec::frame::FRAME_FORMAT_VERSION,
             total_frame_length: 0,
             transaction_sequence: self.transaction_seq + 1,
             transaction_id: batch.transaction_id,
@@ -1017,7 +1054,7 @@ impl StoreInner {
                 Op::ProjectionReplace { entries, .. } => sim.replace_changes(entries),
                 _ => false,
             };
-            if *version == sim.version && !changes {
+            if *version == sim.version && !changes && sim.version > 0 {
                 continue;
             }
             if *version != sim.version + 1 {
@@ -1165,13 +1202,9 @@ impl StoreInner {
         for op in &batch.ops {
             match op {
                 Op::AppendEvent(e) => {
-                    if let Some(prev) = seen_event_ids.get(&e.event_id) {
-                        if *prev != e {
-                            return Err(Error::DuplicateEventId(e.event_id));
-                        }
-                        continue;
-                    }
-                    if self.event_ids.contains_key(&e.event_id) {
+                    if seen_event_ids.contains_key(&e.event_id)
+                        || self.event_ids.contains_key(&e.event_id)
+                    {
                         return Err(Error::DuplicateEventId(e.event_id));
                     }
                     seen_event_ids.insert(e.event_id, e);
@@ -1403,6 +1436,9 @@ impl StoreInner {
                 transaction_id: Id::ZERO,
             });
         }
+        if request.lease_ms <= 0 {
+            return Err(Error::Validation("lease_ms must be greater than 0".into()));
+        }
 
         let mut candidates: Vec<(Id, Id, u32, i64, JobSpec)> = Vec::new();
         let mut partitions: Vec<(String, String)> = self
@@ -1436,8 +1472,14 @@ impl StoreInner {
                 }
 
                 let lease_token = Id::new();
-                let attempt = job.attempt + 1;
-                let lease_expires_at_ms = request.now_ms + request.lease_ms;
+                let attempt = job
+                    .attempt
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Validation("job attempt overflow".into()))?;
+                let lease_expires_at_ms = request
+                    .now_ms
+                    .checked_add(request.lease_ms)
+                    .ok_or_else(|| Error::Validation("lease_ms arithmetic overflow".into()))?;
                 candidates.push((
                     job_id,
                     lease_token,

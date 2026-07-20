@@ -16,6 +16,9 @@ pub const JOB_CANCEL: u8 = 0x24;
 pub const JOB_RESOLVE: u8 = 0x25;
 pub const TRANSACTION_META: u8 = 0x30;
 
+pub const RECORD_FORMAT_VERSION: u8 = 1;
+const RECORD_SUPPORTED_FLAGS: u8 = 0;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub global_sequence: u64,
@@ -280,8 +283,8 @@ impl Record {
 
         let mut out = Writer::with_capacity(1 + 1 + 1 + 4 + body.len());
         out.write_u8(self.kind());
-        out.write_u8(1); // record format version
-        out.write_u8(0); // flags
+        out.write_u8(RECORD_FORMAT_VERSION);
+        out.write_u8(RECORD_SUPPORTED_FLAGS);
         out.write_u32(body.len() as u32);
         out.bytes.extend_from_slice(&body.bytes);
         out.bytes
@@ -309,8 +312,20 @@ impl Record {
             return Ok(None);
         }
         let kind = reader.read_u8()?;
-        let _version = reader.read_u8()?;
-        let _flags = reader.read_u8()?;
+        let version = reader.read_u8()?;
+        if version != RECORD_FORMAT_VERSION {
+            return Err(Error::Corruption {
+                message: format!("unsupported record format version {version}"),
+                offset: 0,
+            });
+        }
+        let flags = reader.read_u8()?;
+        if flags != RECORD_SUPPORTED_FLAGS {
+            return Err(Error::Corruption {
+                message: format!("unsupported record flags {flags}"),
+                offset: 0,
+            });
+        }
         let body_len = reader.read_u32()? as usize;
         let body = reader.read_slice(body_len)?;
         let mut r = Reader::new(body);
@@ -416,6 +431,12 @@ impl Record {
                 });
             }
         };
+        if !r.is_empty() {
+            return Err(Error::Corruption {
+                message: "trailing bytes in record body".into(),
+                offset: 0,
+            });
+        }
         Ok(Some(record))
     }
 }
@@ -546,5 +567,68 @@ mod tests {
         let payload = encode_records(&records);
         let decoded = decode_records(&payload).unwrap();
         assert_eq!(records, decoded);
+    }
+
+    #[test]
+    fn unknown_record_version_is_rejected() {
+        let mut bytes = Record::Event(EventRecord {
+            global_sequence: 1,
+            stream_version: 1,
+            event_id: Id::new(),
+            stream_id: "thread:abc".into(),
+            event_type: "thread.created".into(),
+            schema_version: 1,
+            occurred_at_ms: 123456789,
+            causation_id: None,
+            correlation_id: None,
+            payload: vec![1, 2, 3],
+            metadata: vec![],
+        })
+        .encode();
+        bytes[1] = RECORD_FORMAT_VERSION + 1;
+        assert!(decode_records(&bytes).is_err());
+    }
+
+    #[test]
+    fn unknown_record_flags_are_rejected() {
+        let mut bytes = Record::Event(EventRecord {
+            global_sequence: 1,
+            stream_version: 1,
+            event_id: Id::new(),
+            stream_id: "thread:abc".into(),
+            event_type: "thread.created".into(),
+            schema_version: 1,
+            occurred_at_ms: 123456789,
+            causation_id: None,
+            correlation_id: None,
+            payload: vec![1, 2, 3],
+            metadata: vec![],
+        })
+        .encode();
+        bytes[2] = 0xff;
+        assert!(decode_records(&bytes).is_err());
+    }
+
+    #[test]
+    fn trailing_record_body_bytes_are_rejected() {
+        let mut bytes = Record::Event(EventRecord {
+            global_sequence: 1,
+            stream_version: 1,
+            event_id: Id::new(),
+            stream_id: "thread:abc".into(),
+            event_type: "thread.created".into(),
+            schema_version: 1,
+            occurred_at_ms: 123456789,
+            causation_id: None,
+            correlation_id: None,
+            payload: vec![1, 2, 3],
+            metadata: vec![],
+        })
+        .encode();
+        let body_len = u32::from_le_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]) as usize;
+        let new_len = (body_len + 1) as u32;
+        bytes[3..7].copy_from_slice(&new_len.to_le_bytes());
+        bytes.push(0);
+        assert!(decode_records(&bytes).is_err());
     }
 }
