@@ -42,6 +42,17 @@ An attacker with access to the file can read all stored data.
 
 Mid-file corruption is treated as a hard error.
 The store refuses to open so the operator can investigate rather than silently using a possibly-invalid state.
+The `repair` CLI only truncates a structurally torn tail; it refuses to "repair" complete-frame corruption.
+
+## Resource-exhaustion hardening
+
+Decoding a hostile or corrupted file cannot force unbounded memory use:
+record counts, replace-entry counts, and frame sizes have hard format ceilings, and decoded
+records are additionally bounded by measured in-memory cost (`MAX_RECORD_MEMORY` 96 MiB per record,
+`MAX_TRANSACTION_MEMORY` 256 MiB per frame). Decode-path allocations are fallible
+(`try_reserve`/`try_reserve_exact`) and return typed errors instead of aborting the process.
+Frame lengths are validated as `u64` before `usize` conversion with checked arithmetic, and
+targets with pointers narrower than 32 bits are rejected at compile time.
 
 ## Dependency security review
 
