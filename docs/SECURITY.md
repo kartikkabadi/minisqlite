@@ -35,6 +35,20 @@ An attacker with access to the file can read all stored data.
 Mid-file corruption is treated as a hard error.
 The store refuses to open so the operator can investigate rather than silently using a possibly-invalid state.
 
+## Dependency security review
+
+A Socket Security scan of PR #9 reported two `Warn` alerts for transitive dependencies:
+
+* `cargo/libc@0.2.186` — flagged as likely obfuscated (90% confidence).
+* `cargo/zerocopy@0.8.54` — flagged as likely obfuscated (90% confidence).
+
+These are transitive dependencies of well-known crates:
+
+* `libc` is pulled in by `fs2` (advisory locking), `rand` (only via `proptest` in tests), and `getrandom`.
+* `zerocopy` is pulled in by `ppv-lite86`/`rand_chacha`, used only by `proptest` in tests.
+
+Both `libc` (Rust team) and `zerocopy` (Google) are widely audited foundational crates. The "obfuscated code" alert is a heuristic false positive caused by platform-specific `cfg` blocks and generated/`unsafe` zero-copy code. The Socket-recommended resolution is to mark these alerts as acceptable risk. They are not active runtime vulnerabilities and they do not expose the store to additional attack surface beyond the existing OS/file-system trust boundary.
+
 ## Known limitations
 
 * No encryption at rest.

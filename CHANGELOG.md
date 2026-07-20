@@ -37,6 +37,7 @@
 - `PersistedEvent::frame_offset` is now `pub(crate)` and no longer emitted in JSON CLI output, so internal file offsets are not exposed as stable public identifiers.
 - `README.md` install instructions now reference building from `feat/control-plane-state-engine` instead of `crates.io`, because `v0.3.0-alpha.1` is not yet published.
 - Removed the last avoidable `unwrap` in the CLI JSON stats path.
+- Reviewed Socket Security alerts for `cargo/libc@0.2.186` and `cargo/zerocopy@0.8.54` and documented the triage in `docs/SECURITY.md` and `docs/DEPENDENCIES.md`; both are well-known transitive dependencies and the obfuscation alerts are false positives.
 - Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
 - Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
 

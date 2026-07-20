@@ -12,3 +12,10 @@
 
 Runtime dependencies are intentionally small.
 No async runtime, ORM, full database, or heavy CLI framework is used.
+
+## Security review
+
+A Socket Security scan flagged `cargo/libc@0.2.186` and `cargo/zerocopy@0.8.54` as likely obfuscated.
+These are transitive dependencies of `fs2` (`libc`) and `proptest`/`rand` (`zerocopy`). They are
+well-known, widely-audited foundational crates; the alerts are heuristic false positives. See
+`SECURITY.md` for the triage rationale.
