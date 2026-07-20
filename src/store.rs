@@ -797,29 +797,49 @@ impl StoreInner {
         // We do not re-run `validate_batch` here because configured `Limits` can change
         // between runs; committed frames are bounded by the hard frame-size limit and are
         // decoded safely without allocating from untrusted lengths. The reconstructed batch
-        // is transient and is not retained in `StoreInner`.
+        // is transient and is not retained in `StoreInner`. The decoded records are moved
+        // into the batch rather than cloned; the stored payload bytes remain the reference
+        // for the re-validation comparison below.
         let batch = CommitBatch::from_records(
             frame.header.transaction_id,
             frame.header.commit_timestamp_ms,
-            records.clone(),
+            records,
         )?;
         validate_immutable_invariants(&batch)?;
         self.validate_projection_ops(&batch)?;
         self.validate_job_ops(&batch)?;
+
+        // Regenerate the records once and compare their canonical encoding against the
+        // frame payload record-by-record. The regenerated vector is also what gets
+        // applied, so re-validation adds no extra full record copy.
         let expected = self.ops_to_records(&batch)?;
-        if expected != records {
-            return Err(Error::Corruption {
-                message: "frame records do not match re-validated commit".into(),
-                offset: 0,
-            });
+        let mut cursor = 0usize;
+        for record in &expected {
+            let encoded = record.encode();
+            let end = cursor
+                .checked_add(encoded.len())
+                .ok_or_else(|| Self::corruption("re-encoded record length overflow", 0))?;
+            if frame.payload.get(cursor..end) != Some(encoded.as_slice()) {
+                return Err(Self::corruption(
+                    "frame records do not match re-validated commit",
+                    0,
+                ));
+            }
+            cursor = end;
+        }
+        if cursor != frame.payload.len() {
+            return Err(Self::corruption(
+                "frame records do not match re-validated commit",
+                0,
+            ));
         }
 
-        self.apply_records(&records, frame.header.transaction_id, frame_offset)?;
+        self.apply_records(&expected, frame.header.transaction_id, frame_offset)?;
         self.transaction_seq = frame.header.transaction_sequence;
 
         // Reconstruct receipt.
         let receipt = build_receipt(
-            &records,
+            &expected,
             frame.header.transaction_id,
             frame.header.transaction_sequence,
             frame_offset,
