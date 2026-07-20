@@ -32,6 +32,36 @@ pub struct DataFile {
     path: PathBuf,
 }
 
+fn resolve_database_path(path: impl AsRef<Path>, create: bool) -> Result<PathBuf, Error> {
+    let path = path.as_ref();
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| Error::Io(e.to_string()))?
+            .join(path)
+    };
+    let file_name = abs
+        .file_name()
+        .ok_or_else(|| Error::Validation("database path must have a file name".into()))?;
+    let parent = abs.parent().filter(|&p| !p.as_os_str().is_empty());
+    let resolved_parent = match parent {
+        None => PathBuf::from("/"),
+        Some(p) if p.exists() => std::fs::canonicalize(p).map_err(|e| Error::Io(e.to_string()))?,
+        Some(p) if create => {
+            create_private_dirs(p)?;
+            std::fs::canonicalize(p).map_err(|e| Error::Io(e.to_string()))?
+        }
+        Some(p) => {
+            return Err(Error::Validation(format!(
+                "database parent directory does not exist: {}",
+                p.display()
+            )))
+        }
+    };
+    Ok(resolved_parent.join(file_name))
+}
+
 impl DataFile {
     /// Open or create the primary data file and validate its header.
     ///
@@ -64,34 +94,17 @@ impl DataFile {
         acquire_lock: bool,
         create: bool,
     ) -> Result<Self, Error> {
-        let path = path.as_ref().to_path_buf();
+        let path = resolve_database_path(path, create)?;
 
-        // Reject any existing symlink component in the path.  This is a best-effort
-        // pre-check; the actual `open` also passes `O_NOFOLLOW` so the final component
-        // cannot be replaced by a symlink between the check and the syscall.
-        for ancestor in path.ancestors() {
-            if ancestor.as_os_str().is_empty() {
-                continue;
-            }
-            match std::fs::symlink_metadata(ancestor) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Err(Error::Validation(format!(
-                        "database path contains a symlink: {}",
-                        ancestor.display()
-                    )));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(Error::Io(e.to_string())),
-                Ok(_) => {}
-            }
-        }
-
-        if create {
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    create_private_dirs(parent)?;
-                }
-            }
+        // Final-component symlink check for platforms without `O_NOFOLLOW`.
+        if std::fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Error::Validation(format!(
+                "database path is a symlink: {}",
+                path.display()
+            )));
         }
 
         let mut opts = OpenOptions::new();
