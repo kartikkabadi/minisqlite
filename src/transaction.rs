@@ -72,6 +72,15 @@ pub(crate) enum Op {
         attempt: u32,
         lease_expires_at_ms: i64,
     },
+    /// Internal maintenance operation that marks an idempotent job dead after its final
+    /// lease expired. It is encoded as a compact `JobExpire` record with no user-visible
+    /// summary, so it is always representable under the configured limits.
+    InternalExpireJob {
+        job_id: Id,
+        lease_token: Id,
+        attempt: u32,
+        expired_at_ms: i64,
+    },
 }
 
 /// Receipt returned after a successful commit.
@@ -235,6 +244,24 @@ impl CommitBatch {
     /// Resolve an uncertain job outcome.
     pub fn resolve_uncertain_job(mut self, job_id: Id, resolution: Resolution) -> Self {
         self.ops.push_back(Op::ResolveJob { job_id, resolution });
+        self
+    }
+
+    /// Internal maintenance operation that marks an idempotent job dead after its final
+    /// lease expired. Used internally by `Store::claim_jobs`.
+    pub(crate) fn internal_expire_job(
+        mut self,
+        job_id: Id,
+        lease_token: Id,
+        attempt: u32,
+        expired_at_ms: i64,
+    ) -> Self {
+        self.ops.push_back(Op::InternalExpireJob {
+            job_id,
+            lease_token,
+            attempt,
+            expired_at_ms,
+        });
         self
     }
 
@@ -485,6 +512,17 @@ fn op_from_record(record: Record, now_ms: i64) -> Result<Op, Error> {
         } => Ok(Op::ResolveJob {
             job_id,
             resolution: resolution_from_record(resolution),
+        }),
+        Record::JobExpire {
+            job_id,
+            lease_token,
+            attempt,
+            expired_at_ms,
+        } => Ok(Op::InternalExpireJob {
+            job_id,
+            lease_token,
+            attempt,
+            expired_at_ms,
         }),
         Record::TransactionMeta { .. } => Err(Error::Corruption {
             message: "transaction meta record must be the first record in a frame".into(),

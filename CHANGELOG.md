@@ -16,7 +16,7 @@
 - `Store` flushes on `Drop`; removed dead `JobInternalState::Uncertain` variant; optimized projection replace no-op detection.
 - `Store` uses `RwLock` so reads can run concurrently while writes remain serialized.
 - Lease tokens are generated with `Id::new()` so they are not reused across process restarts.
-- Recovery replay no longer re-runs `Limits` validation against configured values; the hard frame-size bound is the recovery guard.
+- Recovery replay no longer re-runs configured `Limits` validation; it enforces immutable invariants (non-zero IDs, `max_attempts > 0`, valid lease tokens, attempt sequence, `lease_expires_at_ms > claimed_at_ms`) and uses the hard `MAX_RECORDS_PER_FRAME` bound to avoid unbounded allocation.
 - `DataFile::sync` now respects the `Memory` durability mode.
 - `ops_to_records` now simulates job-state transitions within a batch so `LeaseJob` followed by `FailJob` in one atomic commit uses the updated attempt count.
 - `Store::jobs` now returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, and `terminal_at_ms`.
@@ -37,10 +37,19 @@
 - `PersistedEvent::frame_offset` is now `pub(crate)` and no longer emitted in JSON CLI output, so internal file offsets are not exposed as stable public identifiers.
 - `README.md` install instructions now reference building from `feat/control-plane-state-engine` instead of `crates.io`, because `v0.3.0-alpha.1` is not yet published.
 - Removed the last avoidable `unwrap` in the CLI JSON stats path.
-- Replaced `fs2` advisory locking with `std::fs::File::lock`/`try_lock` (Rust 1.89+), removing the runtime `libc` dependency and the Socket Security alert.
-- Replaced `proptest`/`tempfile` with `fastrand` and a small `tests/common/mod.rs` `TempDir` helper, removing the `rand`/`getrandom`/`ppv-lite86`/`zerocopy` dev-dependency subtree.
-- Removed the `fuzz/` crate's `libfuzzer-sys` build dependency (which pulled `libc` via `cc`/`jobserver`) and folded the same coverage into deterministic `#[test]` fuzz targets in `tests/fuzz_targets.rs`.
-- `Cargo.lock` no longer contains `libc` or `zerocopy`; `docs/SECURITY.md` and `docs/DEPENDENCIES.md` updated accordingly.
+- Added `Record::JobExpire` and `Op::InternalExpireJob` so expired final-attempt job maintenance is a fixed-size record independent of `max_summary_len` and `max_frame_size`.
+- `claim_jobs` now builds one atomic `CommitBatch` for all maintenance and lease ops, with explicit byte and record budgeting under `Limits`.
+- `StoreBuilder::verify()` performs a read-only scan without locking or modifying the file; `Store::repair()` is the explicit write path that truncates a torn tail.
+- `open_existing` no longer initializes a zero-byte file or truncates a torn tail; it sets `needs_repair` and blocks writes until repair.
+- `Store::backup` refuses an existing destination, copies only the durable valid prefix, and scans the temporary copy before the atomic rename.
+- `O_NOFOLLOW` is now sourced from the audited `libc` crate instead of a hand-copied constant.
+- `Limits::validate` enforces that `max_frame_size` can hold at least one `JobExpire` record plus frame overhead.
+- Added a pinned Rust 1.89 MSRV CI lane in `.github/workflows/ci.yml`.
+- Added adversarial regression tests in `tests/review6.rs` and `tests/review6_fuzz.rs` covering all Review #6 findings.
+- Replaced `fs2` advisory locking with `std::fs::File::lock`/`try_lock` (Rust 1.89+), removing the `fs2` dependency.
+- Replaced `proptest`/`tempfile` with `fastrand` and a small `tests/common/mod.rs` `TempDir` helper, removing the `rand`/`getrandom`/`ppv-lite86`/`zerocopy` dev-dependency subtree and the Socket Security `zerocopy` alert.
+- Removed the `fuzz/` crate's `libfuzzer-sys` build dependency and folded the same coverage into deterministic `#[test]` fuzz targets in `tests/fuzz_targets.rs`.
+- `O_NOFOLLOW` is sourced from the audited `libc` crate; `Cargo.lock` contains `libc` but no `zerocopy`; `docs/SECURITY.md` and `docs/DEPENDENCIES.md` updated accordingly.
 - Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
 - Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
 

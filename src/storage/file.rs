@@ -6,24 +6,9 @@ use crate::codec::frame::{FileHeader, FILE_HEADER_SIZE};
 use crate::config::Durability;
 use crate::Error;
 
-// `O_NOFOLLOW` values for the Unix targets we support. Unknown Unix targets fall back to a
-// best-effort `symlink_metadata` check after `open` instead of guessing a wrong constant.
-#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
-const O_NOFOLLOW: i32 = 0o400000;
-#[cfg(all(
-    unix,
-    any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "netbsd",
-        target_os = "openbsd",
-        target_os = "dragonfly",
-        target_os = "solaris",
-        target_os = "illumos"
-    )
-))]
-const O_NOFOLLOW: i32 = 0x100;
+// Use an audited platform binding for `O_NOFOLLOW` instead of hand-copied constants.
+#[cfg(unix)]
+const O_NOFOLLOW: i32 = libc::O_NOFOLLOW;
 
 /// Owns the primary data file and the normal append path.
 ///
@@ -81,7 +66,7 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
     ) -> Result<Self, Error> {
-        Self::open(path, durability, acquire_lock, true)
+        Self::open(path, durability, acquire_lock, true, true)
     }
 
     /// Open an existing primary data file. Fails if the file does not exist.
@@ -93,7 +78,16 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
     ) -> Result<Self, Error> {
-        Self::open(path, durability, acquire_lock, false)
+        Self::open(path, durability, acquire_lock, false, true)
+    }
+
+    /// Open an existing primary data file for read-only verification.
+    ///
+    /// No lock is acquired and the file is never modified, so this can be used while another
+    /// process owns the store. The caller must ensure no concurrent writes are in flight if
+    /// an exact point-in-time result is required.
+    pub fn open_read_only(path: impl AsRef<Path>, durability: Durability) -> Result<Self, Error> {
+        Self::open(path, durability, false, false, false)
     }
 
     fn open(
@@ -101,33 +95,22 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
         create: bool,
+        writable: bool,
     ) -> Result<Self, Error> {
         let path = resolve_database_path(path, create)?;
 
         let mut opts = OpenOptions::new();
-        opts.read(true).write(true);
+        opts.read(true);
+        if writable {
+            opts.write(true);
+        }
         if create {
             opts.create(true).truncate(false);
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "android",
-                target_os = "macos",
-                target_os = "ios",
-                target_os = "freebsd",
-                target_os = "netbsd",
-                target_os = "openbsd",
-                target_os = "dragonfly",
-                target_os = "solaris",
-                target_os = "illumos"
-            ))]
-            {
-                opts.custom_flags(O_NOFOLLOW);
-            }
+            opts.mode(0o600).custom_flags(O_NOFOLLOW);
         }
         #[cfg(windows)]
         {
@@ -183,6 +166,9 @@ impl DataFile {
         let len = file.seek(SeekFrom::End(0))?;
 
         let (file_len, header) = if len == 0 {
+            if !create {
+                return Err(Error::NotMiniSQLite);
+            }
             #[cfg(unix)]
             {
                 use std::fs::{set_permissions, Permissions};
@@ -343,19 +329,21 @@ impl DataFile {
         Ok(())
     }
 
-    /// Copy the entire contents of the locked primary file to `dest`.
+    /// Copy the first `valid_len` bytes of the locked primary file to `dest`.
     ///
-    /// The copy reads from the already-open `File` handle so it works on Windows even though
-    /// the file is exclusively locked; `std::fs::copy` would fail with ERROR_LOCK_VIOLATION.
-    pub fn copy_to(&mut self, dest: impl AsRef<Path>) -> std::io::Result<()> {
+    /// `valid_len` is the durable prefix of the file (typically `self.len` for a fully
+    /// repaired store, or the last valid frame offset for a store opened with an un-repaired
+    /// tail). The copy reads from the already-open `File` handle so it works on Windows even
+    /// though the file is exclusively locked; `std::fs::copy` would fail with ERROR_LOCK_VIOLATION.
+    pub fn copy_to(&mut self, dest: impl AsRef<Path>, valid_len: u64) -> std::io::Result<()> {
         self.file.flush()?;
         self.file.seek(SeekFrom::Start(0))?;
         let mut dest_file = OpenOptions::new().write(true).open(dest.as_ref())?;
-        let copied = std::io::copy(&mut self.file, &mut dest_file)?;
-        if copied != self.len {
+        let mut limited = (&self.file).take(valid_len);
+        let copied = std::io::copy(&mut limited, &mut dest_file)?;
+        if copied != valid_len {
             return Err(std::io::Error::other(format!(
-                "copy length mismatch: copied {copied} bytes, expected {}",
-                self.len
+                "copy length mismatch: copied {copied} bytes, expected {valid_len}"
             )));
         }
         dest_file.sync_all()?;

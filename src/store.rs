@@ -62,9 +62,20 @@ impl StoreBuilder {
     /// Open an existing store. Fails if the file does not exist.
     ///
     /// Use this for read-only or operational commands where silently creating a
-    /// missing database would be a bug.
+    /// missing database would be a bug. The file is not truncated or repaired; use
+    /// [`Store::repair`] to make it writeable again.
     pub fn open_existing(self) -> Result<Store, Error> {
         Store::open(self.path, self.durability, self.limits, false)
+    }
+
+    /// Verify the file at the configured path without acquiring a lock or modifying it.
+    ///
+    /// This is the path used by the `verify` CLI. It returns `Ok(())` only if every
+    /// committed frame is intact and the file ends cleanly at a valid frame boundary.
+    pub fn verify(self) -> Result<(), Error> {
+        let mut data_file = DataFile::open_read_only(&self.path, self.durability)?;
+        let _scan = recovery::scan(&mut data_file, |_, _| Ok(()))?;
+        Ok(())
     }
 }
 
@@ -90,6 +101,8 @@ struct StoreInner {
     jobs: HashMap<Id, JobStateRecord>,
     queue_partitions: HashMap<(String, String), Vec<Id>>,
     recovered_tail: bool,
+    needs_repair: bool,
+    last_valid_offset: u64,
 }
 
 impl StoreInner {
@@ -151,6 +164,8 @@ impl Store {
             jobs: HashMap::new(),
             queue_partitions: HashMap::new(),
             recovered_tail: false,
+            needs_repair: false,
+            last_valid_offset: 0,
         };
 
         // Resolve the canonical path from the open file handle so callers cannot
@@ -167,9 +182,19 @@ impl Store {
         inner.data_file = Some(data_file);
         inner.path = resolved_path;
         inner.recovered_tail = scan.tail_truncated;
+        inner.last_valid_offset = scan.last_valid_offset;
 
         if scan.tail_truncated {
-            inner.df_mut().truncate(scan.last_valid_offset)?;
+            if create {
+                // Normal `open` repairs a torn tail so subsequent writes append to a clean file.
+                inner.df_mut().truncate(scan.last_valid_offset)?;
+            } else {
+                // `open_existing` is observational / operational: it recovers the valid
+                // prefix but leaves the forensic tail on disk and marks the store as needing
+                // explicit repair before any write. Report the valid prefix size to readers.
+                inner.needs_repair = true;
+                inner.df_mut().len = scan.last_valid_offset;
+            }
         }
 
         Ok(Self {
@@ -456,17 +481,36 @@ impl Store {
     }
 
     /// Re-read and verify the entire file. Returns `Ok(())` if every frame is intact.
+    /// If the store was opened with an un-repaired tail, verification fails without modifying
+    /// the file.
     pub fn verify(&self) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        if guard.needs_repair {
+            return Err(Error::StoreNeedsRepair);
+        }
         let _scan = recovery::scan(guard.df_mut(), |_, _| Ok(()))?;
+        Ok(())
+    }
+
+    /// Repair an un-repaired tail by truncating to the last valid frame offset.
+    /// After repair, the store can accept writes again.
+    pub fn repair(&self) -> Result<(), Error> {
+        let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
+        if !guard.needs_repair {
+            return Ok(());
+        }
+        let last_valid = guard.last_valid_offset;
+        guard.df_mut().truncate(last_valid)?;
+        guard.recovered_tail = false;
+        guard.needs_repair = false;
         Ok(())
     }
 
     /// Copy the primary file to `destination` with safe temporary-file semantics.
     ///
-    /// The copy is written to a sibling temporary file, fsynced, and atomically renamed onto
-    /// `destination`. On any failure the temporary file is removed. The destination is then
-    /// reopened and scanned to prove it is a consistent copy.
+    /// The copy is written to a sibling temporary file, fsynced, scanned, and atomically
+    /// renamed onto `destination`. On any failure the temporary file is removed. The destination
+    /// must not already exist; overwriting a live store is refused to protect the namespace.
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
         guard.df_mut().sync()?;
@@ -505,22 +549,11 @@ impl Store {
                 "backup destination cannot be the primary data file".into(),
             ));
         }
-        // If the destination exists, verify it is not the same file as the primary.
-        // Identity-check errors are propagated; they are never treated as proof of difference.
-        if dest_canonical.exists()
-            && is_same_file(&src_path, &dest_canonical).map_err(|e| Error::Io(e.to_string()))?
-        {
-            return Err(Error::Validation(
-                "backup destination cannot be the same file as the primary data file".into(),
-            ));
-        }
-        if std::fs::symlink_metadata(&dest_canonical)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(Error::Validation(
-                "backup destination cannot be a symlink".into(),
-            ));
+        if dest_canonical.exists() {
+            return Err(Error::Validation(format!(
+                "backup destination already exists: {}",
+                dest_canonical.display()
+            )));
         }
 
         let name = dest_file_name.to_string_lossy();
@@ -554,13 +587,18 @@ impl Store {
             }
         };
 
+        let valid_len = guard.last_valid_offset;
         let result: Result<(), Error> = (|| {
-            guard.df_mut().copy_to(&tmp)?;
+            guard.df_mut().copy_to(&tmp, valid_len)?;
             // The temp file was created with `0o600` permissions, so the copied bytes are
             // never readable by anyone but the owner while the backup is in flight.
             // Open with Strict durability so `sync()` performs an fsync on the copied bytes
             // before the atomic rename, satisfying the documented durability guarantee.
             let mut tmp_file = DataFile::open_existing(&tmp, Durability::Strict, false)?;
+            // All fallible validation (including a full scan of the copied frames) happens
+            // before the atomic rename, so a validation failure never destroys an existing
+            // destination.
+            let _scan = recovery::scan(&mut tmp_file, |_, _| Ok(()))?;
             tmp_file.sync()?;
             drop(tmp_file);
             std::fs::rename(&tmp, &dest_canonical)?;
@@ -572,9 +610,6 @@ impl Store {
                     "backup destination collided with the primary data file after rename".into(),
                 ));
             }
-            let mut backup_file =
-                DataFile::open_existing(&dest_canonical, Durability::Strict, false)?;
-            let _scan = recovery::scan(&mut backup_file, |_, _| Ok(()))?;
             Ok(())
         })();
 
@@ -635,17 +670,7 @@ impl StoreInner {
             });
         }
 
-        let records = record::decode_records(&frame.payload)?;
-        if records.len() != frame.header.record_count as usize {
-            return Err(Error::Corruption {
-                message: format!(
-                    "frame record count {} does not match decoded records {}",
-                    frame.header.record_count,
-                    records.len()
-                ),
-                offset: frame_offset,
-            });
-        }
+        let records = record::decode_records(&frame.payload, frame.header.record_count)?;
 
         // Reconstruct the original commit batch and re-validate every operation against
         // the state rebuilt so far. This catches corrupted frames that pass checksums.
@@ -658,6 +683,7 @@ impl StoreInner {
             frame.header.commit_timestamp_ms,
             records.clone(),
         )?;
+        validate_immutable_invariants(&batch)?;
         self.validate_projection_ops(&batch)?;
         self.validate_job_ops(&batch)?;
         let expected = self.ops_to_records(&batch)?;
@@ -912,6 +938,26 @@ impl StoreInner {
                         Self::corruption(format!("invalid JobResolve in frame: {e}"), frame_offset)
                     })?;
                 }
+                Record::JobExpire {
+                    job_id,
+                    lease_token,
+                    attempt,
+                    expired_at_ms,
+                } => {
+                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                        Self::corruption(
+                            format!("JobExpire references missing job {job_id}"),
+                            frame_offset,
+                        )
+                    })?;
+                    job.expire(*expired_at_ms, *lease_token, *attempt)
+                        .map_err(|e| {
+                            Self::corruption(
+                                format!("invalid JobExpire in frame: {e}"),
+                                frame_offset,
+                            )
+                        })?;
+                }
                 Record::TransactionMeta { .. } => {
                     // Transaction metadata is a framing record; it does not affect state.
                 }
@@ -926,6 +972,9 @@ impl StoreInner {
                 transaction_id: batch.transaction_id,
             });
         }
+        if self.needs_repair {
+            return Err(Error::StoreNeedsRepair);
+        }
 
         // Idempotency is checked first so a resubmitted transaction returns its original
         // receipt without re-running validation that would fail on already-committed event IDs.
@@ -936,7 +985,8 @@ impl StoreInner {
                 .df_mut()
                 .read_at(prev_offset, prev_total_length as usize)?;
             let prev_frame = Frame::decode(&prev_bytes)?;
-            let prev_records = record::decode_records(&prev_frame.payload)?;
+            let prev_records =
+                record::decode_records(&prev_frame.payload, prev_frame.header.record_count)?;
             let prev_batch = CommitBatch::from_records(
                 batch.transaction_id,
                 prev_frame.header.commit_timestamp_ms,
@@ -1038,6 +1088,10 @@ impl StoreInner {
             records,
         )?;
 
+        // The commit is now fully durable (or in-memory, depending on durability mode).
+        // Update the valid prefix length used by backup.
+        self.last_valid_offset = self.df().file_len();
+
         // Failpoint: after memory apply.
         #[cfg(feature = "failpoint")]
         {
@@ -1072,9 +1126,7 @@ impl StoreInner {
     }
 
     fn validate_batch(&self, batch: &CommitBatch) -> Result<(), Error> {
-        if batch.transaction_id == Id::ZERO {
-            return Err(Error::Validation("transaction id cannot be zero".into()));
-        }
+        validate_immutable_invariants(batch)?;
         self.limits.validate_metadata(batch.metadata.len())?;
         // `ops_to_records` may add one TransactionMeta record, so include it in the estimate.
         let estimated_records = batch.ops.len()
@@ -1090,9 +1142,6 @@ impl StoreInner {
             )));
         }
         for op in &batch.ops {
-            if let Some(kind) = zero_id_kind(op) {
-                return Err(Error::Validation(format!("{kind} cannot be zero")));
-            }
             match op {
                 Op::AppendEvent(e) => {
                     self.limits
@@ -1138,11 +1187,6 @@ impl StoreInner {
                     }
                 }
                 Op::EnqueueJob(job) => {
-                    if job.max_attempts == 0 {
-                        return Err(Error::Validation(
-                            "max_attempts must be greater than 0".into(),
-                        ));
-                    }
                     self.limits.validate_job_payload(job.payload.len())?;
                     self.limits.validate_string("queue", &job.queue)?;
                     self.limits.validate_string("partition", &job.partition)?;
@@ -1303,6 +1347,16 @@ impl StoreInner {
                 Op::ResolveJob { job_id, resolution } => {
                     let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
                     job.resolve(batch.now_ms, *resolution)?;
+                    simulated.insert(*job_id, job);
+                }
+                Op::InternalExpireJob {
+                    job_id,
+                    lease_token,
+                    attempt,
+                    expired_at_ms,
+                } => {
+                    let mut job = self.get_job_or_simulated(&mut simulated, *job_id)?;
+                    job.expire(*expired_at_ms, *lease_token, *attempt)?;
                     simulated.insert(*job_id, job);
                 }
                 _ => {}
@@ -1579,6 +1633,19 @@ impl StoreInner {
                         claimed_at_ms: batch.now_ms,
                     });
                 }
+                Op::InternalExpireJob {
+                    job_id,
+                    lease_token,
+                    attempt,
+                    expired_at_ms,
+                } => {
+                    records.push(Record::JobExpire {
+                        job_id: *job_id,
+                        lease_token: *lease_token,
+                        attempt: *attempt,
+                        expired_at_ms: *expired_at_ms,
+                    });
+                }
             }
         }
         Ok(records)
@@ -1613,15 +1680,15 @@ impl StoreInner {
                 transaction_id: Id::ZERO,
             });
         }
+        if self.needs_repair {
+            return Err(Error::StoreNeedsRepair);
+        }
         if request.lease_ms <= 0 {
             return Err(Error::Validation("lease_ms must be greater than 0".into()));
         }
 
+        let mut expired_at_limit: Vec<(Id, Id, u32, i64)> = Vec::new();
         let mut candidates: Vec<(Id, Id, u32, i64, JobSpec)> = Vec::new();
-        // Idempotent jobs whose lease expired on the final attempt must be durably
-        // marked dead before later jobs in the same partition can be claimed.
-        let mut expired_at_limit: Vec<(Id, Id)> = Vec::new();
-        let claim_limit = request.limit.min(self.limits.max_records_per_transaction);
         let mut partitions: Vec<(String, String)> = self
             .queue_partitions
             .keys()
@@ -1631,12 +1698,9 @@ impl StoreInner {
         partitions.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (queue, partition) in partitions {
-            if candidates.len() >= claim_limit {
-                break;
-            }
             let ids = self
                 .queue_partitions
-                .get(&(queue.clone(), partition.clone()))
+                .get(&(queue, partition))
                 .cloned()
                 .unwrap_or_default();
             for job_id in ids {
@@ -1652,7 +1716,8 @@ impl StoreInner {
                         message: format!("leased job {job_id} has no lease token"),
                         offset: 0,
                     })?;
-                    expired_at_limit.push((job_id, token));
+                    let expired_at_ms = request.now_ms;
+                    expired_at_limit.push((job_id, token, job.attempt, expired_at_ms));
                     continue;
                 }
                 if !job.is_ready_at(request.now_ms) {
@@ -1682,22 +1747,49 @@ impl StoreInner {
             }
         }
 
-        // Maintenance for final-attempt expired idempotent jobs is committed one job at a time.
-        // This guarantees that a transaction-limit bound can never make the queue permanently
-        // unclaimable: each call durably cleans at least one eligible expired job.
-        for (job_id, lease_token) in &expired_at_limit {
-            let batch = CommitBatch::new(Id::new()?, request.now_ms).fail_job(
-                *job_id,
-                *lease_token,
-                "lease expired after max attempts",
-                None,
-            );
-            self.commit(batch)?;
+        // Build one atomic batch. If it cannot fit under the configured limits, trim it
+        // to a safe prefix and commit that atomically. A prefix containing only expired
+        // jobs still makes progress; candidate claims happen once all preceding expired
+        // jobs in the included partitions have been removed.
+        let max_records = self.limits.max_records_per_transaction;
+        let max_frame = self.limits.max_frame_size;
+        let worker_id_len = request.worker_id.len();
+
+        let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+        let mut batch_records = 0usize;
+        let mut batch_bytes = FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE;
+        let mut expired_included = 0usize;
+
+        // Each JobExpire record is a fixed 51 encoded bytes; add a small margin.
+        const EXPIRE_ESTIMATE: usize = 64;
+        // Each JobLease record is ~60 bytes + worker_id; add a small margin.
+        let lease_estimate = 64usize.saturating_add(worker_id_len);
+
+        for (job_id, lease_token, attempt, expired_at_ms) in &expired_at_limit {
+            if batch_records >= max_records
+                || batch_bytes.saturating_add(EXPIRE_ESTIMATE) > max_frame
+            {
+                break;
+            }
+            batch = batch.internal_expire_job(*job_id, *lease_token, *attempt, *expired_at_ms);
+            batch_records += 1;
+            batch_bytes += EXPIRE_ESTIMATE;
+            expired_included += 1;
         }
 
-        if !candidates.is_empty() {
-            let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+        // Only claim candidates if every collected expired job fits. Otherwise the
+        // remaining expired jobs would still block their partitions and the claim set
+        // would be misleading.
+        let include_candidates = expired_included == expired_at_limit.len();
+        if include_candidates {
+            let mut claimed_budget = request.limit;
             for (job_id, lease_token, attempt, lease_expires_at_ms, _) in &candidates {
+                if batch_records >= max_records
+                    || batch_bytes.saturating_add(lease_estimate) > max_frame
+                    || claimed_budget == 0
+                {
+                    break;
+                }
                 batch = batch.lease_job(
                     *job_id,
                     *lease_token,
@@ -1705,23 +1797,35 @@ impl StoreInner {
                     *attempt,
                     *lease_expires_at_ms,
                 );
+                batch_records += 1;
+                batch_bytes += lease_estimate;
+                claimed_budget -= 1;
             }
+        }
+
+        if !batch.ops.is_empty() {
             self.commit(batch)?;
         }
 
-        let mut claimed = Vec::with_capacity(candidates.len());
-        for (job_id, lease_token, attempt, lease_expires_at_ms, spec) in candidates {
-            claimed.push(ClaimedJob {
-                job_id,
-                queue: spec.queue,
-                partition: spec.partition,
-                payload: spec.payload,
-                worker_id: request.worker_id.clone(),
-                lease_token,
-                attempt,
-                lease_expires_at_ms,
-                idempotency_key: spec.idempotency_key,
-            });
+        let mut claimed = Vec::with_capacity(candidates.len().min(batch_records));
+        if include_candidates {
+            for (job_id, lease_token, attempt, lease_expires_at_ms, spec) in candidates {
+                // `batch_records` reflects how many candidate lease ops were actually added.
+                if claimed.len() >= batch_records - expired_included {
+                    break;
+                }
+                claimed.push(ClaimedJob {
+                    job_id,
+                    queue: spec.queue,
+                    partition: spec.partition,
+                    payload: spec.payload,
+                    worker_id: request.worker_id.clone(),
+                    lease_token,
+                    attempt,
+                    lease_expires_at_ms,
+                    idempotency_key: spec.idempotency_key,
+                });
+            }
         }
         Ok(claimed)
     }
@@ -1736,12 +1840,32 @@ fn zero_id_kind(op: &Op) -> Option<&'static str> {
         | Op::CancelJob { job_id, .. }
         | Op::ResolveJob { job_id, .. }
         | Op::LeaseJob { job_id, .. }
+        | Op::InternalExpireJob { job_id, .. }
             if *job_id == Id::ZERO =>
         {
             Some("job id")
         }
         _ => None,
     }
+}
+
+fn validate_immutable_invariants(batch: &CommitBatch) -> Result<(), Error> {
+    if batch.transaction_id == Id::ZERO {
+        return Err(Error::Validation("transaction id cannot be zero".into()));
+    }
+    for op in &batch.ops {
+        if let Some(kind) = zero_id_kind(op) {
+            return Err(Error::Validation(format!("{kind} cannot be zero")));
+        }
+        if let Op::EnqueueJob(job) = op {
+            if job.max_attempts == 0 {
+                return Err(Error::Validation(
+                    "max_attempts must be greater than 0".into(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_receipt(
@@ -1826,6 +1950,44 @@ mod tests {
 
     use super::*;
     use crate::codec::frame::FileHeader;
+
+    #[test]
+    fn projection_version_checked_add_overflow_is_rejected() {
+        // The public API cannot reach u64::MAX without an impossible number of commits,
+        // so exercise the `checked_add(1)` overflow branch directly against the internal
+        // validation routine.
+        let tmp = std::env::temp_dir().join(format!(
+            "minisqlite_projection_overflow_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+
+        let store = StoreBuilder::new(&tmp)
+            .durability(Durability::Memory)
+            .open()
+            .unwrap();
+
+        {
+            let mut guard = store.inner.write().unwrap_or_else(|p| p.into_inner());
+            let mut state = ProjectionState::new();
+            state.version = u64::MAX;
+            guard.projections.insert("p".to_string(), state);
+        }
+
+        let batch = CommitBatch::new(Id::new().unwrap(), 0).projection_put(
+            "p",
+            u64::MAX,
+            b"k".to_vec(),
+            b"v".to_vec(),
+        );
+        let guard = store.inner.write().unwrap_or_else(|p| p.into_inner());
+        let result = guard.validate_projection_ops(&batch);
+        assert!(
+            matches!(result, Err(Error::Validation(ref s)) if s.contains("overflow")),
+            "expected projection version overflow, got {result:?}"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 
     #[test]
     fn mismatched_frame_record_count_is_rejected() {

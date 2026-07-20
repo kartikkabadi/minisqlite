@@ -89,8 +89,10 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 | `cargo test --all-targets --all-features` | Passed |
 | `cargo test --doc --all-features` | Passed |
 | `cargo package --allow-dirty` | Passed |
+| `cargo +1.89.0 build --all-targets --all-features` | Passed |
+| `cargo +1.89.0 test --all-targets --all-features` | Passed |
 
-CI matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`.
+CI matrix: `ubuntu-latest`, `macos-latest`, `windows-latest`, plus a pinned Rust 1.89 MSRV lane on Ubuntu.
 
 ## Crash matrix
 
@@ -127,6 +129,7 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | Bounds and limit validation (`tests/limits.rs`) | Passed |
 | Symlink rejection and file permissions (`tests/security.rs`) | Passed |
 | Partition-ordered job claiming (`tests/integration.rs`) | Passed |
+| Review #6 adversarial regressions (`tests/review6.rs`, `tests/review6_fuzz.rs`) | Passed |
 
 ## Fuzz targets
 
@@ -145,10 +148,10 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 
 * Production lines added / deleted in `src/`: approximately **+5,541 / -4,858**.
 * Public API items: approximately **70** exported types/methods.
-* Direct runtime dependencies: `crc32fast`, `serde` (optional, exact `1.0.229`, default), `serde_json` (optional, default).
+* Direct runtime dependencies: `crc32fast`, `libc` (for audited `O_NOFOLLOW`), `serde` (optional, exact `1.0.229`, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file. The advisory lock is held on the data file itself, so no separate lock file is created.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, IDs are generated from a 128-bit OS CSPRNG (no dependency on counter/clock), recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, Socket Security alerts for `cargo/libc` and `cargo/zerocopy` were resolved by keeping the dependency tree free of those crates (`fs2` replaced by `std::fs::File::lock`, `proptest`/`tempfile` replaced by `fastrand` and a custom `TempDir` helper, `libfuzzer-sys`/`fuzz/` removed and replaced with deterministic `#[test]` fuzz targets, and ID generation uses `/dev/urandom` on Unix and `BCryptGenRandom` on Windows instead of `getrandom`/`libc`), the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the sidecar `.mini.lock` file was deleted and the lock is now held on the primary data file, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, IDs are generated from a 128-bit OS CSPRNG (no dependency on counter/clock), recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, the `cargo/zerocopy` Socket Security alert was resolved by removing `proptest`/`tempfile` and the `libfuzzer-sys`/`fuzz/` harness (`fastrand` and a custom `TempDir` helper replace them), `O_NOFOLLOW` is sourced from the audited `libc` crate instead of hand-copied constants, and ID generation uses `/dev/urandom` on Unix and `BCryptGenRandom` on Windows, the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the sidecar `.mini.lock` file was deleted and the lock is now held on the primary data file, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
 
 ## Synara-shaped demonstration
 
@@ -209,7 +212,7 @@ Per PR comment IDs 4732347323 and 4732434245, the branch was audited against the
   * `tests/integration.rs` adds `duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen`.
   * `tests/projection_ops.rs` adds `delete_on_missing_projection_materializes_empty_projection`.
   * `tests/invalid_job_transitions.rs` adds `claim_jobs_rejects_non_positive_lease` and `claim_jobs_rejects_lease_arithmetic_overflow`.
-* `Cargo.lock` contains no `libc` or `zerocopy`.
+* `Cargo.lock` contains no `zerocopy`; `libc` was later re-introduced for audited `O_NOFOLLOW` bindings (Review #6).
 
 ## Review #3 P1 fix pass
 
@@ -244,7 +247,7 @@ Per PR comment ID 4732599741, the 13 merge-blocking findings were addressed and 
   * `src/store.rs` adds a unit test `mismatched_frame_record_count_is_rejected` that builds a corrupt `Frame` with `record_count = 2` and one record and proves the store refuses to open.
   * `tests/security.rs` verifies primary-file owner-only permissions and symlink rejection on Unix.
   * `tests/cli.rs` validates `export --format jsonl` and projection scan JSON output with hex payloads.
-* `Cargo.lock` contains no `libc`, `wasi`, or `zerocopy`.
+* `Cargo.lock` contains no `wasi` or `zerocopy`; `libc` was later re-introduced for audited `O_NOFOLLOW` bindings (Review #6).
 
 ## Review #4 final hardening pass
 
@@ -305,6 +308,40 @@ Per the Review #5 merge-blocking findings, the following fixes and adversarial r
 * `projection_clear_name_length_is_validated`
 * `projection_version_overflow_is_rejected`
 
+## Review #6 final hardening pass
+
+Per the Review #6 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. Expired final-attempt job maintenance is now represented by a fixed-size `Record::JobExpire` / `Op::InternalExpireJob`, so it is independent of `max_summary_len` and `max_frame_size`.
+2. `Store::claim_jobs` builds one atomic `CommitBatch` for all maintenance and candidate lease operations, with explicit byte and record budgeting under `Limits`; if the configured bounds do not fit everything, it commits a safe bounded prefix and makes progress without leaving a partial durable state.
+3. `StoreBuilder::open_existing()` and `StoreBuilder::verify()` are non-mutating: `open_existing` never initializes a zero-byte file and never truncates a torn tail; it recovers the valid prefix and sets `needs_repair`, blocking writes until `Store::repair()` is called explicitly. `verify` performs a read-only scan without locking or modifying the file.
+4. `Store::backup` protects the destination namespace: it refuses an existing destination, copies only the durable valid prefix (`last_valid_offset`), and scans the temporary copy before the atomic `rename` so a corrupted source cannot overwrite a good backup.
+5. Replay enforces immutable semantic invariants by splitting them from configurable `Limits`: zero transaction/job/lease IDs, `max_attempts > 0`, non-zero lease token, `attempt == previous + 1`, `attempt <= max_attempts`, and `lease_expires_at_ms > claimed_at_ms` are all checked during `replay_frame`.
+6. Record decoding is bounded by the hard `MAX_RECORDS_PER_FRAME` ceiling before allocation, so a malicious `record_count` cannot force unbounded memory growth.
+7. Hand-copied `O_NOFOLLOW` integer constants are replaced with `libc::O_NOFOLLOW` (and `FILE_FLAG_OPEN_REPARSE_POINT` on Windows) via the audited `libc` crate.
+8. Public documentation (`README.md`, `docs/RECOVERY.md`, `docs/ARCHITECTURE.md`, `docs/FORMAT.md`, `docs/SECURITY.md`, `docs/DEPENDENCIES.md`, `docs/JOBS.md`, `docs/INVARIANTS.md`, `CHANGELOG.md`) has been synchronized with the shipped API and format.
+9. The projection version overflow regression test now exercises the `checked_add(1)` overflow branch (`src/store.rs` unit test `projection_version_checked_add_overflow_is_rejected`).
+10. A pinned Rust 1.89 MSRV CI lane was added to `.github/workflows/ci.yml`.
+
+### Adversarial regression tests added
+
+* `expired_job_maintenance_is_independent_of_summary_and_frame_limits`
+* `claim_jobs_budgets_records_and_frame_size`
+* `open_existing_zero_byte_file_is_not_created_or_repaired`
+* `verify_and_open_existing_are_non_mutating_on_torn_tail`
+* `backup_refuses_existing_destination`
+* `limits_minimum_frame_size_covers_internal_records`
+* `projection_version_checked_add_overflow_is_rejected`
+* `replay_rejects_zero_transaction_id`
+* `replay_rejects_zero_job_id`
+* `replay_rejects_zero_max_attempts`
+* `replay_rejects_zero_lease_token`
+* `replay_rejects_non_sequential_attempt`
+* `replay_rejects_attempt_above_max_attempts`
+* `replay_rejects_lease_expiry_not_after_claim_time`
+* `replay_rejects_duplicate_job_id_with_different_spec`
+* `decode_records_rejects_huge_record_count_without_oom`
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All Review #5 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #6 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.

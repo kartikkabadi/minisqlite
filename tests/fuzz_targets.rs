@@ -96,7 +96,7 @@ fn frame_decode_never_panics() {
 fn record_decode_never_panics() {
     for seed in 0..1024 {
         let bytes = fuzz_bytes(seed, 2048);
-        let _ = decode_records(&bytes);
+        let _ = decode_records(&bytes, 1);
 
         // Mutate a valid non-empty record payload.
         let e = minisqlite::Event::with_json_payload(
@@ -123,7 +123,7 @@ fn record_decode_never_panics() {
                 },
             )]);
         let mutated = mutate_bytes(seed + 20_000, &base);
-        let _ = decode_records(&mutated);
+        let _ = decode_records(&mutated, 1);
     }
 }
 

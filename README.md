@@ -87,7 +87,7 @@ fn main() {
         .as_millis() as i64;
 
     let event = Event::with_json_payload(
-        Id::new(),
+        Id::new().unwrap(),
         "user:42",
         "user.created",
         now,
@@ -96,11 +96,11 @@ fn main() {
 
     store
         .commit(
-            CommitBatch::new(Id::new(), now)
+            CommitBatch::new(Id::new().unwrap(), now)
                 .append_event(event)
                 .projection_put("users", 1, b"user:42".to_vec(), br#"{"name":"Ada"}"#.to_vec())
                 .enqueue_job(minisqlite::JobSpec::new(
-                    minisqlite::Id::new(),
+                    minisqlite::Id::new().unwrap(),
                     "emails",
                     "welcome",
                     b"user:42".to_vec(),
@@ -111,13 +111,15 @@ fn main() {
     let users = store.scan_projection_prefix("users", b"").unwrap();
     println!("{:?}", users);
 
-    let mut claimed = store.claim_jobs(minisqlite::ClaimRequest {
-        queue: "emails".into(),
-        worker_id: "worker-1".into(),
-        now_ms: now,
-        lease_ms: 30_000,
-        limit: 1,
-    });
+    let claimed = store
+        .claim_jobs(minisqlite::ClaimRequest {
+            queue: "emails".into(),
+            worker_id: "worker-1".into(),
+            now_ms: now,
+            lease_ms: 30_000,
+            limit: 1,
+        })
+        .unwrap();
     println!("claimed {:?}", claimed);
 }
 ```
@@ -128,6 +130,7 @@ See [`examples/synara_control_plane.rs`](examples/synara_control_plane.rs) for a
 
 ```bash
 minisqlite doctor app.mini
+minisqlite verify app.mini
 minisqlite stats app.mini
 minisqlite events tail app.mini 50
 minisqlite events stream app.mini user:42
@@ -138,13 +141,17 @@ minisqlite export app.mini --format jsonl > snapshot.jsonl
 minisqlite backup app.mini app-backup.mini
 ```
 
+`verify` scans the file read-only without modifying it. `doctor` reports whether the store needs explicit `repair` after an unclean shutdown.
+
 ## Crash recovery guarantee
 
 * The durable representation is an append-only sequence of self-checksummed transaction frames.
 * Normal commits never overwrite old state.
-* A torn final frame is safely truncated on reopen.
+* A torn final frame is safely truncated on `open`; `open_existing` leaves it for explicit `Store::repair` so verification is separate from repair.
+* `StoreBuilder::verify()` performs a read-only scan without locking or modifying the file.
 * Mid-file corruption is reported as a hard error.
 * `Strict` mode calls `fsync` before returning success.
+* Replay enforces immutable invariants (non-zero IDs, `max_attempts > 0`, valid lease tokens and attempt sequence, `lease_expires_at_ms > claimed_at_ms`).
 
 ## Limitations
 
@@ -177,6 +184,8 @@ cargo test --all-targets --all-features
 cargo test --doc --all-features
 cargo package --allow-dirty
 ```
+
+CI also runs a pinned Rust 1.89 MSRV lane on Ubuntu.
 
 ## License
 

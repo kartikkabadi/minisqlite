@@ -14,10 +14,16 @@ pub const JOB_ACK: u8 = 0x22;
 pub const JOB_FAIL: u8 = 0x23;
 pub const JOB_CANCEL: u8 = 0x24;
 pub const JOB_RESOLVE: u8 = 0x25;
+pub const JOB_EXPIRE: u8 = 0x26;
 pub const TRANSACTION_META: u8 = 0x30;
 
 pub const RECORD_FORMAT_VERSION: u8 = 1;
 const RECORD_SUPPORTED_FLAGS: u8 = 0;
+
+/// Hard ceiling on the number of records in any frame. This limits recovery allocation
+/// before a potentially malicious payload is decoded, independent of the user-tunable
+/// `Limits::max_records_per_transaction`.
+pub const MAX_RECORDS_PER_FRAME: u32 = 1 << 20; // 1,048,576
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
@@ -99,6 +105,12 @@ pub enum Record {
         job_id: Id,
         resolution: Resolution,
         resolved_at_ms: i64,
+    },
+    JobExpire {
+        job_id: Id,
+        lease_token: Id,
+        attempt: u32,
+        expired_at_ms: i64,
     },
     TransactionMeta {
         correlation_id: Option<Id>,
@@ -272,6 +284,17 @@ impl Record {
                 body.write_u8(resolution.to_u8());
                 body.write_i64(*resolved_at_ms);
             }
+            Record::JobExpire {
+                job_id,
+                lease_token,
+                attempt,
+                expired_at_ms,
+            } => {
+                body.write_id(*job_id);
+                body.write_id(*lease_token);
+                body.write_u32(*attempt);
+                body.write_i64(*expired_at_ms);
+            }
             Record::TransactionMeta {
                 correlation_id,
                 metadata,
@@ -303,6 +326,7 @@ impl Record {
             Record::JobFail { .. } => JOB_FAIL,
             Record::JobCancel { .. } => JOB_CANCEL,
             Record::JobResolve { .. } => JOB_RESOLVE,
+            Record::JobExpire { .. } => JOB_EXPIRE,
             Record::TransactionMeta { .. } => TRANSACTION_META,
         }
     }
@@ -439,6 +463,12 @@ impl Record {
                 resolution: Resolution::from_u8(r.read_u8()?)?,
                 resolved_at_ms: r.read_i64()?,
             },
+            JOB_EXPIRE => Record::JobExpire {
+                job_id: r.read_id()?,
+                lease_token: r.read_id()?,
+                attempt: r.read_u32()?,
+                expired_at_ms: r.read_i64()?,
+            },
             TRANSACTION_META => Record::TransactionMeta {
                 correlation_id: r.read_optional_id()?,
                 metadata: r.read_bytes()?,
@@ -532,11 +562,38 @@ pub fn encode_records(records: &[Record]) -> Vec<u8> {
 }
 
 /// Decode a payload buffer into a sequence of records.
-pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, Error> {
+///
+/// `expected_count` is the record count declared by the frame header. Allocation and the
+/// decoded count are bounded by [`MAX_RECORDS_PER_FRAME`] to avoid unbounded memory growth
+/// from a valid-but-enormous frame.
+pub fn decode_records(bytes: &[u8], expected_count: u32) -> Result<Vec<Record>, Error> {
+    if expected_count > MAX_RECORDS_PER_FRAME {
+        return Err(Error::Corruption {
+            message: format!(
+                "record count {expected_count} exceeds maximum {MAX_RECORDS_PER_FRAME}"
+            ),
+            offset: 0,
+        });
+    }
     let mut reader = Reader::new(bytes);
-    let mut records = Vec::new();
+    let mut records = Vec::with_capacity(expected_count as usize);
     while let Some(record) = Record::decode(&mut reader)? {
+        if records.len() >= expected_count as usize {
+            return Err(Error::Corruption {
+                message: "decoded more records than frame header declared".into(),
+                offset: 0,
+            });
+        }
         records.push(record);
+    }
+    if records.len() != expected_count as usize {
+        return Err(Error::Corruption {
+            message: format!(
+                "frame record count {expected_count} does not match decoded records {}",
+                records.len()
+            ),
+            offset: 0,
+        });
     }
     Ok(records)
 }
@@ -551,7 +608,7 @@ mod tests {
             let mut rng = fastrand::Rng::with_seed(seed);
             let len = rng.usize(0..1024);
             let bytes: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
-            let _ = decode_records(&bytes);
+            let _ = decode_records(&bytes, u32::MAX);
         }
     }
 
@@ -590,7 +647,7 @@ mod tests {
         ];
 
         let payload = encode_records(&records);
-        let decoded = decode_records(&payload).unwrap();
+        let decoded = decode_records(&payload, records.len() as u32).unwrap();
         assert_eq!(records, decoded);
     }
 
@@ -611,7 +668,7 @@ mod tests {
         })
         .encode();
         bytes[1] = RECORD_FORMAT_VERSION + 1;
-        assert!(decode_records(&bytes).is_err());
+        assert!(decode_records(&bytes, 1).is_err());
     }
 
     #[test]
@@ -631,7 +688,7 @@ mod tests {
         })
         .encode();
         bytes[2] = 0xff;
-        assert!(decode_records(&bytes).is_err());
+        assert!(decode_records(&bytes, 1).is_err());
     }
 
     #[test]
@@ -654,6 +711,6 @@ mod tests {
         let new_len = (body_len + 1) as u32;
         bytes[3..7].copy_from_slice(&new_len.to_le_bytes());
         bytes.push(0);
-        assert!(decode_records(&bytes).is_err());
+        assert!(decode_records(&bytes, 1).is_err());
     }
 }

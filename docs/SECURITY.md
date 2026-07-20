@@ -13,7 +13,8 @@ An attacker with write access to the `.mini` file can construct valid frames tha
 
 ## File permissions
 
-On Unix, the primary data file and lock file are created with mode `0o600` (owner read/write only).
+On Unix, the primary data file is created with mode `0o600` (owner read/write only).
+There is no separate lock file; the advisory lock is held directly on the primary file.
 This reduces the risk of other users reading or modifying the file, but it is not encryption.
 
 If the containing directory is created by the store, it is set to `0o700` so only the owner can
@@ -21,8 +22,11 @@ list or access its contents.
 
 ## Symlink handling
 
-Opening the primary data file will fail if the path is an existing symlink. This avoids
-accidentally writing through a symlink placed by another user.
+Opening the primary data file uses `O_NOFOLLOW` (via the audited `libc` crate on Unix and
+`FILE_FLAG_OPEN_REPARSE_POINT` on Windows) so an existing symlink is rejected. This avoids
+accidentally writing through a symlink placed by another user. Backup destinations are also
+checked: an existing destination is refused and the temporary copy is scanned before the
+atomic rename so a corrupted source cannot overwrite a good backup.
 
 ## Payload privacy
 
@@ -37,15 +41,12 @@ The store refuses to open so the operator can investigate rather than silently u
 
 ## Dependency security review
 
-A Socket Security scan of PR #9 reported `Warn` alerts for `cargo/libc` and `cargo/zerocopy`.
-Both were removed from the dependency tree:
+A Socket Security scan of PR #9 previously reported a `Warn` alert for `cargo/zerocopy`. That
+transitive dependency was removed by replacing `proptest`/`tempfile` and the `libfuzzer-sys`
+fuzz crate with `fastrand` and a small custom `TempDir` helper. The `Cargo.lock` no longer
+contains `zerocopy`.
 
-* `fs2` was replaced by `std::fs::File::lock`/`try_lock` (Rust 1.89+), removing the runtime
-  `libc` dependency.
-* `proptest`, `tempfile`, and the `libfuzzer-sys` fuzz crate were replaced with `fastrand` and
-  a small custom `TempDir` helper, removing the `rand`/`getrandom`/`ppv-lite86`/`zerocopy` subtree.
-
-The `Cargo.lock` no longer contains `libc` or `zerocopy`.
+`O_NOFOLLOW` is sourced from the audited `libc` crate rather than hand-copied constants.
 
 ## Known limitations
 

@@ -557,7 +557,8 @@ fn model_claimed_ids(model: &mut Model, queue: &str, now: i64, limit: usize) -> 
             if job.is_expired_at_attempt_limit(now) {
                 job.internal_state = InternalState::Dead;
                 job.terminal_at_ms = Some(now);
-                job.error_summary = Some("lease expired after max attempts".into());
+                // Internal maintenance uses a fixed-size `JobExpire` record with no summary.
+                job.error_summary = None;
                 job.lease_token = None;
                 job.worker_id = None;
                 job.lease_expires_at_ms = 0;

@@ -119,6 +119,7 @@ fn exit_code(error: &Error) -> i32 {
         Error::TransactionNotFound(_) => 20,
         Error::Validation(_) => 21,
         Error::Io(_) => 22,
+        Error::StoreNeedsRepair => 23,
     }
 }
 
@@ -428,15 +429,17 @@ fn parse_durability(s: &str) -> Result<Durability, Error> {
 fn doctor(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
     match open_store(path, durability) {
         Ok(store) => {
-            store.verify()?;
+            let verify_status = match store.verify() {
+                Ok(()) => "ok",
+                Err(Error::StoreNeedsRepair) => "needs_repair",
+                Err(e) => return Err(e),
+            };
             let stats = store.stats();
             if json {
                 let status = if stats.poisoned {
                     "poisoned"
-                } else if stats.recovered_tail {
-                    "ok_tail_truncated"
                 } else {
-                    "ok"
+                    verify_status
                 };
                 println!(
                     "{}",
@@ -467,8 +470,8 @@ fn doctor(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
             }
             if stats.poisoned {
                 println!("status:        POISONED");
-            } else if stats.recovered_tail {
-                println!("status:        OK (tail truncated on recovery)");
+            } else if verify_status == "needs_repair" {
+                println!("status:        NEEDS_REPAIR (tail truncated)");
             } else {
                 println!("status:        OK");
             }
@@ -496,8 +499,7 @@ fn doctor(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
 }
 
 fn verify(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
-    let store = open_store(path, durability)?;
-    store.verify()?;
+    StoreBuilder::new(path).durability(durability).verify()?;
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
     } else {

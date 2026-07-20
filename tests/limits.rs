@@ -31,7 +31,7 @@ fn max_frame_size_must_cover_overhead() {
         .open()
     {
         Ok(_) => panic!("expected validation error"),
-        Err(e) => assert!(e.to_string().contains("overhead")),
+        Err(e) => assert!(e.to_string().contains("minimum frame size")),
     }
 }
 

@@ -14,6 +14,9 @@ These invariants are encoded in the implementation and exercised by tests.
 8. Expected stream versions are checked before append.
 9. The store never silently skips committed mid-file corruption.
 10. An incomplete final frame cannot corrupt earlier state.
+11. `open_existing` and `StoreBuilder::verify` are non-mutating.
+12. `Store::repair` is the only public write path that truncates a torn tail.
+13. Backup refuses an existing destination and validates the temporary copy before the atomic rename.
 
 ## Projections
 
@@ -34,11 +37,13 @@ These invariants are encoded in the implementation and exercised by tests.
 7. Uncertain jobs are not silently retried.
 8. Terminal jobs cannot return to pending without an explicit supported resolution.
 9. Job enqueue can be atomic with its causal domain event.
+10. `claim_jobs` atomically commits maintenance and candidate leases in one batch, bounded by `max_records_per_transaction` and `max_frame_size`.
+11. Expired final-attempt job maintenance uses a fixed-size `JobExpire` record independent of `max_summary_len`.
 
 ## API
 
 1. Validation errors do not mutate disk or memory.
 2. A successful commit has a stable receipt.
 3. Uncertain commit outcomes are reported as uncertain.
-4. A poisoned store rejects further writes.
+4. A poisoned store rejects further writes; a store with an un-repaired tail rejects writes.
 5. JSON CLI mode writes only machine-readable output to stdout; human prose goes to stderr.

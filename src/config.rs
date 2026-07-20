@@ -182,9 +182,12 @@ impl Limits {
                 self.max_frame_size, MAX_FRAME_SIZE
             )));
         }
-        if self.max_frame_size < FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE {
+        // The minimum frame must hold at least one fixed-size internal record (e.g.
+        // `JobExpire`) in addition to header and trailer.
+        const MIN_RECORD_BYTES: usize = 64;
+        if self.max_frame_size < FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE + MIN_RECORD_BYTES {
             return Err(crate::Error::Validation(format!(
-                "max_frame_size {} is smaller than the minimum frame overhead",
+                "max_frame_size {} is smaller than the minimum frame size",
                 self.max_frame_size
             )));
         }

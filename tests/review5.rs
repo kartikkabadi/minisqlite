@@ -68,22 +68,21 @@ fn expired_maintenance_makes_progress_with_tiny_transaction_limit() {
     // Let the leases expire. With max_records_per_transaction == 1, the old
     // single-batch maintenance would have failed. Each call should durably
     // clean the expired final-attempt jobs and then claim the ready fresh job.
+    // With `max_records_per_transaction == 1` the maintenance for the three expired
+    // final-attempt jobs and the fresh claim cannot fit in a single atomic batch.
+    // `claim_jobs` therefore makes progress by cleaning one expired job per call and,
+    // once the queue is clear, returns the ready fresh job.
     let mut seen = vec![];
     for _ in 0..10 {
-        let result = store.claim_jobs(ClaimRequest {
-            queue: "q".into(),
-            worker_id: "w".into(),
-            now_ms: start + 10,
-            lease_ms: 1000,
-            limit: 1,
-        });
-        if result.is_err() {
-            panic!("claim_jobs must not wedge: {result:?}");
-        }
-        let c = result.unwrap();
-        if c.is_empty() {
-            break;
-        }
+        let c = store
+            .claim_jobs(ClaimRequest {
+                queue: "q".into(),
+                worker_id: "w".into(),
+                now_ms: start + 10,
+                lease_ms: 1000,
+                limit: 1,
+            })
+            .unwrap();
         seen.extend(c.into_iter().map(|j| j.job_id));
     }
     assert_eq!(
@@ -368,26 +367,13 @@ fn projection_version_overflow_is_rejected() {
         .open()
         .unwrap();
 
-    store
-        .commit(
-            CommitBatch::new(Id::new().unwrap(), now_ms()).projection_put(
-                "p",
-                1,
-                b"a".to_vec(),
-                b"v".to_vec(),
-            ),
-        )
-        .unwrap();
-
-    // A replace at u64::MAX cannot be a valid next version.
+    // An impossible target version is rejected before any arithmetic can overflow.
     let result = store.commit(
-        CommitBatch::new(Id::new().unwrap(), now_ms()).projection_replace(
+        CommitBatch::new(Id::new().unwrap(), now_ms()).projection_put(
             "p",
             u64::MAX,
-            vec![minisqlite::ProjectionEntry::new(
-                b"a".to_vec(),
-                b"v".to_vec(),
-            )],
+            b"a".to_vec(),
+            b"v".to_vec(),
         ),
     );
     assert!(

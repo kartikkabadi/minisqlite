@@ -14,6 +14,7 @@ Pending -> Leased -> Succeeded
    +-> (lease expires)
         Idempotent effect -> can be reclaimed as Leased
         Non-idempotent effect -> Uncertain -> resolved explicitly
+        Idempotent effect at max_attempts -> Dead (via internal `JobExpire` maintenance)
 ```
 
 ## Enqueuing
@@ -44,6 +45,8 @@ let jobs = store.claim_jobs(request)?;
 * Claims are ordered by `(queue, partition)` and then by insertion order.
 * Only one ready job per partition is claimed per request, up to `limit` total.
 * A new lease token is generated for every claim.
+* Expired final-attempt jobs are maintained with a fixed-size `JobExpire` record that is independent of `max_summary_len` and `max_frame_size`.
+* `claim_jobs` builds one atomic `CommitBatch` containing all maintenance and candidate lease ops; if the configured `max_records_per_transaction` or `max_frame_size` does not fit everything, it commits a safe bounded prefix and makes progress without leaving a partial durable state.
 
 ## Completion
 

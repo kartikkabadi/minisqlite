@@ -12,12 +12,17 @@ Reopening a store invokes `storage::recovery::scan`:
    * Read the declared payload and trailer.
    * Verify trailer magic and frame checksum.
    * Verify trailer sequence and length match the header.
-4. Return a vector of validated frames.
+   * Decode records with the hard `MAX_RECORDS_PER_FRAME` ceiling before allocation.
+4. Return the scan result (valid prefix, tail-truncated flag, last valid offset).
+
+`StoreBuilder::verify()` performs the same scan without acquiring a lock or modifying the file,
+so read-only verification is separate from explicit `Store::repair()`.
 
 ## Incomplete final frame
 
 If the final frame is shorter than its declared length, has a bad checksum, or has a torn trailer, the scanner stops at the last complete valid frame and records `recovered_tail = true`.
-The store opens with the valid prefix.
+`open` truncates the torn tail automatically so the store can accept writes immediately.
+`open_existing` leaves the forensic tail on disk and sets `needs_repair`; writes are blocked until `Store::repair()` is called explicitly. This separates read-only verification from repair.
 
 No earlier frame is affected because the format is append-only and frames are self-contained.
 
@@ -28,7 +33,7 @@ This is intentional: we do not silently skip committed state that may have been 
 
 ## Replay
 
-After scanning, `StoreInner::replay_frame` applies each record to memory:
+After scanning, `StoreInner::replay_frame` applies each record to memory and validates immutable invariants (non-zero IDs, `max_attempts > 0`, lease-token non-zero, attempt sequence, `lease_expires_at_ms > claimed_at_ms`) before state is updated:
 
 * Events are appended with global sequence and stream version.
 * Projection operations update the in-memory `BTreeMap`.

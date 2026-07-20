@@ -85,6 +85,9 @@ pub enum Error {
     /// The requested transaction was not found.
     TransactionNotFound(Id),
 
+    /// The store was opened with an un-repaired tail and must be repaired before writes.
+    StoreNeedsRepair,
+
     /// An unsupported CLI argument or command was provided.
     Usage(String),
 }
@@ -145,6 +148,7 @@ impl fmt::Display for Error {
             Error::StreamNotFound(id) => write!(f, "stream {id} not found"),
             Error::EventNotFound(id) => write!(f, "event {id} not found"),
             Error::TransactionNotFound(id) => write!(f, "transaction {id} not found"),
+            Error::StoreNeedsRepair => write!(f, "store has an un-repaired tail; run repair"),
             Error::Usage(msg) => write!(f, "usage error: {msg}"),
         }
     }

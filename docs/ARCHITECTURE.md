@@ -27,7 +27,7 @@
 * `config` — `Durability`, `EffectMode`, `Limits`.
 * `error` — typed `Error` for validation, corruption, conflicts, etc.
 * `event` — `Event`, `PersistedEvent`, `StreamVersion`.
-* `id` — 128-bit `Id` from nanosecond time + atomic counter.
+* `id` — 128-bit `Id` from the OS CSPRNG (`/dev/urandom` on Unix, `BCryptGenRandom` on Windows), rejecting the all-zero ID.
 * `jobs` — `JobSpec`, `ClaimRequest`, `ClaimedJob`, `JobState`, `Resolution`.
 * `projection` — `ProjectionEntry`, `ProjectionState` (internal).
 * `transaction` — `CommitBatch`, `CommitReceipt`, `Op`.
@@ -41,11 +41,11 @@
 One process owns the store.
 A `RwLock<StoreInner>` serializes writes and allows concurrent readers.
 Readers take a read lock briefly and clone data; writers take a write lock.
-A separate `.lock` file provides advisory single-owner locking via `std::fs::File::lock`/`try_lock` (Rust 1.89+).
+The single-owner advisory lock is held directly on the primary data file via `std::fs::File::lock`/`try_lock` (Rust 1.89+). No separate lock file is used.
 
 ## Durability path
 
-1. Validate the `CommitBatch` against memory state.
+1. Validate immutable invariants (non-zero IDs, `max_attempts > 0`) and configured `Limits`.
 2. Validate projection operations and job operations.
 3. Encode records to the transaction payload.
 4. Check transaction/event idempotency.
@@ -58,5 +58,7 @@ A separate `.lock` file provides advisory single-owner locking via `std::fs::Fil
 
 Reopening scans frames sequentially from the file header.
 Each frame header and trailer are validated.
-A complete valid prefix is replayed; a torn trailing frame is truncated and reported.
+The declared record count is bounded by `MAX_RECORDS_PER_FRAME` before decoding.
+A complete valid prefix is replayed; a torn trailing frame is either truncated (`open`) or left for explicit `Store::repair` (`open_existing`).
 A corrupted mid-file frame causes a hard failure so an operator can investigate.
+`StoreBuilder::verify()` performs a read-only scan without modifying the file.

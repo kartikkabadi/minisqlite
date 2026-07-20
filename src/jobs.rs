@@ -239,7 +239,9 @@ impl JobStateRecord {
             && self.attempt >= self.spec.max_attempts
     }
 
-    /// Lease the job to a worker. Fails if the job is not ready.
+    /// Lease the job to a worker. Fails if the job is not ready or the lease fields
+    /// violate the immutable invariants (non-zero token, monotonic attempt, expiry after
+    /// claim time, attempt within the configured ceiling).
     pub fn lease(
         &mut self,
         now_ms: i64,
@@ -248,9 +250,36 @@ impl JobStateRecord {
         attempt: u32,
         lease_expires_at_ms: i64,
     ) -> Result<(), Error> {
+        if token == Id::ZERO {
+            return Err(Error::Validation(format!(
+                "job {} lease token cannot be zero",
+                self.spec.job_id
+            )));
+        }
         if self.is_terminal() || !self.is_ready_at(now_ms) {
             return Err(Error::Validation(format!(
                 "job {} is not ready for lease",
+                self.spec.job_id
+            )));
+        }
+        let expected_attempt = self.attempt.checked_add(1).ok_or_else(|| {
+            Error::Validation(format!("job {} attempt overflow", self.spec.job_id))
+        })?;
+        if attempt != expected_attempt {
+            return Err(Error::Validation(format!(
+                "job {} lease attempt {} does not match expected {}",
+                self.spec.job_id, attempt, expected_attempt
+            )));
+        }
+        if attempt > self.spec.max_attempts {
+            return Err(Error::Validation(format!(
+                "job {} lease attempt {} exceeds max_attempts {}",
+                self.spec.job_id, attempt, self.spec.max_attempts
+            )));
+        }
+        if lease_expires_at_ms <= now_ms {
+            return Err(Error::Validation(format!(
+                "job {} lease expires at or before claim time",
                 self.spec.job_id
             )));
         }
@@ -262,13 +291,19 @@ impl JobStateRecord {
         Ok(())
     }
 
-    /// Acknowledge the job with the given lease token. Fails if the token is stale or expired.
+    /// Acknowledge the job with the given lease token. Fails if the token is stale, expired,
+    /// or the zero sentinel.
     pub fn acknowledge(
         &mut self,
         now_ms: i64,
         token: Id,
         result_digest: Option<Vec<u8>>,
     ) -> Result<(), Error> {
+        if token == Id::ZERO {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
         if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
             return Err(Error::InvalidLease {
                 job_id: self.spec.job_id,
@@ -297,6 +332,11 @@ impl JobStateRecord {
         retry_after_ms: Option<i64>,
     ) -> Result<(), Error> {
         let terminal = self.attempt >= self.spec.max_attempts;
+        if token == Id::ZERO {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
         if self.lease_token != Some(token) {
             return Err(Error::InvalidLease {
                 job_id: self.spec.job_id,
@@ -340,7 +380,10 @@ impl JobStateRecord {
             )));
         }
         if let Some(token) = lease_token {
-            if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
+            if token == Id::ZERO
+                || self.lease_token != Some(token)
+                || now_ms >= self.lease_expires_at_ms
+            {
                 return Err(Error::InvalidLease {
                     job_id: self.spec.job_id,
                 });
@@ -396,6 +439,56 @@ impl JobStateRecord {
                 self.retry_after_ms = 0;
             }
         }
+        Ok(())
+    }
+
+    /// Internal maintenance transition that marks an idempotent job dead after its final
+    /// lease expired. It validates the stored lease token and attempt to prevent malformed
+    /// on-disk histories from being accepted during replay.
+    pub fn expire(&mut self, expired_at_ms: i64, token: Id, attempt: u32) -> Result<(), Error> {
+        if token == Id::ZERO {
+            return Err(Error::Validation(format!(
+                "job {} expire token cannot be zero",
+                self.spec.job_id
+            )));
+        }
+        if !matches!(self.state, JobInternalState::Leased) {
+            return Err(Error::Validation(format!(
+                "job {} is not leased and cannot expire",
+                self.spec.job_id
+            )));
+        }
+        if self.lease_token != Some(token) {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
+        if self.attempt != attempt {
+            return Err(Error::Validation(format!(
+                "job {} expire attempt {} does not match lease attempt {}",
+                self.spec.job_id, attempt, self.attempt
+            )));
+        }
+        if self.attempt < self.spec.max_attempts {
+            return Err(Error::Validation(format!(
+                "job {} expire attempt {} is below max_attempts {}",
+                self.spec.job_id, attempt, self.spec.max_attempts
+            )));
+        }
+        if expired_at_ms < self.lease_expires_at_ms {
+            return Err(Error::Validation(format!(
+                "job {} expired before lease expiry",
+                self.spec.job_id
+            )));
+        }
+        self.state = JobInternalState::Dead;
+        self.terminal_at_ms = Some(expired_at_ms);
+        self.lease_token = None;
+        self.worker_id = None;
+        self.lease_expires_at_ms = 0;
+        self.retry_after_ms = 0;
+        self.error_summary = None;
+        self.result_digest = None;
         Ok(())
     }
 

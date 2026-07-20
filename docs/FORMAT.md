@@ -3,7 +3,7 @@
 ## Extension
 
 The primary file uses `.mini`.
-The lock file uses `.lock`.
+There is no separate lock file; the single-owner advisory lock is held directly on the primary file.
 
 ## File header (64 bytes)
 
@@ -26,6 +26,8 @@ Opening behavior:
 * Unsupported newer major version: fail closed.
 * Corrupt checksum: fail closed.
 * Legacy MiniSQLite SQL files are not opened as the new format.
+* A zero-byte file is `NotMiniSQLite`; `open_existing` never initializes it.
+* A torn tail at EOF is reported to the caller; `open_existing` recovers the valid prefix and marks the store as needing explicit repair before writes.
 
 ## Transaction frame
 
@@ -76,9 +78,11 @@ Each record starts with:
 | body length | 4 bytes |
 | body | variable |
 
-Record kinds include `TransactionMeta`, `Event`, `ProjectionPut`, `ProjectionDelete`, `ProjectionClear`, `ProjectionReplace`, `JobEnqueue`, `JobLease`, `JobAck`, `JobFail`, `JobCancel`, `JobResolve`.
+Record kinds include `TransactionMeta`, `Event`, `ProjectionPut`, `ProjectionDelete`, `ProjectionClear`, `ProjectionReplace`, `JobEnqueue`, `JobLease`, `JobAck`, `JobFail`, `JobCancel`, `JobResolve`, `JobExpire`.
 `TransactionMeta` is written as the first record when the `CommitBatch` carries a `correlation_id` or `metadata` and carries transaction-level opaque context without affecting state.
+`JobExpire` is a small fixed-size record used for internal final-attempt lease expiry maintenance; it does not carry an error summary and is independent of `max_summary_len`.
 Unknown kernel record kinds are rejected.
+The number of records declared in a frame header is bounded by `MAX_RECORDS_PER_FRAME` before decoding, so a malicious record count cannot force unbounded allocation.
 Application event types are opaque bytes and may be anything.
 
 ## Checksum
@@ -98,3 +102,7 @@ The defaults are:
 * max records per transaction: 1024
 * max transaction frame size: 16 MiB
 * max string length: 4096
+
+`Limits::validate` enforces that `max_frame_size` is large enough to hold at least one
+`JobExpire` record plus frame header and trailer, so internal maintenance records are always
+representable under the configured limits.
