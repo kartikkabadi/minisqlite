@@ -163,14 +163,14 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 * Bounded control-plane data workload; not a general-purpose blob store.
 * Not production-ready.
 
-## Final merge-readiness pass
+## Final review-fix pass
 
-Per PR comment corrective follow-up, the branch was re-audited against the full spec and implementation.
+Per PR comment ID 4732347323, the branch was audited against the seven merge-blocking findings, with focused regression tests added for each and `docs/FINAL_REPORT.md` corrected to match what the tests prove.
 
-* Head SHA: `c237ec5aae18a2c1a04136683affc5d7e601a129`
+* Head SHA: `5b7dbbdcfd4a5fc4cf34a8a0bcccb0cf3b3852a5`
 * Branch: `feat/control-plane-state-engine`
 * Merge conflict with `main`: none
-* Full verification suite (run on the box at `2026-07-19 10:34 UTC`):
+* Full verification suite (run on the box at `2026-07-20 05:34 UTC`):
   * `cargo fmt --all -- --check` — passed
   * `cargo clippy --all-targets --all-features -- -D warnings` — passed
   * `cargo test --all-targets --all-features` — passed
@@ -179,17 +179,20 @@ Per PR comment corrective follow-up, the branch was re-audited against the full 
   * `cargo package --allow-dirty` — passed
   * `cargo run --example synara_control_plane --release` — passed
   * `cargo run --example benchmark --release` — passed
-* Additional cleanup from this pass:
-  * Removed the dead `stream_sequences` in-memory index from `StoreInner`.
-  * Removed the redundant `frame.header.record_count` re-assignment in `commit`.
-  * Guarded `ProjectionState::scan_range` against `start >= end` to eliminate a potential panic.
-  * Gated `tests/fuzz_targets.rs` behind the `fuzzing` feature and removed the stale `exclude = ["fuzz"]` entry from `Cargo.toml`.
-  * Refreshed `docs/PERFORMANCE.md` with the latest benchmark numbers.
+* Correctness fixes from this pass:
+  * `FrameHeader::decode` fails closed on unsupported frame format versions.
+  * `Record::decode` enforces record format version, flags, and fully consumed body.
+  * `Store::backup` rejects the primary path / filesystem aliases, removes stale temp files, opens the temp copy with `Durability::Strict`, and fsyncs before `rename`.
+  * `ProjectionDelete` on a missing projection now materializes an empty projection at the supplied version.
+  * `CommitBatch` rejects exact duplicate event IDs within a single batch.
+  * `Store::claim_jobs` rejects non-positive `lease_ms` and uses `checked_add` for `lease_expires_at_ms` and `attempt`.
+* Test evidence from this pass:
+  * `tests/crash.rs` splits the failpoint matrix by expected recovered state and asserts the child process aborts for abort failpoints.
+  * `tests/integration.rs` adds `backup_rejects_primary_path_and_preserves_store` and `duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen`.
+  * `tests/projection_ops.rs` adds `delete_on_missing_projection_materializes_empty_projection`.
+  * `tests/invalid_job_transitions.rs` adds `claim_jobs_rejects_non_positive_lease` and `claim_jobs_rejects_lease_arithmetic_overflow`.
 * `Cargo.lock` contains no `libc` or `zerocopy`.
-* Socket Security comments on PR #9 were resolved by removing the dependency tree that brought in `libc` and `zerocopy`.
 
 ## Verdict
 
-**MERGE-READY** — all required gates pass and no unresolved merge-blocking correctness blocker was found.
-
-The implementation is intentionally alpha (`v0.3.0-alpha.1`) and not production-ready; the above verdict means the PR is complete and coherent, not a claim of production maturity.
+**Fixes applied — do not merge yet.** All seven P1/P2 findings are addressed, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
