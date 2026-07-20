@@ -11,7 +11,7 @@ static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
 /// The child builds a ~512 MiB projection, then caps its own address space
 /// before performing single-key put/delete commits; a full-state copy during
 /// validation would exceed the cap and abort.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod constrained_projection {
     use super::*;
     use minisqlite::Durability;

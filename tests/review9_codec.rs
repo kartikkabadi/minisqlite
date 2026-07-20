@@ -4,7 +4,7 @@
 //! RLIMIT_AS, proving that decoding valid frames at or near the 64 MiB frame
 //! ceiling succeeds within a bounded memory budget instead of aborting on an
 //! unbounded allocation.
-#![cfg(all(unix, feature = "fuzzing"))]
+#![cfg(all(target_os = "linux", feature = "fuzzing"))]
 
 use std::process::Command;
 

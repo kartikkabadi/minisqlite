@@ -358,7 +358,7 @@ fn cli_export_streams_paged_events_projections_and_jobs() {
 /// space exports a store holding a ~256 MiB projection. The old implementation
 /// materialized every projection entry (plus hex-encoded JSON copies) at once
 /// and would exceed the cap.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn cli_export_streams_under_constrained_address_space() {
     use std::os::unix::process::CommandExt;
