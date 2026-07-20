@@ -301,7 +301,12 @@ fn claim_jobs_exact_lease_fits_minimum_160_byte_frame() {
         1,
         "single ready job should fit in 160-byte frame"
     );
-    assert_eq!(claimed[0].partition, "p");
+    let claimed_job = claimed.into_iter().next().unwrap();
+    assert_eq!(claimed_job.partition, "p");
+
+    // Close the store before re-reading the file; on Windows the advisory lock
+    // on the primary file otherwise blocks the read.
+    drop(store);
 
     // The lease transaction frame must be exactly the maximum frame size.
     let bytes = std::fs::read(&path).unwrap();
@@ -313,11 +318,11 @@ fn claim_jobs_exact_lease_fits_minimum_160_byte_frame() {
         "lease frame should be exactly 160 bytes"
     );
     let lease_record = Record::JobLease {
-        job_id: claimed[0].job_id,
-        lease_token: claimed[0].lease_token,
+        job_id: claimed_job.job_id,
+        lease_token: claimed_job.lease_token,
         worker_id: "w".into(),
-        attempt: claimed[0].attempt,
-        lease_expires_at_ms: claimed[0].lease_expires_at_ms,
+        attempt: claimed_job.attempt,
+        lease_expires_at_ms: claimed_job.lease_expires_at_ms,
         claimed_at_ms: 0,
     }
     .encode();

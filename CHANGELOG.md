@@ -52,6 +52,16 @@
 - `O_NOFOLLOW` is sourced from the audited `libc` crate; `Cargo.lock` contains `libc` but no `zerocopy`; `docs/SECURITY.md` and `docs/DEPENDENCIES.md` updated accordingly.
 - Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
 - Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
+- `Limits::validate` now rejects `max_records_per_transaction` above the hard `MAX_RECORDS_PER_FRAME` ceiling; `Store::commit` enforces the same ceiling before writing.
+- `record::decode_records` bounds allocation by payload geometry before reserving, rejecting `expected_count` that cannot fit.
+- `StoreBuilder::verify` and `Store::verify` replay every frame through the full semantic validation path and return `StoreNeedsRepair` for structurally torn tails.
+- `Store::claim_jobs` budgets maintenance and candidate leases using exact encoded record sizes and progresses per partition, eliminating previous starvation and 1-byte over-estimate.
+- `JobStateRecord::expire` rejects non-`Idempotent` `EffectMode`.
+- `Store::backup` uses `hard_link` + `remove_file` for atomic no-replace publication, so dangling symlinks and destination races cannot overwrite an existing backup.
+- `DataFile::truncate` reports `RepairOutcomeUncertain` when `fsync` after `set_len` fails, with requested and actual file length.
+- `StoreInner::replay_frame` wraps all semantic reconstruction/validation failures as `Error::Corruption { offset }` carrying the offending frame offset.
+- Synchronized `docs/RECOVERY.md`, `docs/ARCHITECTURE.md`, and `docs/INVARIANTS.md` with the structural-vs-semantic failure distinction and verify contract.
+- Added `tests/review7.rs` adversarial regression tests covering all ten Review #7 findings.
 
 ## 0.2.1
 

@@ -15,8 +15,11 @@ These invariants are encoded in the implementation and exercised by tests.
 9. The store never silently skips committed mid-file corruption.
 10. An incomplete final frame cannot corrupt earlier state.
 11. `open_existing` and `StoreBuilder::verify` are non-mutating.
-12. `Store::repair` is the only public write path that truncates a torn tail.
-13. Backup refuses an existing destination and validates the temporary copy before the atomic rename.
+12. `StoreBuilder::verify` replays every frame through the full semantic validation path.
+13. `Store::repair` is the only public write path that truncates a torn tail.
+14. Backup refuses an existing destination and validates the temporary copy before the atomic rename.
+15. `Limits::max_records_per_transaction` cannot exceed the hard frame record ceiling.
+16. Uncertain truncate outcomes are reported as `RepairOutcomeUncertain`.
 
 ## Projections
 

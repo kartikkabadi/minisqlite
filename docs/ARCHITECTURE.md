@@ -61,4 +61,4 @@ Each frame header and trailer are validated.
 The declared record count is bounded by `MAX_RECORDS_PER_FRAME` before decoding.
 A complete valid prefix is replayed; a torn trailing frame is either truncated (`open`) or left for explicit `Store::repair` (`open_existing`).
 A corrupted mid-file frame causes a hard failure so an operator can investigate.
-`StoreBuilder::verify()` performs a read-only scan without modifying the file.
+`StoreBuilder::verify()` performs a read-only full semantic replay in a transient store and fails closed on torn tails and semantic corruption.

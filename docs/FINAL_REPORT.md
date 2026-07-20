@@ -342,6 +342,34 @@ Per the Review #6 merge-blocking findings, the following fixes and adversarial r
 * `replay_rejects_duplicate_job_id_with_different_spec`
 * `decode_records_rejects_huge_record_count_without_oom`
 
+## Review #7 final hardening pass
+
+Per the Review #7 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. `Limits::validate` rejects `max_records_per_transaction` above the hard `MAX_RECORDS_PER_FRAME` ceiling; `Store::commit` enforces the same hard ceiling before writing a frame so an accepted configuration can never produce a frame the reader refuses.
+2. `record::decode_records` bounds `Vec` allocation by payload geometry (`expected_count <= bytes.len() / MIN_ENCODED_RECORD_SIZE`) before reserving, so a tiny or truncated payload cannot force a giant allocation.
+3. `StoreBuilder::verify` and `Store::verify` now replay every committed frame through the full semantic validation path in a transient `StoreInner`; structurally torn tails return `StoreNeedsRepair`, and semantic corruption returns `Error::Corruption { offset }`.
+4. `Store::claim_jobs` budgets maintenance and candidate leases using exact encoded `Record::JobExpire` / `Record::JobLease` lengths instead of fixed over-estimates; it processes partitions in sorted order and includes each partition's expired blockers plus one candidate before moving on, preventing earlier expiry backlogs from starving later partitions.
+5. `JobStateRecord::expire` enforces `EffectMode::Idempotent`; a `JobExpire` record for a non-idempotent job is rejected as corruption during replay.
+6. `Store::backup` uses a `hard_link` + `remove_file` atomic no-replace publication via `storage::file::rename_no_replace`; it no longer relies on a TOCTOU-vulnerable `dest.exists()` preflight, so a dangling symlink or a destination created during the copy cannot overwrite an existing backup.
+7. `DataFile::truncate` reports `RepairOutcomeUncertain { requested, actual }` when `fsync` after `set_len` fails, so callers know the durable outcome and must reopen to verify.
+8. `StoreInner::replay_frame` wraps all semantic reconstruction/validation/regeneration failures as `Error::Corruption { offset }` carrying the offending frame offset, preserving the underlying reason in the message.
+9. `docs/RECOVERY.md`, `docs/ARCHITECTURE.md`, and `docs/INVARIANTS.md` have been synchronized with the structural-vs-semantic failure distinction and the full-replay `verify` contract.
+
+### Adversarial regression tests added
+
+* `limits_rejects_max_records_above_hard_frame_ceiling`
+* `decode_records_bounds_allocation_by_payload_geometry`
+* `verify_rejects_torn_tail_as_store_needs_repair`
+* `verify_rejects_semantic_corruption_with_frame_offset`
+* `replay_wraps_immutable_invariant_errors_as_corruption_with_offset`
+* `claim_jobs_exact_lease_fits_minimum_160_byte_frame`
+* `claim_jobs_budgets_per_partition_and_avoids_starvation`
+* `backup_rejects_existing_destination`
+* `backup_rejects_dangling_symlink_destination`
+* `job_expire_rejects_non_idempotent_effect_mode_during_replay`
+* `truncate_reports_repair_outcome_uncertain_after_set_len_before_sync`
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All Review #6 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #7 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes on the Devin host and in CI (Ubuntu, macOS, Windows, MSRV), and `docs/FINAL_REPORT.md` claims only what the tests prove. A follow-up commit also fixed a Windows file-lock interaction in `claim_jobs_exact_lease_fits_minimum_160_byte_frame` by closing the store before re-reading the primary file. Final head: `01adc3781ac21bb2ff398d8514578df93d8a5d2c`. The PR remains open and unmerged per the review instruction.
