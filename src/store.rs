@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,6 +108,10 @@ struct StoreInner {
     projections: HashMap<String, ProjectionState>,
     jobs: HashMap<Id, JobStateRecord>,
     queue_partitions: HashMap<(String, String), Vec<Id>>,
+    /// Last partition selected for each queue, for round-robin fairness.
+    queue_cursors: HashMap<String, String>,
+    /// Head index into `queue_partitions` per partition, skipping terminal jobs.
+    partition_heads: HashMap<(String, String), usize>,
     recovered_tail: bool,
     needs_repair: bool,
     last_valid_offset: u64,
@@ -143,6 +147,8 @@ impl StoreInner {
             projections: HashMap::new(),
             jobs: HashMap::new(),
             queue_partitions: HashMap::new(),
+            queue_cursors: HashMap::new(),
+            partition_heads: HashMap::new(),
             recovered_tail: false,
             needs_repair: false,
             last_valid_offset: 0,
@@ -180,6 +186,8 @@ impl Store {
             projections: HashMap::new(),
             jobs: HashMap::new(),
             queue_partitions: HashMap::new(),
+            queue_cursors: HashMap::new(),
+            partition_heads: HashMap::new(),
             recovered_tail: false,
             needs_repair: false,
             last_valid_offset: 0,
@@ -873,6 +881,9 @@ impl StoreInner {
                                 .entry((queue.clone(), partition.clone()))
                                 .or_default()
                                 .push(*job_id);
+                            self.partition_heads
+                                .entry((queue.clone(), partition.clone()))
+                                .or_insert(0);
                             e.insert(JobStateRecord::new(spec));
                         }
                     }
@@ -885,22 +896,29 @@ impl StoreInner {
                     lease_expires_at_ms,
                     claimed_at_ms,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobLease references missing job {job_id}"),
-                            frame_offset,
+                    let (queue, partition) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                            Self::corruption(
+                                format!("JobLease references missing job {job_id}"),
+                                frame_offset,
+                            )
+                        })?;
+                        job.lease(
+                            *claimed_at_ms,
+                            *lease_token,
+                            worker_id.clone(),
+                            *attempt,
+                            *lease_expires_at_ms,
                         )
-                    })?;
-                    job.lease(
-                        *claimed_at_ms,
-                        *lease_token,
-                        worker_id.clone(),
-                        *attempt,
-                        *lease_expires_at_ms,
-                    )
-                    .map_err(|e| {
-                        Self::corruption(format!("invalid JobLease in frame: {e}"), frame_offset)
-                    })?;
+                        .map_err(|e| {
+                            Self::corruption(
+                                format!("invalid JobLease in frame: {e}"),
+                                frame_offset,
+                            )
+                        })?;
+                        (job.spec.queue.clone(), job.spec.partition.clone())
+                    };
+                    self.update_queue_cursor(&queue, &partition);
                 }
                 Record::JobAck {
                     job_id,
@@ -908,16 +926,30 @@ impl StoreInner {
                     acknowledged_at_ms,
                     lease_token,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobAck references missing job {job_id}"),
-                            frame_offset,
-                        )
-                    })?;
-                    job.acknowledge(*acknowledged_at_ms, *lease_token, result_digest.clone())
-                        .map_err(|e| {
-                            Self::corruption(format!("invalid JobAck in frame: {e}"), frame_offset)
+                    let (queue, partition, is_terminal) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                            Self::corruption(
+                                format!("JobAck references missing job {job_id}"),
+                                frame_offset,
+                            )
                         })?;
+                        job.acknowledge(*acknowledged_at_ms, *lease_token, result_digest.clone())
+                            .map_err(|e| {
+                                Self::corruption(
+                                    format!("invalid JobAck in frame: {e}"),
+                                    frame_offset,
+                                )
+                            })?;
+                        (
+                            job.spec.queue.clone(),
+                            job.spec.partition.clone(),
+                            job.is_terminal(),
+                        )
+                    };
+                    self.update_queue_cursor(&queue, &partition);
+                    if is_terminal {
+                        self.advance_partition_head(&queue, &partition);
+                    }
                 }
                 Record::JobFail {
                     job_id,
@@ -928,32 +960,43 @@ impl StoreInner {
                     terminal,
                     failed_at_ms,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobFail references missing job {job_id}"),
-                            frame_offset,
+                    let (queue, partition, is_terminal) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                            Self::corruption(
+                                format!("JobFail references missing job {job_id}"),
+                                frame_offset,
+                            )
+                        })?;
+                        if job.attempt != *attempt {
+                            return Err(Self::corruption(
+                                format!("JobFail attempt mismatch for {job_id}"),
+                                frame_offset,
+                            ));
+                        }
+                        job.fail(
+                            *failed_at_ms,
+                            *lease_token,
+                            error_summary.clone(),
+                            Some(*retry_after_ms),
                         )
-                    })?;
-                    if job.attempt != *attempt {
-                        return Err(Self::corruption(
-                            format!("JobFail attempt mismatch for {job_id}"),
-                            frame_offset,
-                        ));
-                    }
-                    job.fail(
-                        *failed_at_ms,
-                        *lease_token,
-                        error_summary.clone(),
-                        Some(*retry_after_ms),
-                    )
-                    .map_err(|e| {
-                        Self::corruption(format!("invalid JobFail in frame: {e}"), frame_offset)
-                    })?;
-                    if job.is_terminal() != *terminal {
-                        return Err(Self::corruption(
-                            format!("JobFail terminal flag mismatch for {job_id}"),
-                            frame_offset,
-                        ));
+                        .map_err(|e| {
+                            Self::corruption(format!("invalid JobFail in frame: {e}"), frame_offset)
+                        })?;
+                        if job.is_terminal() != *terminal {
+                            return Err(Self::corruption(
+                                format!("JobFail terminal flag mismatch for {job_id}"),
+                                frame_offset,
+                            ));
+                        }
+                        (
+                            job.spec.queue.clone(),
+                            job.spec.partition.clone(),
+                            job.is_terminal(),
+                        )
+                    };
+                    self.update_queue_cursor(&queue, &partition);
+                    if is_terminal {
+                        self.advance_partition_head(&queue, &partition);
                     }
                 }
                 Record::JobCancel {
@@ -961,31 +1004,59 @@ impl StoreInner {
                     lease_token,
                     cancelled_at_ms,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobCancel references missing job {job_id}"),
-                            frame_offset,
+                    let (queue, partition, is_terminal) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                            Self::corruption(
+                                format!("JobCancel references missing job {job_id}"),
+                                frame_offset,
+                            )
+                        })?;
+                        job.cancel(*cancelled_at_ms, *lease_token).map_err(|e| {
+                            Self::corruption(
+                                format!("invalid JobCancel in frame: {e}"),
+                                frame_offset,
+                            )
+                        })?;
+                        (
+                            job.spec.queue.clone(),
+                            job.spec.partition.clone(),
+                            job.is_terminal(),
                         )
-                    })?;
-                    job.cancel(*cancelled_at_ms, *lease_token).map_err(|e| {
-                        Self::corruption(format!("invalid JobCancel in frame: {e}"), frame_offset)
-                    })?;
+                    };
+                    self.update_queue_cursor(&queue, &partition);
+                    if is_terminal {
+                        self.advance_partition_head(&queue, &partition);
+                    }
                 }
                 Record::JobResolve {
                     job_id,
                     resolution,
                     resolved_at_ms,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobResolve references missing job {job_id}"),
-                            frame_offset,
+                    let (queue, partition, is_terminal) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
+                            Self::corruption(
+                                format!("JobResolve references missing job {job_id}"),
+                                frame_offset,
+                            )
+                        })?;
+                        let resolution = Self::resolution_from_record(*resolution);
+                        job.resolve(*resolved_at_ms, resolution).map_err(|e| {
+                            Self::corruption(
+                                format!("invalid JobResolve in frame: {e}"),
+                                frame_offset,
+                            )
+                        })?;
+                        (
+                            job.spec.queue.clone(),
+                            job.spec.partition.clone(),
+                            job.is_terminal(),
                         )
-                    })?;
-                    let resolution = Self::resolution_from_record(*resolution);
-                    job.resolve(*resolved_at_ms, resolution).map_err(|e| {
-                        Self::corruption(format!("invalid JobResolve in frame: {e}"), frame_offset)
-                    })?;
+                    };
+                    self.update_queue_cursor(&queue, &partition);
+                    if is_terminal {
+                        self.advance_partition_head(&queue, &partition);
+                    }
                 }
                 Record::JobExpire {
                     job_id,
@@ -993,19 +1064,30 @@ impl StoreInner {
                     attempt,
                     expired_at_ms,
                 } => {
-                    let job = self.jobs.get_mut(job_id).ok_or_else(|| {
-                        Self::corruption(
-                            format!("JobExpire references missing job {job_id}"),
-                            frame_offset,
-                        )
-                    })?;
-                    job.expire(*expired_at_ms, *lease_token, *attempt)
-                        .map_err(|e| {
+                    let (queue, partition, is_terminal) = {
+                        let job = self.jobs.get_mut(job_id).ok_or_else(|| {
                             Self::corruption(
-                                format!("invalid JobExpire in frame: {e}"),
+                                format!("JobExpire references missing job {job_id}"),
                                 frame_offset,
                             )
                         })?;
+                        job.expire(*expired_at_ms, *lease_token, *attempt)
+                            .map_err(|e| {
+                                Self::corruption(
+                                    format!("invalid JobExpire in frame: {e}"),
+                                    frame_offset,
+                                )
+                            })?;
+                        (
+                            job.spec.queue.clone(),
+                            job.spec.partition.clone(),
+                            job.is_terminal(),
+                        )
+                    };
+                    self.update_queue_cursor(&queue, &partition);
+                    if is_terminal {
+                        self.advance_partition_head(&queue, &partition);
+                    }
                 }
                 Record::TransactionMeta { .. } => {
                     // Transaction metadata is a framing record; it does not affect state.
@@ -1776,35 +1858,48 @@ impl StoreInner {
             });
         }
 
-        let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+        let mut ops: VecDeque<Op> = VecDeque::new();
         let mut batch_record_bytes = 0usize;
         let mut claimed: Vec<ClaimedJob> = Vec::new();
 
-        let mut partitions: Vec<(String, String)> = self
+        let mut partition_keys: Vec<(String, String)> = self
             .queue_partitions
             .keys()
             .filter(|(q, _)| q == &request.queue)
             .cloned()
             .collect();
-        partitions.sort_by(|a, b| a.1.cmp(&b.1));
+        if partition_keys.is_empty() {
+            return Ok(ClaimOutcome::Noop);
+        }
+        partition_keys.sort_by(|a, b| a.1.cmp(&b.1));
 
-        for (queue, partition) in partitions {
+        let start = self
+            .queue_cursors
+            .get(&request.queue)
+            .and_then(|cursor| partition_keys.iter().position(|(_, p)| p == cursor))
+            .map(|i| (i + 1) % partition_keys.len())
+            .unwrap_or(0);
+
+        for offset in 0..partition_keys.len() {
             if claimed.len() >= request.limit {
                 break;
             }
-            let ids = self
-                .queue_partitions
-                .get(&(queue.clone(), partition.clone()))
-                .cloned()
-                .unwrap_or_default();
-            for job_id in ids {
-                let job = match self.jobs.get(&job_id) {
-                    Some(j) => j,
-                    None => continue,
-                };
-                if job.is_terminal() {
+            let key = &partition_keys[(start + offset) % partition_keys.len()];
+            let (queue, partition) = (key.0.clone(), key.1.clone());
+
+            let ids_len = self.queue_partitions.get(key).map(|v| v.len()).unwrap_or(0);
+            let head = *self.partition_heads.get(key).unwrap_or(&0);
+            let head = head.min(ids_len);
+
+            for i in head..ids_len {
+                let job_id = self.queue_partitions.get(key).unwrap()[i];
+
+                if self.jobs.get(&job_id).is_some_and(|job| job.is_terminal()) {
+                    self.advance_partition_head(&queue, &partition);
                     continue;
                 }
+
+                let job = self.jobs.get(&job_id).unwrap();
 
                 if job.is_expired_at_attempt_limit(request.now_ms) {
                     let token = job.lease_token.ok_or_else(|| Error::Corruption {
@@ -1819,14 +1914,19 @@ impl StoreInner {
                     }
                     .encode()
                     .len();
-                    if batch.ops.len() + 1 > max_records
+                    if ops.len() + 1 > max_records
                         || base_bytes + batch_record_bytes + size > max_frame
                     {
                         break;
                     }
-                    batch = batch.internal_expire_job(job_id, token, job.attempt, request.now_ms);
+                    ops.push_back(Op::InternalExpireJob {
+                        job_id,
+                        lease_token: token,
+                        attempt: job.attempt,
+                        expired_at_ms: request.now_ms,
+                    });
                     batch_record_bytes += size;
-                    continue;
+                    break;
                 }
 
                 if !job.is_ready_at(request.now_ms) {
@@ -1863,19 +1963,18 @@ impl StoreInner {
                         limit: max_frame,
                     });
                 }
-                if batch.ops.len() + 1 > max_records
-                    || base_bytes + batch_record_bytes + size > max_frame
+                if ops.len() + 1 > max_records || base_bytes + batch_record_bytes + size > max_frame
                 {
                     break;
                 }
 
-                batch = batch.lease_job(
+                ops.push_back(Op::LeaseJob {
                     job_id,
                     lease_token,
-                    request.worker_id.clone(),
+                    worker_id: request.worker_id.clone(),
                     attempt,
                     lease_expires_at_ms,
-                );
+                });
                 batch_record_bytes += size;
                 claimed.push(ClaimedJob {
                     job_id,
@@ -1892,14 +1991,14 @@ impl StoreInner {
             }
         }
 
-        if batch.ops.is_empty() {
-            return Ok(ClaimOutcome::Committed {
-                transaction_id: batch.transaction_id,
-                claims: Vec::new(),
-            });
+        if ops.is_empty() {
+            return Ok(ClaimOutcome::Noop);
         }
 
-        let transaction_id = batch.transaction_id;
+        let transaction_id = Id::new()?;
+        let mut batch = CommitBatch::new(transaction_id, request.now_ms);
+        batch.ops = ops;
+
         match self.commit(batch) {
             Ok(receipt) => Ok(ClaimOutcome::Committed {
                 transaction_id: receipt.transaction_id,
@@ -1911,6 +2010,30 @@ impl StoreInner {
             }),
             Err(e) => Err(e),
         }
+    }
+
+    fn advance_partition_head(&mut self, queue: &str, partition: &str) {
+        let key = (queue.to_string(), partition.to_string());
+        let Some(ids) = self.queue_partitions.get(&key) else {
+            return;
+        };
+        let head = *self.partition_heads.get(&key).unwrap_or(&0);
+        let mut new_head = head;
+        while new_head < ids.len() {
+            match self.jobs.get(&ids[new_head]) {
+                Some(job) if job.is_terminal() => new_head += 1,
+                Some(_) => break,
+                None => new_head += 1,
+            }
+        }
+        if new_head > head {
+            self.partition_heads.insert(key, new_head);
+        }
+    }
+
+    fn update_queue_cursor(&mut self, queue: &str, partition: &str) {
+        self.queue_cursors
+            .insert(queue.to_string(), partition.to_string());
     }
 }
 

@@ -154,8 +154,8 @@ fn job_lifecycle() {
     };
     let claimed = store.claim_jobs(request.clone()).unwrap();
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].job_id, job_id);
-    assert_eq!(claimed[0].attempt, 1);
+    assert_eq!(claimed.claims()[0].job_id, job_id);
+    assert_eq!(claimed.claims()[0].attempt, 1);
 
     // No double lease.
     request.now_ms += 1;
@@ -164,7 +164,7 @@ fn job_lifecycle() {
 
     // Acknowledge.
     store
-        .ack_job(job_id, claimed[0].lease_token, None, now_ms())
+        .ack_job(job_id, claimed.claims()[0].lease_token, None, now_ms())
         .unwrap();
     assert!(matches!(
         store.job_state(job_id, now_ms()).unwrap(),
@@ -426,7 +426,7 @@ fn synara_shaped_flows() {
     };
     let claimed = store.claim_jobs(claim).unwrap();
     assert_eq!(claimed.len(), 1);
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     let completed = Event::with_json_payload(
         Id::new().unwrap(),
@@ -542,7 +542,7 @@ fn synara_shaped_flows() {
     };
     let claimed_loop = store.claim_jobs(late).unwrap();
     assert_eq!(claimed_loop.len(), 1);
-    assert_eq!(claimed_loop[0].job_id, next_id);
+    assert_eq!(claimed_loop.claims()[0].job_id, next_id);
 
     // Flow F.
     let events = store.stream_events(&stream, 0, 100);
@@ -693,8 +693,8 @@ fn claim_jobs_respects_partition_ordering() {
         .unwrap();
 
     assert_eq!(claimed.len(), 2);
-    assert_eq!(claimed[0].partition, "p1");
-    assert_eq!(claimed[1].partition, "p2");
+    assert_eq!(claimed.claims()[0].partition, "p1");
+    assert_eq!(claimed.claims()[1].partition, "p2");
 }
 
 #[test]
@@ -752,8 +752,8 @@ fn claimed_job_includes_worker_id() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].job_id, job_id);
-    assert_eq!(claimed[0].worker_id, "worker-42");
+    assert_eq!(claimed.claims()[0].job_id, job_id);
+    assert_eq!(claimed.claims()[0].worker_id, "worker-42");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -1028,7 +1028,7 @@ fn fail_job_default_retry_overflow_is_rejected() {
             limit: 1,
         })
         .unwrap();
-    let lease_token = claimed[0].lease_token;
+    let lease_token = claimed.claims()[0].lease_token;
 
     let result = store.commit(
         CommitBatch::new(Id::new().unwrap(), i64::MAX - 500).fail_job(
@@ -1074,7 +1074,7 @@ fn fail_job_explicit_default_retry_is_idempotent_across_reopen() {
             limit: 1,
         })
         .unwrap();
-    let lease_token = claimed[0].lease_token;
+    let lease_token = claimed.claims()[0].lease_token;
 
     let tx = Id::new().unwrap();
     let batch = CommitBatch::new(tx, now).fail_job(job_id, lease_token, "boom", Some(now + 1000));

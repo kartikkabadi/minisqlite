@@ -96,7 +96,7 @@ fn max_attempts_caps_expired_idempotent_lease() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     store
         .commit(CommitBatch::new(Id::new().unwrap(), now + 1).fail_job(job_id, token, "boom", None))
@@ -143,7 +143,7 @@ fn terminal_job_fail_is_idempotent_across_reopen() {
             limit: 1,
         })
         .unwrap();
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     let fail_batch =
         CommitBatch::new(Id::new().unwrap(), now + 1).fail_job(job_id, token, "boom", None);
@@ -305,7 +305,7 @@ fn stale_worker_and_lease_metadata_cleared_after_terminal_fail() {
             })
             .unwrap();
         assert_eq!(claimed.len(), 1);
-        let token = claimed[0].lease_token;
+        let token = claimed.claims()[0].lease_token;
 
         store
             .commit(
@@ -397,7 +397,7 @@ fn uncertain_job_can_be_resolved_after_reopen() {
             limit: 1,
         })
         .unwrap();
-    let _token = claimed[0].lease_token;
+    let _token = claimed.claims()[0].lease_token;
 
     drop(store);
     let store = StoreBuilder::new(&path).open().unwrap();
@@ -433,9 +433,15 @@ fn final_attempt_expiry_without_fail_job_allows_later_partition_jobs() {
     store
         .commit(
             CommitBatch::new(Id::new().unwrap(), now)
-                .enqueue_job(JobSpec::new(first, "q", "p", b"first".to_vec()).with_max_attempts(1))
                 .enqueue_job(
-                    JobSpec::new(second, "q", "p", b"second".to_vec()).with_max_attempts(1),
+                    JobSpec::new(first, "q", "p", b"first".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
+                )
+                .enqueue_job(
+                    JobSpec::new(second, "q", "p", b"second".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
                 ),
         )
         .unwrap();
@@ -450,7 +456,7 @@ fn final_attempt_expiry_without_fail_job_allows_later_partition_jobs() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].job_id, first);
+    assert_eq!(claimed.claims()[0].job_id, first);
 
     let later = now + 100;
     let re_claimed = store
@@ -463,7 +469,7 @@ fn final_attempt_expiry_without_fail_job_allows_later_partition_jobs() {
         })
         .unwrap();
     assert_eq!(re_claimed.len(), 1);
-    assert_eq!(re_claimed[0].job_id, second);
+    assert_eq!(re_claimed.claims()[0].job_id, second);
     assert_eq!(
         store.job_state(first, later).unwrap(),
         minisqlite::JobState::Dead
@@ -548,7 +554,7 @@ fn uncertain_resolution_retry_at_attempt_ceiling_can_be_reclaimed_once() {
         })
         .unwrap();
     assert_eq!(reclaimed.len(), 1);
-    assert_eq!(reclaimed[0].job_id, job_id);
+    assert_eq!(reclaimed.claims()[0].job_id, job_id);
 
     let uncertain_again = retry_ready + 100;
     assert_eq!(
@@ -622,7 +628,7 @@ fn injected_entropy_failure_does_not_panic_or_poison_store() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    assert_eq!(claimed[0].job_id, job_id);
+    assert_eq!(claimed.claims()[0].job_id, job_id);
 }
 
 #[test]

@@ -134,15 +134,21 @@ pub struct ClaimedJob {
 
 /// Outcome of a `claim_jobs` call.
 ///
-/// Even when the commit is uncertain, the proposed `ClaimedJob` values are returned so the
-/// caller can recover the lease tokens after reopening and verifying the transaction.
+/// `Noop` is returned when the queue has no work so no transaction is created.
+/// `Committed` and `Uncertain` both carry the proposed `ClaimedJob` values so the caller
+/// can recover lease tokens after reopening and verifying the transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ClaimOutcome {
+    /// No ready jobs; no durable transaction was created.
+    Noop,
+    /// The claim was durably committed.
     Committed {
         transaction_id: Id,
         claims: Vec<ClaimedJob>,
     },
+    /// The durable commit outcome is uncertain (e.g. a sync failure). The proposed claims
+    /// are still returned so the caller can verify after reopening.
     Uncertain {
         transaction_id: Id,
         claims: Vec<ClaimedJob>,
@@ -150,16 +156,20 @@ pub enum ClaimOutcome {
 }
 
 impl ClaimOutcome {
-    pub fn transaction_id(&self) -> Id {
+    /// The transaction id, if a transaction was actually staged.
+    pub fn transaction_id(&self) -> Option<Id> {
         match self {
+            Self::Noop => None,
             Self::Committed { transaction_id, .. } | Self::Uncertain { transaction_id, .. } => {
-                *transaction_id
+                Some(*transaction_id)
             }
         }
     }
 
+    /// The proposed claims. Empty for `Noop`.
     pub fn claims(&self) -> &[ClaimedJob] {
         match self {
+            Self::Noop => &[],
             Self::Committed { claims, .. } | Self::Uncertain { claims, .. } => claims,
         }
     }
@@ -172,36 +182,16 @@ impl ClaimOutcome {
         matches!(self, Self::Uncertain { .. })
     }
 
-    pub fn into_claims(self) -> Vec<ClaimedJob> {
-        match self {
-            Self::Committed { claims, .. } | Self::Uncertain { claims, .. } => claims,
-        }
+    pub fn is_noop(&self) -> bool {
+        matches!(self, Self::Noop)
     }
-}
 
-impl std::ops::Deref for ClaimOutcome {
-    type Target = [ClaimedJob];
-
-    fn deref(&self) -> &Self::Target {
-        self.claims()
+    pub fn len(&self) -> usize {
+        self.claims().len()
     }
-}
 
-impl IntoIterator for ClaimOutcome {
-    type Item = ClaimedJob;
-    type IntoIter = std::vec::IntoIter<ClaimedJob>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.into_claims().into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a ClaimOutcome {
-    type Item = &'a ClaimedJob;
-    type IntoIter = std::slice::Iter<'a, ClaimedJob>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.claims().iter()
+    pub fn is_empty(&self) -> bool {
+        self.claims().is_empty()
     }
 }
 

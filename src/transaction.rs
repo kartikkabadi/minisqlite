@@ -247,43 +247,6 @@ impl CommitBatch {
         self
     }
 
-    /// Internal maintenance operation that marks an idempotent job dead after its final
-    /// lease expired. Used internally by `Store::claim_jobs`.
-    pub(crate) fn internal_expire_job(
-        mut self,
-        job_id: Id,
-        lease_token: Id,
-        attempt: u32,
-        expired_at_ms: i64,
-    ) -> Self {
-        self.ops.push_back(Op::InternalExpireJob {
-            job_id,
-            lease_token,
-            attempt,
-            expired_at_ms,
-        });
-        self
-    }
-
-    /// Lease a job to a worker. Used internally by `Store::claim_jobs`.
-    pub(crate) fn lease_job(
-        mut self,
-        job_id: Id,
-        lease_token: Id,
-        worker_id: impl Into<String>,
-        attempt: u32,
-        lease_expires_at_ms: i64,
-    ) -> Self {
-        self.ops.push_back(Op::LeaseJob {
-            job_id,
-            lease_token,
-            worker_id: worker_id.into(),
-            attempt,
-            lease_expires_at_ms,
-        });
-        self
-    }
-
     /// Reconstruct a `CommitBatch` from the durable records of a committed frame.
     /// Store-assigned sequences (global sequence, stream version) are stripped because they
     /// are not part of the application's logical commit.

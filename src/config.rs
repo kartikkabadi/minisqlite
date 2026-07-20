@@ -22,11 +22,13 @@ impl Durability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectMode {
-    /// The effect is idempotent. An expired lease may be claimed and retried.
-    #[default]
-    Idempotent,
     /// The effect is non-idempotent. An expired lease must be explicitly resolved.
+    /// This is the safe default.
+    #[default]
     UncertainOnLeaseExpiry,
+    /// The effect is idempotent. An expired lease may be claimed and retried.
+    /// The caller should still supply an `idempotency_key` for external effects.
+    Idempotent,
 }
 
 /// Size and shape limits for a store.

@@ -184,12 +184,14 @@ fn claim_jobs_limit_one_uses_strict_lexicographic_priority() {
             })
             .unwrap();
         assert_eq!(first.len(), 1);
-        assert_eq!(first[0].partition, "a");
-        assert_eq!(first[0].job_id, a1);
+        assert_eq!(first.claims()[0].partition, "a");
+        assert_eq!(first.claims()[0].job_id, a1);
 
         // Acknowledge a1 and add another a while b is still waiting.
         // With no active lease in a, a2 is still lexicographically preferred over b1.
-        store.ack_job(a1, first[0].lease_token, None, 1).unwrap();
+        store
+            .ack_job(a1, first.claims()[0].lease_token, None, 1)
+            .unwrap();
         store
             .commit(
                 CommitBatch::new(Id::new().unwrap(), 1).enqueue_job(JobSpec::new(
@@ -211,11 +213,13 @@ fn claim_jobs_limit_one_uses_strict_lexicographic_priority() {
             })
             .unwrap();
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].partition, "a");
-        assert_eq!(second[0].job_id, a2);
+        assert_eq!(second.claims()[0].partition, "a");
+        assert_eq!(second.claims()[0].job_id, a2);
 
         // Acknowledge a2. Now b1 is the only ready job.
-        store.ack_job(a2, second[0].lease_token, None, 2).unwrap();
+        store
+            .ack_job(a2, second.claims()[0].lease_token, None, 2)
+            .unwrap();
         let third = store
             .claim_jobs(ClaimRequest {
                 queue: "q".into(),
@@ -226,10 +230,12 @@ fn claim_jobs_limit_one_uses_strict_lexicographic_priority() {
             })
             .unwrap();
         assert_eq!(third.len(), 1);
-        assert_eq!(third[0].partition, "b");
-        assert_eq!(third[0].job_id, b1);
+        assert_eq!(third.claims()[0].partition, "b");
+        assert_eq!(third.claims()[0].job_id, b1);
 
-        store.ack_job(b1, third[0].lease_token, None, 3).unwrap();
+        store
+            .ack_job(b1, third.claims()[0].lease_token, None, 3)
+            .unwrap();
     }
 
     let store = StoreBuilder::new(&path).open().unwrap();
@@ -272,7 +278,7 @@ fn duplicate_enqueue_preserves_lease_token_for_ack_and_fail() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     // Re-assert the same job spec and immediately acknowledge. The duplicate enqueue
     // must be a no-op for state-machine simulation, so the existing lease token remains valid.
@@ -307,7 +313,7 @@ fn duplicate_enqueue_preserves_lease_token_for_ack_and_fail() {
         })
         .unwrap();
     assert_eq!(claimed2.len(), 1);
-    let token2 = claimed2[0].lease_token;
+    let token2 = claimed2.claims()[0].lease_token;
 
     store
         .commit(

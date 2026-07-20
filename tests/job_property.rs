@@ -94,6 +94,7 @@ fn claimed_jobs_can_be_acknowledged() {
                     limit: 100,
                 })
                 .unwrap()
+                .claims()
             {
                 claimed.insert(job.job_id, (job.lease_token, job.attempt));
             }

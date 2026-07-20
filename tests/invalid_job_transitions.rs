@@ -62,7 +62,7 @@ fn ack_after_lease_expiry_fails() {
             limit: 1,
         })
         .unwrap();
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     let result = store.ack_job(job_id, token, None, 2000);
     assert!(result.is_err(), "ack after lease expiry must fail");
@@ -115,7 +115,7 @@ fn cancel_terminal_job_fails() {
             limit: 1,
         })
         .unwrap();
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     store.fail_job(job_id, token, "boom", None, 0).unwrap();
     let result = store.cancel_job(job_id, None, 0);
@@ -223,7 +223,7 @@ fn stale_token_cannot_fail_newer_lease() {
             limit: 1,
         })
         .unwrap();
-    let old_token = first[0].lease_token;
+    let old_token = first.claims()[0].lease_token;
 
     let second = store
         .claim_jobs(ClaimRequest {
@@ -234,8 +234,8 @@ fn stale_token_cannot_fail_newer_lease() {
             limit: 1,
         })
         .unwrap();
-    assert_eq!(second[0].job_id, job_id);
-    assert_ne!(second[0].lease_token, old_token);
+    assert_eq!(second.claims()[0].job_id, job_id);
+    assert_ne!(second.claims()[0].lease_token, old_token);
 
     let result = store.fail_job(job_id, old_token, "boom", None, 200);
     assert!(result.is_err(), "stale token must not fail the newer lease");

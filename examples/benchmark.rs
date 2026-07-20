@@ -137,7 +137,7 @@ fn main() {
         if batch.is_empty() {
             break;
         }
-        for c in batch {
+        for c in batch.claims() {
             store.ack_job(c.job_id, c.lease_token, None, now).unwrap();
             claimed += 1;
         }

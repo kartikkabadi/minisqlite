@@ -119,7 +119,7 @@ fn main() {
     };
     let claimed = store.claim_jobs(claim.clone()).unwrap();
     assert_eq!(claimed.len(), 1);
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
     println!("Flow C: claimed job {job_id} with token {token}");
 
     let completed = Event::new(
@@ -180,17 +180,20 @@ fn main() {
     };
     let idem_first = store.claim_jobs(idem_claim.clone()).unwrap();
     assert_eq!(idem_first.len(), 1);
-    assert_eq!(idem_first[0].job_id, idempotent_id);
+    assert_eq!(idem_first.claims()[0].job_id, idempotent_id);
 
     idem_claim.now_ms += 200;
     let idem_second = store.claim_jobs(idem_claim).unwrap();
     assert_eq!(idem_second.len(), 1);
-    assert_eq!(idem_second[0].job_id, idempotent_id);
-    assert_ne!(idem_second[0].lease_token, idem_first[0].lease_token);
+    assert_eq!(idem_second.claims()[0].job_id, idempotent_id);
+    assert_ne!(
+        idem_second.claims()[0].lease_token,
+        idem_first.claims()[0].lease_token
+    );
     store
         .ack_job(
             idempotent_id,
-            idem_second[0].lease_token,
+            idem_second.claims()[0].lease_token,
             None,
             now_ms() + 200,
         )
@@ -220,7 +223,7 @@ fn main() {
     };
     let claimed2 = store.claim_jobs(claim2.clone()).unwrap();
     assert_eq!(claimed2.len(), 1);
-    assert_eq!(claimed2[0].job_id, uncertain_id);
+    assert_eq!(claimed2.claims()[0].job_id, uncertain_id);
 
     // Simulate time passing after lease expiry.
     claim2.now_ms += 2000;
@@ -307,7 +310,7 @@ fn main() {
     };
     let claimed_loop = store.claim_jobs(late_claim).unwrap();
     assert_eq!(claimed_loop.len(), 1);
-    assert_eq!(claimed_loop[0].job_id, next_id);
+    assert_eq!(claimed_loop.claims()[0].job_id, next_id);
     println!("Flow E: durable loop scheduling recovered after restart");
 
     // Flow F: Rebuild a projection from event history and atomically replace it.

@@ -301,7 +301,7 @@ fn claim_jobs_exact_lease_fits_minimum_160_byte_frame() {
         1,
         "single ready job should fit in 160-byte frame"
     );
-    let claimed_job = claimed.into_iter().next().unwrap();
+    let claimed_job = claimed.claims().first().unwrap();
     assert_eq!(claimed_job.partition, "p");
 
     // Close the store before re-reading the file; on Windows the advisory lock
@@ -350,15 +350,31 @@ fn claim_jobs_budgets_per_partition_and_makes_progress() {
     store
         .commit(
             CommitBatch::new(Id::new().unwrap(), 0)
-                .enqueue_job(JobSpec::new(a1, "q", "a", b"a1".to_vec()).with_max_attempts(1))
-                .enqueue_job(JobSpec::new(b1, "q", "b", b"b1".to_vec()).with_max_attempts(1)),
+                .enqueue_job(
+                    JobSpec::new(a1, "q", "a", b"a1".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
+                )
+                .enqueue_job(
+                    JobSpec::new(b1, "q", "b", b"b1".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
+                ),
         )
         .unwrap();
     store
         .commit(
             CommitBatch::new(Id::new().unwrap(), 0)
-                .enqueue_job(JobSpec::new(a2, "q", "a", b"a2".to_vec()).with_max_attempts(1))
-                .enqueue_job(JobSpec::new(b2, "q", "b", b"b2".to_vec()).with_max_attempts(1)),
+                .enqueue_job(
+                    JobSpec::new(a2, "q", "a", b"a2".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
+                )
+                .enqueue_job(
+                    JobSpec::new(b2, "q", "b", b"b2".to_vec())
+                        .with_max_attempts(1)
+                        .with_effect_mode(EffectMode::Idempotent),
+                ),
         )
         .unwrap();
 
@@ -387,8 +403,8 @@ fn claim_jobs_budgets_per_partition_and_makes_progress() {
         })
         .unwrap();
     assert_eq!(second.len(), 1, "should claim a2 and stop at max_records");
-    assert_eq!(second[0].partition, "a");
-    assert_eq!(second[0].job_id, a2);
+    assert_eq!(second.claims()[0].partition, "a");
+    assert_eq!(second.claims()[0].job_id, a2);
 
     // Third claim at now_ms=2 while A2's lease (expires at 3) is still active:
     // partition "a" is blocked, so the budget is free to expire b1 and claim b2.
@@ -406,8 +422,8 @@ fn claim_jobs_budgets_per_partition_and_makes_progress() {
         1,
         "should claim b2 while a-partition is blocked by active a2"
     );
-    assert_eq!(third[0].partition, "b");
-    assert_eq!(third[0].job_id, b2);
+    assert_eq!(third.claims()[0].partition, "b");
+    assert_eq!(third.claims()[0].job_id, b2);
 }
 
 #[test]
@@ -547,7 +563,7 @@ fn job_expire_rejects_non_idempotent_effect_mode_during_replay() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    let claimed = &claimed[0];
+    let claimed = &claimed.claims()[0];
 
     drop(store);
 

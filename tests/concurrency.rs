@@ -171,7 +171,7 @@ fn concurrent_job_claims_do_not_duplicate_lease() {
     let mut tokens = Vec::new();
     for h in handles {
         let claimed = h.join().unwrap().unwrap();
-        for c in claimed {
+        for c in claimed.claims() {
             tokens.push(c.lease_token);
         }
     }
@@ -212,6 +212,10 @@ fn partition_ordering_is_stable_under_concurrent_claims() {
         .unwrap();
 
     assert_eq!(claimed.len(), 3);
-    let partitions: Vec<_> = claimed.into_iter().map(|c| c.partition).collect();
+    let partitions: Vec<_> = claimed
+        .claims()
+        .iter()
+        .map(|c| c.partition.clone())
+        .collect();
     assert_eq!(partitions, vec!["a", "b", "c"]);
 }

@@ -433,12 +433,12 @@ fn execute_op(
                     limit,
                 })
                 .unwrap();
-            let claimed_ids: Vec<Id> = claimed.iter().map(|c| c.job_id).collect();
+            let claimed_ids: Vec<Id> = claimed.claims().iter().map(|c| c.job_id).collect();
             assert_eq!(
                 claimed_ids, expected,
                 "claim_jobs did not match the reference model"
             );
-            for c in claimed {
+            for c in claimed.claims() {
                 let job = model.jobs.get_mut(&c.job_id).unwrap();
                 job.internal_state = InternalState::Leased;
                 job.lease_token = Some(c.lease_token);

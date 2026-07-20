@@ -32,10 +32,18 @@ fn expired_maintenance_makes_progress_with_tiny_transaction_limit() {
 
     // Enqueue three idempotent jobs that expire at the attempt ceiling, plus a
     // fresh idempotent job with more attempts.
-    let job1 = JobSpec::new(Id::new().unwrap(), "q", "p1", b"a".to_vec()).with_max_attempts(1);
-    let job2 = JobSpec::new(Id::new().unwrap(), "q", "p2", b"b".to_vec()).with_max_attempts(1);
-    let job3 = JobSpec::new(Id::new().unwrap(), "q", "p3", b"c".to_vec()).with_max_attempts(1);
-    let fresh = JobSpec::new(Id::new().unwrap(), "q", "p4", b"d".to_vec()).with_max_attempts(3);
+    let job1 = JobSpec::new(Id::new().unwrap(), "q", "p1", b"a".to_vec())
+        .with_max_attempts(1)
+        .with_effect_mode(EffectMode::Idempotent);
+    let job2 = JobSpec::new(Id::new().unwrap(), "q", "p2", b"b".to_vec())
+        .with_max_attempts(1)
+        .with_effect_mode(EffectMode::Idempotent);
+    let job3 = JobSpec::new(Id::new().unwrap(), "q", "p3", b"c".to_vec())
+        .with_max_attempts(1)
+        .with_effect_mode(EffectMode::Idempotent);
+    let fresh = JobSpec::new(Id::new().unwrap(), "q", "p4", b"d".to_vec())
+        .with_max_attempts(3)
+        .with_effect_mode(EffectMode::Idempotent);
 
     store
         .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job1))
@@ -83,7 +91,7 @@ fn expired_maintenance_makes_progress_with_tiny_transaction_limit() {
                 limit: 1,
             })
             .unwrap();
-        seen.extend(c.into_iter().map(|j| j.job_id));
+        seen.extend(c.claims().iter().map(|j| j.job_id));
     }
     assert_eq!(
         seen.len(),
@@ -236,7 +244,7 @@ fn expired_uncertain_job_cannot_be_failed() {
         })
         .unwrap();
     assert_eq!(claimed.len(), 1);
-    let token = claimed[0].lease_token;
+    let token = claimed.claims()[0].lease_token;
 
     // Expire the lease and attempt to fail the job at the attempt ceiling.
     let fail_result = store.fail_job(job_id, token, "boom", None, start + 10);

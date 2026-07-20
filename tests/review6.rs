@@ -123,7 +123,7 @@ fn claim_jobs_budgets_records_and_frame_size() {
                 limit: 1,
             })
             .unwrap();
-        seen.extend(c.into_iter().map(|j| j.job_id));
+        seen.extend(c.claims().iter().map(|j| j.job_id));
     }
     assert_eq!(
         seen.len(),
