@@ -165,11 +165,11 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 
 ## Final review-fix pass
 
-Per PR comment ID 4732347323, the branch was audited against the seven merge-blocking findings, with focused regression tests added for each and `docs/FINAL_REPORT.md` corrected to match what the tests prove.
+Per PR comment IDs 4732347323 and 4732434245, the branch was audited against the merge-blocking findings, with focused regression tests added for each and `docs/FINAL_REPORT.md` corrected to match what the tests prove.
 
 * Branch: `feat/control-plane-state-engine` (head SHA is the latest commit on this branch)
 * Merge conflict with `main`: none
-* Full verification suite (run on the box at `2026-07-20 05:34 UTC`):
+* Full verification suite (run on the box at `2026-07-20 06:05 UTC`):
   * `cargo fmt --all -- --check` — passed
   * `cargo clippy --all-targets --all-features -- -D warnings` — passed
   * `cargo test --all-targets --all-features` — passed
@@ -181,17 +181,24 @@ Per PR comment ID 4732347323, the branch was audited against the seven merge-blo
 * Correctness fixes from this pass:
   * `FrameHeader::decode` fails closed on unsupported frame format versions.
   * `Record::decode` enforces record format version, flags, and fully consumed body.
-  * `Store::backup` rejects the primary path / filesystem aliases, removes stale temp files, opens the temp copy with `Durability::Strict`, and fsyncs before `rename`.
+  * `Store::backup` rejects the primary path / filesystem aliases / symlinks, uses a collision-resistant sibling temp file created with `create_new`, fsyncs the temp copy with `Durability::Strict`, and fsyncs the destination parent directory after the atomic `rename`.
   * `ProjectionDelete` on a missing projection now materializes an empty projection at the supplied version.
   * `CommitBatch` rejects exact duplicate event IDs within a single batch.
   * `Store::claim_jobs` rejects non-positive `lease_ms` and uses `checked_add` for `lease_expires_at_ms` and `attempt`.
+  * `storage::recovery::scan` only treats a tail as truncated when `file_len - offset < FRAME_HEADER_SIZE`; once enough bytes are reported by metadata, read errors are propagated as I/O errors instead of recovery.
+  * `DataFile::read_at` supports an injected `header-read-error` failpoint for testing read-failure paths.
+  * `JobStateRecord::fail` uses `checked_add` for the default `retry_after_ms = now_ms + 1000` and returns a validation error on overflow.
+  * `CommitBatch::fail_job` no longer pre-normalizes `retry_after_ms`; normalization is performed in the fallible `ops_to_records` / `op_from_record` paths, and `CommitBatch::logical_eq` treats `None` and `Some(now_ms + 1000)` as logically equal.
 * Test evidence from this pass:
   * `tests/crash.rs` splits the failpoint matrix by expected recovered state and asserts the child process aborts for abort failpoints.
-  * `tests/integration.rs` adds `backup_rejects_primary_path_and_preserves_store` and `duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen`.
+  * `tests/crash.rs` adds `header_read_error_does_not_truncate_store`, proving a transient frame-header read error does not truncate valid committed data.
+  * `tests/integration.rs` adds `backup_rejects_primary_path_and_preserves_store`, `backup_temp_path_cannot_collide_with_primary_file`, and `backup_does_not_remove_preexisting_temp_file`.
+  * `tests/integration.rs` adds `fail_job_default_retry_overflow_is_rejected` and `fail_job_explicit_default_retry_is_idempotent_across_reopen`.
+  * `tests/integration.rs` adds `duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen`.
   * `tests/projection_ops.rs` adds `delete_on_missing_projection_materializes_empty_projection`.
   * `tests/invalid_job_transitions.rs` adds `claim_jobs_rejects_non_positive_lease` and `claim_jobs_rejects_lease_arithmetic_overflow`.
 * `Cargo.lock` contains no `libc` or `zerocopy`.
 
 ## Verdict
 
-**Fixes applied — do not merge yet.** All seven P1/P2 findings are addressed, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All P1/P2 findings are addressed, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
