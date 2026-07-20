@@ -232,3 +232,58 @@ fn stale_token_cannot_fail_newer_lease() {
     let result = store.fail_job(job_id, old_token, "boom", None, 200);
     assert!(result.is_err(), "stale token must not fail the newer lease");
 }
+
+#[test]
+fn claim_jobs_rejects_non_positive_lease() {
+    let (_tmp, store) = store();
+    let job_id = Id::new();
+    store
+        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
+            job_id,
+            "q",
+            "p",
+            b"work".to_vec(),
+        )))
+        .unwrap();
+
+    let result = store.claim_jobs(ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms: 0,
+        lease_ms: 0,
+        limit: 1,
+    });
+    assert!(result.is_err(), "zero lease_ms must be rejected");
+
+    let result = store.claim_jobs(ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms: 0,
+        lease_ms: -1,
+        limit: 1,
+    });
+    assert!(result.is_err(), "negative lease_ms must be rejected");
+}
+
+#[test]
+fn claim_jobs_rejects_lease_arithmetic_overflow() {
+    let (_tmp, store) = store();
+    let job_id = Id::new();
+    store
+        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
+            job_id,
+            "q",
+            "p",
+            b"work".to_vec(),
+        )))
+        .unwrap();
+
+    let result = store.claim_jobs(ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms: i64::MAX,
+        lease_ms: i64::MAX,
+        limit: 1,
+    });
+    assert!(result.is_err(), "lease expiry overflow must be rejected");
+}

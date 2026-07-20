@@ -225,3 +225,26 @@ fn projection_not_found_error() {
     let result = store.get_projection("missing", b"k");
     assert!(matches!(result, Err(Error::ProjectionNotFound(_))));
 }
+
+#[test]
+fn delete_on_missing_projection_materializes_empty_projection() {
+    let (_tmp, store) = store();
+    // Deleting from a projection that does not yet exist should create it at version 1
+    // so a later mutation at version 2 does not conflict.
+    store
+        .commit(CommitBatch::new(Id::new(), 0).projection_delete("kv", 1, b"k".to_vec()))
+        .unwrap();
+
+    assert_eq!(store.projection_version("kv").unwrap(), 1);
+    assert!(store.get_projection("kv", b"k").unwrap().is_none());
+
+    store
+        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+            "kv",
+            2,
+            b"k".to_vec(),
+            b"v".to_vec(),
+        ))
+        .unwrap();
+    assert_eq!(store.get_projection("kv", b"k").unwrap().unwrap(), b"v");
+}

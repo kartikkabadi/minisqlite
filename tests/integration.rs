@@ -760,3 +760,99 @@ fn transaction_correlation_id_and_metadata_roundtrip() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn backup_rejects_primary_path_and_preserves_store() {
+    let path = tmp_path("backup_self.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
+                Id::new(),
+                "s",
+                "e",
+                1,
+                now_ms(),
+                None,
+                None,
+                b"",
+                b"",
+            )),
+        )
+        .unwrap();
+
+    let result = store.backup(&path);
+    assert!(result.is_err(), "backup to the primary path must fail");
+
+    // The live store must still be usable and unchanged.
+    assert_eq!(store.high_water_sequence(), 1);
+    store
+        .commit(
+            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
+                Id::new(),
+                "s",
+                "e2",
+                1,
+                now_ms(),
+                None,
+                None,
+                b"",
+                b"",
+            )),
+        )
+        .unwrap();
+    assert_eq!(store.high_water_sequence(), 2);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen() {
+    let path = tmp_path("dup_event.mini");
+    let _ = std::fs::remove_file(&path);
+
+    let event_id = Id::new();
+    let event = Event::new(event_id, "s", "e", 1, now_ms(), None, None, b"first", b"");
+    let batch = CommitBatch::new(Id::new(), now_ms())
+        .append_event(event.clone())
+        .append_event(Event::new(
+            event_id,
+            "s",
+            "e2",
+            1,
+            now_ms(),
+            None,
+            None,
+            b"second",
+            b"",
+        ));
+
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    let result = store.commit(batch.clone());
+    assert!(result.is_err(), "duplicate event id in one batch must fail");
+
+    // A single-event batch should still commit and remain idempotent after reopen.
+    let single = CommitBatch::new(Id::new(), now_ms()).append_event(event.clone());
+    let receipt1 = store.commit(single.clone()).unwrap();
+    let receipt2 = store.commit(single.clone()).unwrap();
+    assert_eq!(receipt1, receipt2);
+
+    drop(store);
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    let receipt3 = store.commit(single).unwrap();
+    assert_eq!(receipt1, receipt3);
+    assert_eq!(store.high_water_sequence(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
