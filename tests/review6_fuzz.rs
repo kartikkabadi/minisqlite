@@ -35,7 +35,7 @@ fn write_frame(
         .unwrap();
     file.write_all(&FileHeader::new(0).encode()).unwrap();
 
-    let payload = encode_records(records);
+    let payload = encode_records(records).unwrap();
     let header = FrameHeader {
         version: FRAME_FORMAT_VERSION,
         total_frame_length: 0,

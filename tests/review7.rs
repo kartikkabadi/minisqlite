@@ -17,7 +17,7 @@ fn tmp_dir() -> common::TempDir {
 }
 
 fn append_frame(path: &std::path::Path, header: FrameHeader, records: &[Record]) {
-    let payload = encode_records(records);
+    let payload = encode_records(records).unwrap();
     let mut header = header;
     header.payload_length = payload.len() as u32;
     header.record_count = records.len() as u32;

@@ -121,7 +121,8 @@ fn record_decode_never_panics() {
                     payload: e.payload,
                     metadata: e.metadata,
                 },
-            )]);
+            )])
+            .unwrap();
         let mutated = mutate_bytes(seed + 20_000, &base);
         let _ = decode_records(&mutated, 1);
     }

@@ -167,7 +167,7 @@ mod tests {
     }
 
     fn make_frame(sequence: u64, transaction_id: Id) -> Frame {
-        let payload = encode_records(&[event_record(sequence, 1)]);
+        let payload = encode_records(&[event_record(sequence, 1)]).unwrap();
         let header = FrameHeader {
             version: 1,
             total_frame_length: 0,
@@ -338,7 +338,7 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         let e = event_record(1, 1);
-        let payload = encode_records(std::slice::from_ref(&e));
+        let payload = encode_records(std::slice::from_ref(&e)).unwrap();
         let header = FrameHeader {
             version: 1,
             total_frame_length: 0,
@@ -353,7 +353,7 @@ mod tests {
             .unwrap();
 
         // Second frame reuses the same event ID.
-        let payload2 = encode_records(&[e]);
+        let payload2 = encode_records(&[e]).unwrap();
         let header2 = FrameHeader {
             version: 1,
             total_frame_length: 0,
@@ -387,7 +387,7 @@ mod tests {
         std::io::Write::write_all(&mut file, &header.encode()).unwrap();
 
         // Append a frame whose header declares a size above the hard limit.
-        let payload = encode_records(&[event_record(1, 1)]);
+        let payload = encode_records(&[event_record(1, 1)]).unwrap();
         let header = FrameHeader {
             version: 1,
             total_frame_length: (MAX_FRAME_SIZE + 1) as u64,

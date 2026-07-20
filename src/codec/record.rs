@@ -35,6 +35,20 @@ pub const MAX_RECORDS_PER_FRAME: u32 = 1 << 20; // 1,048,576
 /// `Limits::max_replace_entries`.
 pub const MAX_REPLACE_ENTRIES_PER_RECORD: u32 = 1_000_000;
 
+/// Hard ceiling on the measured in-memory cost of a single decoded record.
+/// A record can never legitimately cost more than a whole frame of payload
+/// plus bounded per-entry metadata.
+pub const MAX_RECORD_MEMORY: usize = 96 << 20; // 96 MiB
+
+/// Hard ceiling on the accumulated in-memory cost of all decoded records in
+/// one transaction frame. Bounds recovery/replay memory independently of the
+/// on-disk frame size. Sized so a maximal legitimate frame (up to
+/// [`MAX_RECORDS_PER_FRAME`] records over a 64 MiB payload, roughly 192 MiB of
+/// in-memory cost) always fits, while metadata-amplification attacks such as
+/// many maximal `ProjectionReplace` records (~384 MiB of tuple metadata from a
+/// 64 MiB payload) are rejected.
+pub const MAX_TRANSACTION_MEMORY: usize = 256 << 20; // 256 MiB
+
 /// Smallest possible encoded record size (an empty `TransactionMeta` record).
 /// Used to bound `expected_count` by payload geometry before allocating memory.
 const MIN_ENCODED_RECORD_SIZE: usize = 12;
@@ -345,6 +359,53 @@ impl Record {
         }
     }
 
+    /// Measured in-memory (heap) cost of this decoded record, including
+    /// per-entry container metadata.
+    pub fn in_memory_cost(&self) -> usize {
+        let heap = match self {
+            Record::Event(e) => {
+                e.stream_id.len() + e.event_type.len() + e.payload.len() + e.metadata.len()
+            }
+            Record::ProjectionPut {
+                projection,
+                key,
+                value,
+                ..
+            } => projection.len() + key.len() + value.len(),
+            Record::ProjectionDelete {
+                projection, key, ..
+            } => projection.len() + key.len(),
+            Record::ProjectionClear { projection, .. } => projection.len(),
+            Record::ProjectionReplace {
+                projection,
+                entries,
+                ..
+            } => {
+                let entry_meta = entries.len() * std::mem::size_of::<(Vec<u8>, Vec<u8>)>();
+                let entry_bytes: usize = entries.iter().map(|(k, v)| k.len() + v.len()).sum();
+                projection.len() + entry_meta + entry_bytes
+            }
+            Record::JobEnqueue {
+                queue,
+                partition,
+                payload,
+                idempotency_key,
+                ..
+            } => {
+                queue.len()
+                    + partition.len()
+                    + payload.len()
+                    + idempotency_key.as_ref().map_or(0, |k| k.len())
+            }
+            Record::JobLease { worker_id, .. } => worker_id.len(),
+            Record::JobAck { result_digest, .. } => result_digest.as_ref().map_or(0, |d| d.len()),
+            Record::JobFail { error_summary, .. } => error_summary.len(),
+            Record::JobCancel { .. } | Record::JobResolve { .. } | Record::JobExpire { .. } => 0,
+            Record::TransactionMeta { metadata, .. } => metadata.len(),
+        };
+        std::mem::size_of::<Record>() + heap
+    }
+
     pub fn decode(reader: &mut Reader<'_>) -> Result<Option<Self>, Error> {
         if reader.is_empty() {
             return Ok(None);
@@ -581,12 +642,21 @@ impl EffectMode {
 }
 
 /// Encode a sequence of records into a single payload buffer.
-pub fn encode_records(records: &[Record]) -> Vec<u8> {
-    let mut out = Writer::new();
+///
+/// Fails with [`Error::Validation`] instead of aborting when the payload
+/// buffer cannot be grown.
+pub fn encode_records(records: &[Record]) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
     for record in records {
-        out.bytes.extend_from_slice(&record.encode());
+        let encoded = record.encode();
+        if let Err(e) = out.try_reserve(encoded.len()) {
+            return Err(Error::Validation(format!(
+                "cannot allocate encoded records buffer: {e}"
+            )));
+        }
+        out.extend_from_slice(&encoded);
     }
-    out.bytes
+    Ok(out)
 }
 
 /// Decode a payload buffer into a sequence of records.
@@ -615,11 +685,35 @@ pub fn decode_records(bytes: &[u8], expected_count: u32) -> Result<Vec<Record>, 
         });
     }
     let mut reader = Reader::new(bytes);
-    let mut records = Vec::with_capacity(expected_count as usize);
+    let mut records = Vec::new();
+    if let Err(e) = records.try_reserve_exact(expected_count as usize) {
+        return Err(Error::Validation(format!(
+            "cannot allocate record vector for {expected_count} records: {e}"
+        )));
+    }
+    let mut total_memory = 0usize;
     while let Some(record) = Record::decode(&mut reader)? {
         if records.len() >= expected_count as usize {
             return Err(Error::Corruption {
                 message: "decoded more records than frame header declared".into(),
+                offset: 0,
+            });
+        }
+        let cost = record.in_memory_cost();
+        if cost > MAX_RECORD_MEMORY {
+            return Err(Error::Corruption {
+                message: format!(
+                    "record in-memory cost {cost} exceeds per-record ceiling {MAX_RECORD_MEMORY}"
+                ),
+                offset: 0,
+            });
+        }
+        total_memory = total_memory.saturating_add(cost);
+        if total_memory > MAX_TRANSACTION_MEMORY {
+            return Err(Error::Corruption {
+                message: format!(
+                    "transaction in-memory cost {total_memory} exceeds ceiling {MAX_TRANSACTION_MEMORY}"
+                ),
                 offset: 0,
             });
         }
@@ -685,7 +779,7 @@ mod tests {
             },
         ];
 
-        let payload = encode_records(&records);
+        let payload = encode_records(&records).unwrap();
         let decoded = decode_records(&payload, records.len() as u32).unwrap();
         assert_eq!(records, decoded);
     }

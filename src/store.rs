@@ -1151,7 +1151,7 @@ impl StoreInner {
                 MAX_RECORDS_PER_FRAME
             )));
         }
-        let payload_bytes = encode_records(&records);
+        let payload_bytes = encode_records(&records)?;
 
         if payload_bytes.len()
             > self
@@ -2214,7 +2214,8 @@ mod tests {
         let payload = encode_records(&[Record::TransactionMeta {
             correlation_id: None,
             metadata: Vec::new(),
-        }]);
+        }])
+        .unwrap();
         let header = FrameHeader {
             version: crate::codec::frame::FRAME_FORMAT_VERSION,
             total_frame_length: 0,
