@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::codec::encode_records;
 use crate::codec::frame::{Frame, FrameHeader, FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE};
-use crate::codec::record::{self, Record, Resolution as RecordResolution};
+use crate::codec::record::{self, Record, Resolution as RecordResolution, MAX_RECORDS_PER_FRAME};
 use crate::config::{Durability, Limits};
 use crate::error::Error;
 use crate::event::{Event, PersistedEvent, StreamVersion};
@@ -17,7 +17,7 @@ use crate::jobs::{
     ClaimRequest, ClaimedJob, JobInfo, JobSpec, JobState, JobStateRecord, Resolution,
 };
 use crate::projection::{ProjectionEntry, ProjectionState};
-use crate::storage::file::DataFile;
+use crate::storage::file::{rename_no_replace, DataFile};
 use crate::storage::recovery;
 use crate::transaction::{CommitBatch, CommitReceipt, Op};
 
@@ -70,11 +70,18 @@ impl StoreBuilder {
 
     /// Verify the file at the configured path without acquiring a lock or modifying it.
     ///
-    /// This is the path used by the `verify` CLI. It returns `Ok(())` only if every
-    /// committed frame is intact and the file ends cleanly at a valid frame boundary.
+    /// This is the path used by the `verify` CLI. It replays every committed frame through
+    /// the full semantic validation path in a transient `StoreInner` and returns
+    /// `StoreNeedsRepair` for a structurally torn tail. It never modifies bytes on disk.
     pub fn verify(self) -> Result<(), Error> {
         let mut data_file = DataFile::open_read_only(&self.path, self.durability)?;
-        let _scan = recovery::scan(&mut data_file, |_, _| Ok(()))?;
+        let mut inner = StoreInner::new_for_verify(self.limits);
+        let scan = recovery::scan(&mut data_file, |frame, offset| {
+            inner.replay_frame(&frame, offset)
+        })?;
+        if scan.tail_truncated {
+            return Err(Error::StoreNeedsRepair);
+        }
         Ok(())
     }
 }
@@ -117,21 +124,28 @@ impl StoreInner {
             .as_mut()
             .expect("data_file always present after open")
     }
-}
 
-#[cfg(unix)]
-fn is_same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let ma = std::fs::metadata(a)?;
-    let mb = std::fs::metadata(b)?;
-    Ok(ma.dev() == mb.dev() && ma.ino() == mb.ino())
-}
-
-#[cfg(not(unix))]
-fn is_same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
-    let ca = std::fs::canonicalize(a)?;
-    let cb = std::fs::canonicalize(b)?;
-    Ok(ca == cb)
+    fn new_for_verify(limits: Limits) -> Self {
+        Self {
+            path: PathBuf::new(),
+            data_file: None,
+            limits,
+            poisoned: false,
+            transaction_seq: 0,
+            high_water_sequence: 0,
+            events: Vec::new(),
+            event_ids: HashMap::new(),
+            transaction_frame_offsets: HashMap::new(),
+            transaction_receipts: HashMap::new(),
+            stream_versions: HashMap::new(),
+            projections: HashMap::new(),
+            jobs: HashMap::new(),
+            queue_partitions: HashMap::new(),
+            recovered_tail: false,
+            needs_repair: false,
+            last_valid_offset: 0,
+        }
+    }
 }
 
 impl Store {
@@ -482,13 +496,20 @@ impl Store {
 
     /// Re-read and verify the entire file. Returns `Ok(())` if every frame is intact.
     /// If the store was opened with an un-repaired tail, verification fails without modifying
-    /// the file.
+    /// the file. Verification replays every frame through the full semantic validation path
+    /// in a transient `StoreInner`, so torn tails and semantic corruption are both reported.
     pub fn verify(&self) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
         if guard.needs_repair {
             return Err(Error::StoreNeedsRepair);
         }
-        let _scan = recovery::scan(guard.df_mut(), |_, _| Ok(()))?;
+        let mut inner = StoreInner::new_for_verify(guard.limits);
+        let scan = recovery::scan(guard.df_mut(), |frame, offset| {
+            inner.replay_frame(&frame, offset)
+        })?;
+        if scan.tail_truncated {
+            return Err(Error::StoreNeedsRepair);
+        }
         Ok(())
     }
 
@@ -509,8 +530,9 @@ impl Store {
     /// Copy the primary file to `destination` with safe temporary-file semantics.
     ///
     /// The copy is written to a sibling temporary file, fsynced, scanned, and atomically
-    /// renamed onto `destination`. On any failure the temporary file is removed. The destination
-    /// must not already exist; overwriting a live store is refused to protect the namespace.
+    /// published onto `destination` using a hard-link + unlink so the operation fails if
+    /// `destination` already exists (including a dangling symlink). On any failure the
+    /// temporary file is removed. Overwriting a live store is refused to protect the namespace.
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
         guard.df_mut().sync()?;
@@ -548,12 +570,6 @@ impl Store {
             return Err(Error::Validation(
                 "backup destination cannot be the primary data file".into(),
             ));
-        }
-        if dest_canonical.exists() {
-            return Err(Error::Validation(format!(
-                "backup destination already exists: {}",
-                dest_canonical.display()
-            )));
         }
 
         let name = dest_file_name.to_string_lossy();
@@ -601,15 +617,17 @@ impl Store {
             let _scan = recovery::scan(&mut tmp_file, |_, _| Ok(()))?;
             tmp_file.sync()?;
             drop(tmp_file);
-            std::fs::rename(&tmp, &dest_canonical)?;
+            rename_no_replace(&tmp, &dest_canonical).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::Validation(format!(
+                        "backup destination already exists: {}",
+                        dest_canonical.display()
+                    ))
+                } else {
+                    Error::Io(e.to_string())
+                }
+            })?;
             DataFile::sync_parent_dir(&dest_canonical)?;
-            // Re-validate identity after publication: the primary path and the just-renamed
-            // destination must still be different files.
-            if is_same_file(&src_path, &dest_canonical).map_err(|e| Error::Io(e.to_string()))? {
-                return Err(Error::Validation(
-                    "backup destination collided with the primary data file after rename".into(),
-                ));
-            }
             Ok(())
         })();
 
@@ -647,6 +665,22 @@ impl Drop for Store {
 
 impl StoreInner {
     fn replay_frame(&mut self, frame: &Frame, frame_offset: u64) -> Result<(), Error> {
+        self.replay_frame_body(frame, frame_offset)
+            .map_err(|e| Self::replay_error(e, frame_offset))
+    }
+
+    fn replay_error(e: Error, frame_offset: u64) -> Error {
+        let message = match e {
+            Error::Corruption { message, .. } => message,
+            other => other.to_string(),
+        };
+        Error::Corruption {
+            message,
+            offset: frame_offset,
+        }
+    }
+
+    fn replay_frame_body(&mut self, frame: &Frame, frame_offset: u64) -> Result<(), Error> {
         let expected_sequence =
             self.transaction_seq
                 .checked_add(1)
@@ -1013,6 +1047,13 @@ impl StoreInner {
         self.validate_job_ops(&batch)?;
 
         let records = self.ops_to_records(&batch)?;
+        if records.len() > MAX_RECORDS_PER_FRAME as usize {
+            return Err(Error::Validation(format!(
+                "transaction would write {} records, exceeding hard frame ceiling {}",
+                records.len(),
+                MAX_RECORDS_PER_FRAME
+            )));
+        }
         let payload_bytes = encode_records(&records);
 
         if payload_bytes.len()
@@ -1687,8 +1728,21 @@ impl StoreInner {
             return Err(Error::Validation("lease_ms must be greater than 0".into()));
         }
 
-        let mut expired_at_limit: Vec<(Id, Id, u32, i64)> = Vec::new();
-        let mut candidates: Vec<(Id, Id, u32, i64, JobSpec)> = Vec::new();
+        let max_records = self.limits.max_records_per_transaction;
+        let max_frame = self.limits.max_frame_size;
+        let base_bytes = FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE;
+        if base_bytes > max_frame {
+            return Err(Error::PayloadTooLarge {
+                kind: "minimum claim frame",
+                size: base_bytes,
+                limit: max_frame,
+            });
+        }
+
+        let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+        let mut batch_record_bytes = 0usize;
+        let mut claimed: Vec<ClaimedJob> = Vec::new();
+
         let mut partitions: Vec<(String, String)> = self
             .queue_partitions
             .keys()
@@ -1698,9 +1752,12 @@ impl StoreInner {
         partitions.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (queue, partition) in partitions {
+            if claimed.len() >= request.limit {
+                break;
+            }
             let ids = self
                 .queue_partitions
-                .get(&(queue, partition))
+                .get(&(queue.clone(), partition.clone()))
                 .cloned()
                 .unwrap_or_default();
             for job_id in ids {
@@ -1711,20 +1768,36 @@ impl StoreInner {
                 if job.is_terminal() {
                     continue;
                 }
+
                 if job.is_expired_at_attempt_limit(request.now_ms) {
                     let token = job.lease_token.ok_or_else(|| Error::Corruption {
                         message: format!("leased job {job_id} has no lease token"),
                         offset: 0,
                     })?;
-                    let expired_at_ms = request.now_ms;
-                    expired_at_limit.push((job_id, token, job.attempt, expired_at_ms));
+                    let size = Record::JobExpire {
+                        job_id,
+                        lease_token: token,
+                        attempt: job.attempt,
+                        expired_at_ms: request.now_ms,
+                    }
+                    .encode()
+                    .len();
+                    if batch.ops.len() + 1 > max_records
+                        || base_bytes + batch_record_bytes + size > max_frame
+                    {
+                        break;
+                    }
+                    batch = batch.internal_expire_job(job_id, token, job.attempt, request.now_ms);
+                    batch_record_bytes += size;
                     continue;
                 }
+
                 if !job.is_ready_at(request.now_ms) {
-                    // Earlier active nonterminal job blocks this partition.
+                    // An earlier active nonterminal job blocks this partition.
                     break;
                 }
 
+                // Include at most one ready job per partition.
                 let lease_token = Id::new()?;
                 let attempt = job
                     .attempt
@@ -1734,72 +1807,51 @@ impl StoreInner {
                     .now_ms
                     .checked_add(request.lease_ms)
                     .ok_or_else(|| Error::Validation("lease_ms arithmetic overflow".into()))?;
-                candidates.push((
+                let size = Record::JobLease {
                     job_id,
                     lease_token,
+                    worker_id: request.worker_id.clone(),
                     attempt,
                     lease_expires_at_ms,
-                    job.spec.clone(),
-                ));
-                // Claim at most one ready job per partition per call so an earlier
-                // nonterminal job always blocks later jobs in the same partition.
-                break;
-            }
-        }
+                    claimed_at_ms: request.now_ms,
+                }
+                .encode()
+                .len();
 
-        // Build one atomic batch. If it cannot fit under the configured limits, trim it
-        // to a safe prefix and commit that atomically. A prefix containing only expired
-        // jobs still makes progress; candidate claims happen once all preceding expired
-        // jobs in the included partitions have been removed.
-        let max_records = self.limits.max_records_per_transaction;
-        let max_frame = self.limits.max_frame_size;
-        let worker_id_len = request.worker_id.len();
-
-        let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
-        let mut batch_records = 0usize;
-        let mut batch_bytes = FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE;
-        let mut expired_included = 0usize;
-
-        // Each JobExpire record is a fixed 51 encoded bytes; add a small margin.
-        const EXPIRE_ESTIMATE: usize = 64;
-        // Each JobLease record is ~60 bytes + worker_id; add a small margin.
-        let lease_estimate = 64usize.saturating_add(worker_id_len);
-
-        for (job_id, lease_token, attempt, expired_at_ms) in &expired_at_limit {
-            if batch_records >= max_records
-                || batch_bytes.saturating_add(EXPIRE_ESTIMATE) > max_frame
-            {
-                break;
-            }
-            batch = batch.internal_expire_job(*job_id, *lease_token, *attempt, *expired_at_ms);
-            batch_records += 1;
-            batch_bytes += EXPIRE_ESTIMATE;
-            expired_included += 1;
-        }
-
-        // Only claim candidates if every collected expired job fits. Otherwise the
-        // remaining expired jobs would still block their partitions and the claim set
-        // would be misleading.
-        let include_candidates = expired_included == expired_at_limit.len();
-        if include_candidates {
-            let mut claimed_budget = request.limit;
-            for (job_id, lease_token, attempt, lease_expires_at_ms, _) in &candidates {
-                if batch_records >= max_records
-                    || batch_bytes.saturating_add(lease_estimate) > max_frame
-                    || claimed_budget == 0
+                // A single ready job must fit in an otherwise empty frame.
+                if base_bytes + size > max_frame {
+                    return Err(Error::PayloadTooLarge {
+                        kind: "claim lease record",
+                        size: base_bytes + size,
+                        limit: max_frame,
+                    });
+                }
+                if batch.ops.len() + 1 > max_records
+                    || base_bytes + batch_record_bytes + size > max_frame
                 {
                     break;
                 }
+
                 batch = batch.lease_job(
-                    *job_id,
-                    *lease_token,
+                    job_id,
+                    lease_token,
                     request.worker_id.clone(),
-                    *attempt,
-                    *lease_expires_at_ms,
+                    attempt,
+                    lease_expires_at_ms,
                 );
-                batch_records += 1;
-                batch_bytes += lease_estimate;
-                claimed_budget -= 1;
+                batch_record_bytes += size;
+                claimed.push(ClaimedJob {
+                    job_id,
+                    queue: job.spec.queue.clone(),
+                    partition: job.spec.partition.clone(),
+                    payload: job.spec.payload.clone(),
+                    worker_id: request.worker_id.clone(),
+                    lease_token,
+                    attempt,
+                    lease_expires_at_ms,
+                    idempotency_key: job.spec.idempotency_key.clone(),
+                });
+                break;
             }
         }
 
@@ -1807,26 +1859,6 @@ impl StoreInner {
             self.commit(batch)?;
         }
 
-        let mut claimed = Vec::with_capacity(candidates.len().min(batch_records));
-        if include_candidates {
-            for (job_id, lease_token, attempt, lease_expires_at_ms, spec) in candidates {
-                // `batch_records` reflects how many candidate lease ops were actually added.
-                if claimed.len() >= batch_records - expired_included {
-                    break;
-                }
-                claimed.push(ClaimedJob {
-                    job_id,
-                    queue: spec.queue,
-                    partition: spec.partition,
-                    payload: spec.payload,
-                    worker_id: request.worker_id.clone(),
-                    lease_token,
-                    attempt,
-                    lease_expires_at_ms,
-                    idempotency_key: spec.idempotency_key,
-                });
-            }
-        }
         Ok(claimed)
     }
 }
