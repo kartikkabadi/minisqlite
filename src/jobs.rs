@@ -446,6 +446,12 @@ impl JobStateRecord {
     /// lease expired. It validates the stored lease token and attempt to prevent malformed
     /// on-disk histories from being accepted during replay.
     pub fn expire(&mut self, expired_at_ms: i64, token: Id, attempt: u32) -> Result<(), Error> {
+        if self.spec.effect_mode != EffectMode::Idempotent {
+            return Err(Error::Validation(format!(
+                "job {} cannot expire a non-idempotent effect mode",
+                self.spec.job_id
+            )));
+        }
         if token == Id::ZERO {
             return Err(Error::Validation(format!(
                 "job {} expire token cannot be zero",
