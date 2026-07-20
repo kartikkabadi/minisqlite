@@ -1926,7 +1926,9 @@ impl StoreInner {
                         expired_at_ms: request.now_ms,
                     });
                     batch_record_bytes += size;
-                    break;
+                    // The expired job is terminal within this batch; the next job in the
+                    // partition may be leased in the same transaction.
+                    continue;
                 }
 
                 if !job.is_ready_at(request.now_ms) {
