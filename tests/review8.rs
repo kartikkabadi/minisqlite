@@ -220,12 +220,14 @@ fn claim_jobs_limit_one_round_robins_partitions_durably() {
     let store = StoreBuilder::new(&path).open().unwrap();
     store.ack_job(a2, a2_token, None, 3).unwrap();
     store
-        .commit(CommitBatch::new(Id::new().unwrap(), 3).enqueue_job(JobSpec::new(
-            a3,
-            "q",
-            "a",
-            b"a3".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 3).enqueue_job(JobSpec::new(
+                a3,
+                "q",
+                "a",
+                b"a3".to_vec(),
+            )),
+        )
         .unwrap();
     let fourth = claim(&store, 4);
     assert_eq!(fourth.claims()[0].partition, "b");

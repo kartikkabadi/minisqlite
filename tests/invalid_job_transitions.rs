@@ -1,6 +1,5 @@
 use minisqlite::{
-    ClaimRequest, CommitBatch, Durability, EffectMode, Id, JobSpec, Resolution, Store,
-    StoreBuilder,
+    ClaimRequest, CommitBatch, Durability, EffectMode, Id, JobSpec, Resolution, Store, StoreBuilder,
 };
 
 mod common;
@@ -211,8 +210,8 @@ fn stale_token_cannot_fail_newer_lease() {
     let (_tmp, store) = store();
     let job_id = Id::new().unwrap();
     // Explicitly idempotent: this test intentionally models a retry after lease expiry.
-    let job = JobSpec::new(job_id, "q", "p", b"work".to_vec())
-        .with_effect_mode(EffectMode::Idempotent);
+    let job =
+        JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_effect_mode(EffectMode::Idempotent);
     store
         .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
