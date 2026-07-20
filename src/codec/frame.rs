@@ -15,6 +15,10 @@ pub const FRAME_TRAILER_SIZE: usize = 32;
 /// This protects the recovery scanner from allocating unbounded memory on a corrupted file.
 pub const MAX_FRAME_SIZE: usize = 64 << 20; // 64 MiB
 
+// Frame lengths up to `MAX_FRAME_SIZE` must be representable in `usize`.
+#[cfg(target_pointer_width = "16")]
+compile_error!("minisqlite requires a target with at least 32-bit pointers");
+
 pub const FORMAT_MAJOR: u16 = 0;
 pub const FORMAT_MINOR: u16 = 1;
 
@@ -318,12 +322,17 @@ impl Frame {
         let header_bytes: &[u8; FRAME_HEADER_SIZE] = bytes[..FRAME_HEADER_SIZE].try_into().unwrap();
         let header = FrameHeader::decode(header_bytes)?;
 
-        if header.total_frame_length as usize > MAX_FRAME_SIZE {
+        if header.total_frame_length > MAX_FRAME_SIZE as u64 {
             return Err(Error::Corruption {
                 message: "frame exceeds maximum allowed size".into(),
                 offset: 0,
             });
         }
+        let total_frame_length =
+            usize::try_from(header.total_frame_length).map_err(|_| Error::Corruption {
+                message: "frame length does not fit in usize".into(),
+                offset: 0,
+            })?;
 
         let expected_total =
             FRAME_HEADER_SIZE as u64 + header.payload_length as u64 + FRAME_TRAILER_SIZE as u64;
@@ -334,18 +343,40 @@ impl Frame {
             });
         }
 
-        if bytes.len() < header.total_frame_length as usize {
+        if bytes.len() < total_frame_length {
             return Err(Error::Corruption {
                 message: "frame truncated".into(),
                 offset: 0,
             });
         }
 
+        let payload_length =
+            usize::try_from(header.payload_length).map_err(|_| Error::Corruption {
+                message: "frame payload length does not fit in usize".into(),
+                offset: 0,
+            })?;
         let payload_start = FRAME_HEADER_SIZE;
-        let payload_end = payload_start + header.payload_length as usize;
-        let payload = bytes[payload_start..payload_end].to_vec();
+        let payload_end =
+            payload_start
+                .checked_add(payload_length)
+                .ok_or_else(|| Error::Corruption {
+                    message: "frame payload end overflows usize".into(),
+                    offset: 0,
+                })?;
+        let mut payload = Vec::new();
+        if let Err(e) = payload.try_reserve_exact(payload_length) {
+            return Err(Error::Validation(format!(
+                "cannot allocate frame payload of {payload_length} bytes: {e}"
+            )));
+        }
+        payload.extend_from_slice(&bytes[payload_start..payload_end]);
         let trailer_start = payload_end;
-        let trailer_end = trailer_start + FRAME_TRAILER_SIZE;
+        let trailer_end = trailer_start
+            .checked_add(FRAME_TRAILER_SIZE)
+            .ok_or_else(|| Error::Corruption {
+                message: "frame trailer end overflows usize".into(),
+                offset: 0,
+            })?;
         if trailer_end > bytes.len() {
             return Err(Error::Corruption {
                 message: "frame trailer truncated".into(),
@@ -416,6 +447,50 @@ mod tests {
             let bytes: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
             let _ = Frame::decode(&bytes);
         }
+    }
+
+    /// Build frame bytes whose header declares `total_frame_length` with a
+    /// valid header CRC, so decoding reaches the length validation logic.
+    fn crafted_frame_with_total_length(total_frame_length: u64) -> Vec<u8> {
+        let header = FrameHeader {
+            version: FRAME_FORMAT_VERSION,
+            total_frame_length,
+            transaction_sequence: 1,
+            transaction_id: Id::from(1u128),
+            commit_timestamp_ms: 0,
+            record_count: 0,
+            payload_length: 0,
+        };
+        let header_bytes = header.encode_without_checksum();
+        let checksum = crc32(&[&header_bytes]);
+        let mut out = header_bytes.to_vec();
+        out.extend_from_slice(&checksum.to_le_bytes());
+        out.resize(FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE, 0);
+        out
+    }
+
+    #[test]
+    fn crafted_huge_total_frame_length_is_rejected_without_panic() {
+        for total in [
+            u64::MAX,
+            u64::from(u32::MAX) + 1,
+            MAX_FRAME_SIZE as u64 + 1,
+            1u64 << 32,
+        ] {
+            let bytes = crafted_frame_with_total_length(total);
+            let result = Frame::decode(&bytes);
+            assert!(
+                result.is_err(),
+                "total_frame_length {total} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn total_frame_length_at_cap_with_short_buffer_is_truncated_error() {
+        let bytes = crafted_frame_with_total_length(MAX_FRAME_SIZE as u64);
+        let result = Frame::decode(&bytes);
+        assert!(result.is_err(), "short buffer must be rejected, not panic");
     }
 
     #[test]
