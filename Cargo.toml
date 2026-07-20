@@ -2,6 +2,7 @@
 name = "minisqlite"
 version = "0.3.0-alpha.1"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Kartik Kabadi <kartik@kartikkabadi.com>"]
 description = "An embedded append-only control-plane state engine for local-first AI applications"
 readme = "README.md"
@@ -25,7 +26,6 @@ required-features = ["failpoint"]
 
 [dependencies]
 crc32fast = "1.4.2"
-fs2 = "0.4.3"
 
 [dependencies.serde]
 version = "1.0.229"
@@ -37,8 +37,7 @@ version = "1.0.140"
 optional = true
 
 [dev-dependencies]
-proptest = "=1.5.0"
-tempfile = "=3.14.0"
+fastrand = "=2.5.0"
 
 [features]
 default = ["json"]

@@ -100,14 +100,19 @@ mod tests {
     use crate::codec::Writer;
     use crate::config::Durability;
     use crate::id::Id;
-    use proptest::prelude::*;
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(128))]
+    #[test]
+    fn random_trailing_bytes_never_panics() {
+        for seed in 0..128 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let len = rng.usize(0..1024);
+            let suffix: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
 
-        #[test]
-        fn random_trailing_bytes_never_panics(suffix in proptest::collection::vec(any::<u8>(), 0..1024)) {
-            let tmp = std::env::temp_dir().join(format!("minisqlite_recfuzz_{}", std::process::id()));
+            let tmp = std::env::temp_dir().join(format!(
+                "minisqlite_recfuzz_{}_{}",
+                std::process::id(),
+                seed
+            ));
             let _ = std::fs::remove_file(&tmp);
             {
                 let header = FileHeader::new(0);

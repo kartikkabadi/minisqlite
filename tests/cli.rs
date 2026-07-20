@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+mod common;
 use std::process::Command;
 
 use minisqlite::{CommitBatch, Durability, Event, Id, JobSpec, StoreBuilder};
@@ -27,7 +28,7 @@ fn run(args: &[&str]) -> (String, std::process::ExitStatus) {
 
 #[test]
 fn cli_verify_and_doctor_succeed() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("cli.mini");
 
     let store = StoreBuilder::new(&path)
@@ -111,7 +112,7 @@ fn cli_verify_and_doctor_succeed() {
 
 #[test]
 fn cli_jobs_round_trip() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("jobs_cli.mini");
 
     let store = StoreBuilder::new(&path)

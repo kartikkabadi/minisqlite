@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+mod common;
 
 use minisqlite::{CommitBatch, Durability, Event, Id, Limits, StoreBuilder};
 
@@ -36,7 +37,7 @@ fn max_frame_size_must_cover_overhead() {
 
 #[test]
 fn event_payload_above_limit_is_rejected() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let mut limits = Limits::new();
     limits.max_event_payload = 4;
     let store = StoreBuilder::new(tmp.path().join("limits.mini"))
@@ -53,7 +54,7 @@ fn event_payload_above_limit_is_rejected() {
 
 #[test]
 fn projection_value_above_limit_is_rejected() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let mut limits = Limits::new();
     limits.max_projection_value = 2;
     let store = StoreBuilder::new(tmp.path().join("limits.mini"))
@@ -74,7 +75,7 @@ fn projection_value_above_limit_is_rejected() {
 
 #[test]
 fn job_payload_above_limit_is_rejected() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let mut limits = Limits::new();
     limits.max_job_payload = 2;
     let store = StoreBuilder::new(tmp.path().join("limits.mini"))
@@ -91,7 +92,7 @@ fn job_payload_above_limit_is_rejected() {
 
 #[test]
 fn too_many_records_per_transaction_is_rejected() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let mut limits = Limits::new();
     limits.max_records_per_transaction = 2;
     let store = StoreBuilder::new(tmp.path().join("limits.mini"))

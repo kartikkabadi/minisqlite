@@ -1,7 +1,8 @@
 use minisqlite::{CommitBatch, Durability, Error, Id, ProjectionEntry, Store, StoreBuilder};
+mod common;
 
-fn store() -> (tempfile::TempDir, Store) {
-    let tmp = tempfile::tempdir().unwrap();
+fn store() -> (common::TempDir, Store) {
+    let tmp = common::TempDir::new();
     let store = StoreBuilder::new(tmp.path().join("proj.mini"))
         .durability(Durability::Memory)
         .open()

@@ -498,13 +498,13 @@ pub fn decode_records(bytes: &[u8]) -> Result<Vec<Record>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(512))]
-
-        #[test]
-        fn records_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+    #[test]
+    fn records_arbitrary_bytes_never_panics() {
+        for seed in 0..512 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let len = rng.usize(0..1024);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
             let _ = decode_records(&bytes);
         }
     }

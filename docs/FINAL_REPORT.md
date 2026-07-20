@@ -25,7 +25,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * `MINISQL3` file format with `MINIFRAM` frame headers and `FRAMETRL` trailers, CRC32 via `crc32fast`.
 * Recovery scanner that validates frames, truncates torn tails, and fails closed on mid-file corruption.
 * Operational CLI: `doctor`, `verify`, `stats`, `events`, `projections`, `jobs`, `export`, `backup`.
-* Cross-platform advisory file locking through `fs2`.
+* Cross-platform advisory file locking via `std::fs::File::lock`/`try_lock` (Rust 1.89+).
 * `examples/synara_control_plane.rs` demonstrating the six required Synara-shaped flows.
 
 ## Major deletions
@@ -103,12 +103,12 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 
 | Target | Result |
 |---|---|
-| File header decoding (`codec::frame` proptest) | Passed |
-| Frame decoding (`codec::frame` proptest) | Passed |
-| Record decoding (`codec::record` proptest) | Passed |
-| Recovery scanning with random trailing bytes (`storage::recovery` proptest) | Passed |
-| Model-based store comparison (`tests/property.rs`) | Passed |
-| Job lifecycle property test (`tests/job_property.rs`) | Passed |
+| File header decoding (`codec::frame` fastrand) | Passed |
+| Frame decoding (`codec::frame` fastrand) | Passed |
+| Record decoding (`codec::record` fastrand) | Passed |
+| Recovery scanning with random trailing bytes (`storage::recovery` fastrand) | Passed |
+| Model-based store comparison (`tests/property.rs` with fastrand) | Passed |
+| Job lifecycle property test (`tests/job_property.rs` with fastrand) | Passed |
 | CLI end-to-end smoke test (`tests/cli.rs`) | Passed |
 | Projection operation tests (`tests/projection_ops.rs`) | Passed |
 | Invalid job-transition tests (`tests/invalid_job_transitions.rs`) | Passed |
@@ -116,25 +116,27 @@ Process-level failpoint tests in `tests/crash.rs` cover each boundary. The recov
 | Symlink rejection and file permissions (`tests/security.rs`) | Passed |
 | Partition-ordered job claiming (`tests/integration.rs`) | Passed |
 
-## `cargo fuzz` targets
+## Fuzz targets
 
-Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
+The four required fuzz targets are provided as deterministic `#[test]` harnesses in `tests/fuzz_targets.rs`:
 
-| Target | Result (80-second smoke run) |
-|---|---|
-| `header_decode` | Passed (19.8M runs, no crashes) |
-| `frame_decode` | Passed (12.1M runs, no crashes) |
-| `record_decode` | Passed (4.1M runs, no crashes) |
-| `recovery_scan` | Passed (1.5M runs, no crashes) |
+| Target | Source | Result (deterministic seeded runs) |
+|---|---|---|
+| `header_decode` | `tests/fuzz_targets.rs` | Passed (1024 seeds, no panics) |
+| `frame_decode` | `tests/fuzz_targets.rs` | Passed (1024 seeds, no panics) |
+| `record_decode` | `tests/fuzz_targets.rs` | Passed (1024 seeds, no panics) |
+| `recovery_scan` | `tests/fuzz_targets.rs` | Passed (256 seeds, no panics) |
+
+These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the build dependency tree while keeping the same decoder coverage.
 
 ## Complexity
 
 * Production lines added / deleted in `src/`: approximately **+5,541 / -4,858**.
 * Public API items: approximately **70** exported types/methods.
-* Direct runtime dependencies: `crc32fast`, `fs2`, `serde` (optional, exact `1.0.229`, default), `serde_json` (optional, default).
+* Direct runtime dependencies: `crc32fast`, `serde` (optional, exact `1.0.229`, default), `serde_json` (optional, default).
 * Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, Socket Security alerts for `cargo/libc@0.2.186` and `cargo/zerocopy@0.8.54` were triaged as false positives and documented in `SECURITY.md`/`DEPENDENCIES.md`, the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the default lock-file path uses a `.mini.lock` suffix, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, Socket Security alerts for `cargo/libc` and `cargo/zerocopy` were resolved by removing those crates from the dependency tree (`fs2` replaced by `std::fs::File::lock`, `proptest`/`tempfile` replaced by `fastrand` and a custom `TempDir` helper, `libfuzzer-sys`/`fuzz/` removed and replaced with deterministic `#[test]` fuzz targets), the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the default lock-file path uses a `.mini.lock` suffix, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
 
 ## Synara-shaped demonstration
 
@@ -163,4 +165,4 @@ Four `cargo-fuzz` harnesses are provided in `fuzz/fuzz_targets/`:
 
 ## Next evidence-producing step
 
-Run each `cargo fuzz` target for a longer duration (e.g., one hour per target) and add a nightly CI job that exercises them, to catch decoder edge cases that the proptests and crash matrix do not cover.
+Run the `tests/fuzz_targets.rs` harness with more seeds and larger input sizes (e.g., one hour per target) and add a nightly CI job that exercises them, to catch decoder edge cases that the proptests and crash matrix do not cover.

@@ -1,5 +1,6 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+mod common;
 
 #[cfg(unix)]
 use minisqlite::{Durability, StoreBuilder};
@@ -7,7 +8,7 @@ use minisqlite::{Durability, StoreBuilder};
 #[test]
 #[cfg(unix)]
 fn rejects_symlinked_primary_path() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let real = tmp.path().join("real.mini");
     let link = tmp.path().join("link.mini");
     std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -27,7 +28,7 @@ fn rejects_symlinked_primary_path() {
 #[test]
 #[cfg(unix)]
 fn primary_file_is_owner_only() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("secure.mini");
     {
         let _store = StoreBuilder::new(&path)

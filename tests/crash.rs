@@ -1,6 +1,7 @@
 #![cfg(feature = "failpoint")]
 
 use std::path::PathBuf;
+mod common;
 use std::process::{Command, Stdio};
 
 use minisqlite::{Durability, StoreBuilder};
@@ -63,7 +64,7 @@ fn assert_valid_state(path: &std::path::Path) {
 
 #[test]
 fn crash_before_append_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("before-append", &path);
     assert_valid_state(&path);
@@ -71,7 +72,7 @@ fn crash_before_append_recovers() {
 
 #[test]
 fn crash_partial_header_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("partial-header", &path);
     assert_valid_state(&path);
@@ -79,7 +80,7 @@ fn crash_partial_header_recovers() {
 
 #[test]
 fn crash_during_payload_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("during-payload", &path);
     assert_valid_state(&path);
@@ -87,7 +88,7 @@ fn crash_during_payload_recovers() {
 
 #[test]
 fn crash_after_payload_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("after-payload", &path);
     assert_valid_state(&path);
@@ -95,7 +96,7 @@ fn crash_after_payload_recovers() {
 
 #[test]
 fn crash_after_trailer_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("after-trailer", &path);
     assert_valid_state(&path);
@@ -103,7 +104,7 @@ fn crash_after_trailer_recovers() {
 
 #[test]
 fn crash_before_sync_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("before-sync", &path);
     assert_valid_state(&path);
@@ -111,7 +112,7 @@ fn crash_before_sync_recovers() {
 
 #[test]
 fn crash_after_sync_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("after-sync", &path);
     assert_valid_state(&path);
@@ -119,7 +120,7 @@ fn crash_after_sync_recovers() {
 
 #[test]
 fn crash_before_memory_apply_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("before-memory-apply", &path);
     assert_valid_state(&path);
@@ -127,7 +128,7 @@ fn crash_before_memory_apply_recovers() {
 
 #[test]
 fn crash_after_memory_apply_recovers() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("crash.mini");
     run_failpoint("after-memory-apply", &path);
     assert_valid_state(&path);
@@ -164,7 +165,7 @@ fn assert_first_commit_only(path: &std::path::Path) {
 
 #[test]
 fn disk_full_short_write_returns_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("short-write.mini");
     let out = run_failpoint_with_output("append-error", &path);
     assert!(out.contains("Io"), "expected Io error, got: {out}");
@@ -173,7 +174,7 @@ fn disk_full_short_write_returns_error() {
 
 #[test]
 fn sync_failure_returns_error() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("sync-fail.mini");
     let out = run_failpoint_with_output("sync-error", &path);
     assert!(out.contains("Io"), "expected Io error, got: {out}");
@@ -182,7 +183,7 @@ fn sync_failure_returns_error() {
 
 #[test]
 fn rollback_failure_returns_uncertain_outcome() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let path = tmp.path().join("rollback-fail.mini");
     let out = run_failpoint_with_output("rollback-error", &path);
     assert!(

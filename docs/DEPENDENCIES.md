@@ -3,19 +3,23 @@
 | Dependency | Runtime/dev | Why needed | What it replaces | Removal condition |
 | ---------- | ----------- | ---------- | -------------- | ----------------- |
 | `crc32fast` | runtime | Well-tested CRC32; safer and faster than a hand-rolled checksum | Custom checksum | Never; rolling our own is unnecessary risk |
-| `fs2` | runtime | Cross-platform advisory file locking | OS-specific `flock`/`LockFile` code | Never; the lock surface is small and well-tested |
 | `serde` | optional runtime | Optional derive serialization for application types | Manual serde reimplementation | If `serde`/`json` features are dropped |
 | `serde_json` | optional runtime | JSON serialization for CLI and optional `Serialize`/`Deserialize` impls | Manual JSON encoding | If `json` feature is dropped |
-| `tempfile` | dev | Temporary directories for tests | Manual temp-dir setup | If all tests move to fixed paths |
-| `proptest` | dev | Property-based testing for the model-based test suite | Exhaustive hand-written tests | If test strategy changes away from property tests |
-| `libfuzzer-sys` | fuzz-only | `cargo-fuzz` harness in `fuzz/` | Hand-written fuzzing harness | If fuzzing strategy changes |
+| `fastrand` | dev | Deterministic, seedable randomness for property-style and fuzz tests | `proptest`/`rand` | If test strategy changes away from generated inputs |
 
 Runtime dependencies are intentionally small.
 No async runtime, ORM, full database, or heavy CLI framework is used.
 
 ## Security review
 
-A Socket Security scan flagged `cargo/libc@0.2.186` and `cargo/zerocopy@0.8.54` as likely obfuscated.
-These are transitive dependencies of `fs2` (`libc`) and `proptest`/`rand` (`zerocopy`). They are
-well-known, widely-audited foundational crates; the alerts are heuristic false positives. See
-`SECURITY.md` for the triage rationale.
+The Socket Security alerts for `cargo/libc` and `cargo/zerocopy` were resolved by:
+
+* Replacing `fs2` advisory locking with `std::fs::File::lock`/`try_lock` (stable since Rust 1.89),
+  which removed the runtime `libc` dependency.
+* Replacing `proptest`/`tempfile` with `fastrand` and a tiny custom `TempDir` helper, removing
+  the `rand`/`getrandom`/`ppv-lite86`/`zerocopy` dev-dependency subtree.
+* Removing the `fuzz/` crate's `libfuzzer-sys` build dependency (which pulled `libc` via
+  `cc`/`jobserver`) and folding the same coverage into deterministic `#[test]` fuzz targets
+  in `tests/fuzz_targets.rs`.
+
+`minisqlite` no longer depends on `libc` or `zerocopy`.

@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use minisqlite::{CommitBatch, Durability, Event, Id, JobSpec, StoreBuilder};
-use proptest::prelude::*;
+
+mod common;
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -31,43 +32,51 @@ enum Op {
     Reopen,
 }
 
-fn arb_string() -> impl Strategy<Value = String> {
-    "[a-z0-9]{1,16}"
+fn rand_string(rng: &mut fastrand::Rng) -> String {
+    let len = rng.usize(1..=16);
+    let chars: Vec<char> = (0..len)
+        .map(|_| {
+            const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+            CHARSET[rng.usize(..CHARSET.len())] as char
+        })
+        .collect();
+    chars.into_iter().collect()
 }
 
-fn arb_payload() -> impl Strategy<Value = Vec<u8>> {
-    proptest::collection::vec(any::<u8>(), 0..256)
+fn rand_payload(rng: &mut fastrand::Rng, max: usize) -> Vec<u8> {
+    let len = rng.usize(0..max);
+    (0..len).map(|_| rng.u8(..)).collect()
 }
 
-fn arb_op() -> impl Strategy<Value = Op> {
-    prop_oneof![
-        (arb_string(), arb_payload())
-            .prop_map(|(stream, payload)| Op::AppendEvent { stream, payload }),
-        (arb_string(), any::<u64>(), arb_payload(), arb_payload()).prop_map(
-            |(name, version, key, value)| Op::ProjectionPut {
-                name,
-                version,
-                key,
-                value,
-            }
-        ),
-        (arb_string(), arb_string(), arb_payload()).prop_map(|(queue, partition, payload)| {
-            Op::EnqueueJob {
-                queue,
-                partition,
-                payload,
-            }
-        }),
-        Just(Op::Reopen),
-    ]
+fn rand_op(rng: &mut fastrand::Rng) -> Op {
+    match rng.usize(0..4) {
+        0 => Op::AppendEvent {
+            stream: rand_string(rng),
+            payload: rand_payload(rng, 256),
+        },
+        1 => Op::ProjectionPut {
+            name: rand_string(rng),
+            version: rng.u64(..),
+            key: rand_payload(rng, 64),
+            value: rand_payload(rng, 64),
+        },
+        2 => Op::EnqueueJob {
+            queue: rand_string(rng),
+            partition: rand_string(rng),
+            payload: rand_payload(rng, 64),
+        },
+        _ => Op::Reopen,
+    }
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(32))]
+#[test]
+fn store_matches_reference_model() {
+    for seed in 0..32 {
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let op_count = rng.usize(1..30);
+        let ops: Vec<Op> = (0..op_count).map(|_| rand_op(&mut rng)).collect();
 
-    #[test]
-    fn store_matches_reference_model(ops in proptest::collection::vec(arb_op(), 1..30)) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = common::TempDir::new();
         let path = tmp.path().join("prop.mini");
 
         let mut store = StoreBuilder::new(&path)
@@ -83,7 +92,8 @@ proptest! {
         for op in ops {
             match op {
                 Op::AppendEvent { stream, payload } => {
-                    let event = Event::with_json_payload(Id::new(), &stream, "e", now_ms(), &payload);
+                    let event =
+                        Event::with_json_payload(Id::new(), &stream, "e", now_ms(), &payload);
                     store
                         .commit(CommitBatch::new(Id::new(), now_ms()).append_event(event))
                         .unwrap();
@@ -101,18 +111,22 @@ proptest! {
                     let current = *model_projection_versions.get(&name).unwrap_or(&0);
                     if version != current + 1 {
                         assert!(store
-                            .commit(
-                                CommitBatch::new(Id::new(), now_ms())
-                                    .projection_put(&name, version, key.clone(), value.clone()),
-                            )
+                            .commit(CommitBatch::new(Id::new(), now_ms()).projection_put(
+                                &name,
+                                version,
+                                key.clone(),
+                                value.clone()
+                            ),)
                             .is_err());
                         continue;
                     }
                     store
-                        .commit(
-                            CommitBatch::new(Id::new(), now_ms())
-                                .projection_put(&name, version, key.clone(), value.clone()),
-                        )
+                        .commit(CommitBatch::new(Id::new(), now_ms()).projection_put(
+                            &name,
+                            version,
+                            key.clone(),
+                            value.clone(),
+                        ))
                         .unwrap();
                     model_projection_versions.insert(name.clone(), version);
                     model_projections

@@ -41,7 +41,7 @@
 One process owns the store.
 A `RwLock<StoreInner>` serializes writes and allows concurrent readers.
 Readers take a read lock briefly and clone data; writers take a write lock.
-A separate `.lock` file provides advisory single-owner locking via `fs2`.
+A separate `.lock` file provides advisory single-owner locking via `std::fs::File::lock`/`try_lock` (Rust 1.89+).
 
 ## Durability path
 

@@ -1,8 +1,5 @@
-use std::fs::{File, OpenOptions};
-use std::io;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
-
-use fs2::FileExt;
 
 use crate::Error;
 
@@ -34,20 +31,10 @@ impl Lock {
             let _ = set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         }
 
-        match file.try_lock_exclusive() {
+        match file.try_lock() {
             Ok(()) => Ok(Self { file }),
-            Err(e) => {
-                // fs2 returns the platform's lock-contention error:
-                // EWOULDBLOCK (11 on Linux, 35 on macOS) or ERROR_LOCK_VIOLATION (33 on Windows).
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.raw_os_error()
-                        .is_some_and(|c| c == 11 || c == 33 || c == 35)
-                {
-                    Err(Error::AlreadyOpen)
-                } else {
-                    Err(Error::Io(e.to_string()))
-                }
-            }
+            Err(TryLockError::WouldBlock) => Err(Error::AlreadyOpen),
+            Err(TryLockError::Error(e)) => Err(Error::Io(e.to_string())),
         }
     }
 }

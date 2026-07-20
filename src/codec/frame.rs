@@ -345,22 +345,30 @@ impl Frame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use proptest::prelude::*;
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-
-        #[test]
-        fn file_header_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+    #[test]
+    fn file_header_arbitrary_bytes_never_panics() {
+        for seed in 0..256 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let len = rng.usize(0..128);
             let mut buf = [0u8; FILE_HEADER_SIZE];
-            for (i, b) in bytes.iter().enumerate().take(FILE_HEADER_SIZE) {
-                buf[i] = *b;
+            for (i, b) in (0..len)
+                .map(|_| rng.u8(..))
+                .enumerate()
+                .take(FILE_HEADER_SIZE)
+            {
+                buf[i] = b;
             }
             let _ = FileHeader::decode(&buf);
         }
+    }
 
-        #[test]
-        fn frame_arbitrary_bytes_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..1024)) {
+    #[test]
+    fn frame_arbitrary_bytes_never_panics() {
+        for seed in 0..256 {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let len = rng.usize(0..1024);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.u8(..)).collect();
             let _ = Frame::decode(&bytes);
         }
     }

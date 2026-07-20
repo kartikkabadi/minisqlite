@@ -2,8 +2,10 @@ use minisqlite::{
     ClaimRequest, CommitBatch, Durability, Id, JobSpec, Resolution, Store, StoreBuilder,
 };
 
-fn store() -> (tempfile::TempDir, Store) {
-    let tmp = tempfile::tempdir().unwrap();
+mod common;
+
+fn store() -> (common::TempDir, Store) {
+    let tmp = common::TempDir::new();
     let store = StoreBuilder::new(tmp.path().join("jobs.mini"))
         .durability(Durability::Memory)
         .open()

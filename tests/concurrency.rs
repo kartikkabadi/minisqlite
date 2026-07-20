@@ -1,11 +1,12 @@
 use std::sync::{mpsc, Arc};
+mod common;
 use std::thread;
 
 use minisqlite::{ClaimRequest, CommitBatch, Durability, Event, Id, JobSpec, StoreBuilder};
 
 #[test]
 fn concurrent_commits_serialize() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let store = Arc::new(
         StoreBuilder::new(tmp.path().join("c.mini"))
             .durability(Durability::Memory)
@@ -39,7 +40,7 @@ fn concurrent_commits_serialize() {
 
 #[test]
 fn concurrent_stream_conflict_is_explicit() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let store = Arc::new(
         StoreBuilder::new(tmp.path().join("c.mini"))
             .durability(Durability::Memory)
@@ -77,7 +78,7 @@ fn concurrent_stream_conflict_is_explicit() {
 
 #[test]
 fn concurrent_reads_never_observe_half_commit() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let store = Arc::new(
         StoreBuilder::new(tmp.path().join("c.mini"))
             .durability(Durability::Memory)
@@ -134,7 +135,7 @@ fn concurrent_reads_never_observe_half_commit() {
 
 #[test]
 fn concurrent_job_claims_do_not_duplicate_lease() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let store = Arc::new(
         StoreBuilder::new(tmp.path().join("c.mini"))
             .durability(Durability::Memory)
@@ -179,7 +180,7 @@ fn concurrent_job_claims_do_not_duplicate_lease() {
 
 #[test]
 fn partition_ordering_is_stable_under_concurrent_claims() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = common::TempDir::new();
     let store = Arc::new(
         StoreBuilder::new(tmp.path().join("c.mini"))
             .durability(Durability::Memory)
