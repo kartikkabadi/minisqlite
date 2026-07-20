@@ -19,13 +19,13 @@ fn concurrent_commits_serialize() {
         let s = store.clone();
         handles.push(thread::spawn(move || {
             let event = Event::with_json_payload(
-                Id::new(),
+                Id::new().unwrap(),
                 "concurrent",
                 "e",
                 i as i64,
                 format!("{{\"i\":{i}}}").as_bytes(),
             );
-            s.commit(CommitBatch::new(Id::new(), i as i64).append_event(event))
+            s.commit(CommitBatch::new(Id::new().unwrap(), i as i64).append_event(event))
                 .unwrap();
         }));
     }
@@ -56,9 +56,9 @@ fn concurrent_stream_conflict_is_explicit() {
         senders.push(tx);
         let s = store.clone();
         handles.push(thread::spawn(move || {
-            let event = Event::with_json_payload(Id::new(), "stream", "e", 0, b"{}");
+            let event = Event::with_json_payload(Id::new().unwrap(), "stream", "e", 0, b"{}");
             let result = s.commit(
-                CommitBatch::new(Id::new(), 0)
+                CommitBatch::new(Id::new().unwrap(), 0)
                     .expect_stream_version("stream", 0)
                     .append_event(event),
             );
@@ -93,9 +93,9 @@ fn concurrent_reads_never_observe_half_commit() {
         for i in 0..100 {
             writer
                 .commit(
-                    CommitBatch::new(Id::new(), i as i64)
+                    CommitBatch::new(Id::new().unwrap(), i as i64)
                         .append_event(Event::with_json_payload(
-                            Id::new(),
+                            Id::new().unwrap(),
                             "x",
                             "e",
                             i as i64,
@@ -144,12 +144,14 @@ fn concurrent_job_claims_do_not_duplicate_lease() {
     );
 
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            Id::new(),
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                Id::new().unwrap(),
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     let mut handles = Vec::new();
@@ -188,9 +190,14 @@ fn partition_ordering_is_stable_under_concurrent_claims() {
             .unwrap(),
     );
 
-    let mut batch = CommitBatch::new(Id::new(), 0);
+    let mut batch = CommitBatch::new(Id::new().unwrap(), 0);
     for partition in ["c", "a", "b"] {
-        batch = batch.enqueue_job(JobSpec::new(Id::new(), "q", partition, b"work".to_vec()));
+        batch = batch.enqueue_job(JobSpec::new(
+            Id::new().unwrap(),
+            "q",
+            partition,
+            b"work".to_vec(),
+        ));
     }
     store.commit(batch).unwrap();
 

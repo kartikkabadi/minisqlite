@@ -82,7 +82,7 @@ fn max_attempts_caps_expired_idempotent_lease() {
     let job_id = Id::from(1u128);
     let job = JobSpec::new(job_id, "q", "p", b"payload".to_vec()).with_max_attempts(1);
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
 
     let now = now_ms();
@@ -99,7 +99,7 @@ fn max_attempts_caps_expired_idempotent_lease() {
     let token = claimed[0].lease_token;
 
     store
-        .commit(CommitBatch::new(Id::new(), now + 1).fail_job(job_id, token, "boom", None))
+        .commit(CommitBatch::new(Id::new().unwrap(), now + 1).fail_job(job_id, token, "boom", None))
         .unwrap();
 
     let later = now + 10_000;
@@ -130,7 +130,7 @@ fn terminal_job_fail_is_idempotent_across_reopen() {
     let job_id = Id::from(2u128);
     let job = JobSpec::new(job_id, "q", "p", b"payload".to_vec()).with_max_attempts(1);
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
 
     let now = now_ms();
@@ -145,7 +145,8 @@ fn terminal_job_fail_is_idempotent_across_reopen() {
         .unwrap();
     let token = claimed[0].lease_token;
 
-    let fail_batch = CommitBatch::new(Id::new(), now + 1).fail_job(job_id, token, "boom", None);
+    let fail_batch =
+        CommitBatch::new(Id::new().unwrap(), now + 1).fail_job(job_id, token, "boom", None);
     store.commit(fail_batch.clone()).unwrap();
     assert_eq!(
         store.job_state(job_id, now + 100).unwrap(),
@@ -174,10 +175,28 @@ fn stream_versions_in_receipt_are_deterministically_sorted() {
         .unwrap();
 
     let now = now_ms();
-    let batch = CommitBatch::new(Id::new(), now)
-        .append_event(Event::with_json_payload(Id::new(), "zebra", "e", now, b"z"))
-        .append_event(Event::with_json_payload(Id::new(), "apple", "e", now, b"a"))
-        .append_event(Event::with_json_payload(Id::new(), "mango", "e", now, b"m"));
+    let batch = CommitBatch::new(Id::new().unwrap(), now)
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "zebra",
+            "e",
+            now,
+            b"z",
+        ))
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "apple",
+            "e",
+            now,
+            b"a",
+        ))
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "mango",
+            "e",
+            now,
+            b"m",
+        ));
     let receipt = store.commit(batch).unwrap();
     let ids: Vec<_> = receipt
         .stream_versions
@@ -204,14 +223,14 @@ fn zero_id_is_rejected() {
     let store = StoreBuilder::new(&path).open().unwrap();
 
     let event = Event::with_json_payload(Id::ZERO, "s", "e", now_ms(), b"p");
-    let batch = CommitBatch::new(Id::new(), now_ms()).append_event(event);
+    let batch = CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(event);
     assert!(
         store.commit(batch).is_err(),
         "zero event id must be rejected"
     );
 
     let batch = CommitBatch::new(Id::ZERO, now_ms()).append_event(Event::with_json_payload(
-        Id::new(),
+        Id::new().unwrap(),
         "s",
         "e",
         now_ms(),
@@ -222,7 +241,7 @@ fn zero_id_is_rejected() {
         "zero transaction id must be rejected"
     );
 
-    let batch = CommitBatch::new(Id::new(), now_ms()).enqueue_job(JobSpec::new(
+    let batch = CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(JobSpec::new(
         Id::ZERO,
         "q",
         "p",
@@ -238,15 +257,9 @@ fn file_header_semantics_are_enforced() {
 
     let store = StoreBuilder::new(&path).open().unwrap();
     store
-        .commit(
-            CommitBatch::new(Id::new(), now_ms()).append_event(Event::with_json_payload(
-                Id::new(),
-                "s",
-                "e",
-                now_ms(),
-                b"p",
-            )),
-        )
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(
+            Event::with_json_payload(Id::new().unwrap(), "s", "e", now_ms(), b"p"),
+        ))
         .unwrap();
     drop(store);
 
@@ -276,7 +289,7 @@ fn stale_worker_and_lease_metadata_cleared_after_terminal_fail() {
     let job_id = Id::from(3u128);
     let job = JobSpec::new(job_id, "q", "p", b"payload".to_vec()).with_max_attempts(2);
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
 
     let now = now_ms();
@@ -296,7 +309,7 @@ fn stale_worker_and_lease_metadata_cleared_after_terminal_fail() {
 
         store
             .commit(
-                CommitBatch::new(Id::new(), now + (attempt - 1) * 2000 + 1000)
+                CommitBatch::new(Id::new().unwrap(), now + (attempt - 1) * 2000 + 1000)
                     .fail_job(job_id, token, "boom", None),
             )
             .unwrap();
@@ -326,9 +339,9 @@ fn backup_and_reopen_restores_state() {
     let dest = dest_dir.path().join("backup_dest.mini");
 
     let store = StoreBuilder::new(&path).open().unwrap();
-    let event = Event::with_json_payload(Id::new(), "s", "e", now_ms(), b"p");
+    let event = Event::with_json_payload(Id::new().unwrap(), "s", "e", now_ms(), b"p");
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).append_event(event))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(event))
         .unwrap();
     store.backup(&dest).unwrap();
 
@@ -343,12 +356,14 @@ fn projection_scan_preserves_binary_keys() {
     let store = StoreBuilder::new(&path).open().unwrap();
 
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).projection_put(
-            "p",
-            1,
-            b"\xff\xfe".to_vec(),
-            b"value".to_vec(),
-        ))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now_ms()).projection_put(
+                "p",
+                1,
+                b"\xff\xfe".to_vec(),
+                b"value".to_vec(),
+            ),
+        )
         .unwrap();
 
     let entries = store.scan_projection_prefix("p", &[]).unwrap();
@@ -369,7 +384,7 @@ fn uncertain_job_can_be_resolved_after_reopen() {
     let job = JobSpec::new(job_id, "q", "p", b"payload".to_vec())
         .with_effect_mode(EffectMode::UncertainOnLeaseExpiry);
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
 
     let now = now_ms();
@@ -393,13 +408,221 @@ fn uncertain_job_can_be_resolved_after_reopen() {
 
     store
         .commit(
-            CommitBatch::new(Id::new(), now + 201).resolve_uncertain_job(job_id, Resolution::Retry),
+            CommitBatch::new(Id::new().unwrap(), now + 201)
+                .resolve_uncertain_job(job_id, Resolution::Retry),
         )
         .unwrap();
     assert_eq!(
         store.job_state(job_id, now + 300).unwrap(),
         minisqlite::JobState::RetryWait
     );
+}
+
+#[test]
+fn final_attempt_expiry_without_fail_job_allows_later_partition_jobs() {
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("final_attempt_no_fail.mini");
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Strict)
+        .open()
+        .unwrap();
+
+    let first = Id::from(10u128);
+    let second = Id::from(11u128);
+    let now = now_ms();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now)
+                .enqueue_job(JobSpec::new(first, "q", "p", b"first".to_vec()).with_max_attempts(1))
+                .enqueue_job(
+                    JobSpec::new(second, "q", "p", b"second".to_vec()).with_max_attempts(1),
+                ),
+        )
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w1".into(),
+            now_ms: now,
+            lease_ms: 10,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, first);
+
+    let later = now + 100;
+    let re_claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w2".into(),
+            now_ms: later,
+            lease_ms: 10,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(re_claimed.len(), 1);
+    assert_eq!(re_claimed[0].job_id, second);
+    assert_eq!(
+        store.job_state(first, later).unwrap(),
+        minisqlite::JobState::Dead
+    );
+
+    // After reopen, the same logic must hold for the second job.
+    drop(store);
+    let store = StoreBuilder::new(&path).open().unwrap();
+    let after_reopen = later + 100;
+    let final_claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w3".into(),
+            now_ms: after_reopen,
+            lease_ms: 10,
+            limit: 1,
+        })
+        .unwrap();
+    assert!(
+        final_claimed.is_empty(),
+        "no jobs should be ready after second expires"
+    );
+    assert_eq!(
+        store.job_state(second, after_reopen).unwrap(),
+        minisqlite::JobState::Dead
+    );
+}
+
+#[test]
+fn uncertain_resolution_retry_at_attempt_ceiling_can_be_reclaimed_once() {
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("uncertain_retry_ceiling.mini");
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Strict)
+        .open()
+        .unwrap();
+
+    let job_id = Id::from(12u128);
+    let now = now_ms();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now).enqueue_job(
+                JobSpec::new(job_id, "q", "p", b"payload".to_vec())
+                    .with_max_attempts(1)
+                    .with_effect_mode(EffectMode::UncertainOnLeaseExpiry),
+            ),
+        )
+        .unwrap();
+
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w1".into(),
+            now_ms: now,
+            lease_ms: 10,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+
+    let uncertain_time = now + 100;
+    assert_eq!(
+        store.job_state(job_id, uncertain_time).unwrap(),
+        minisqlite::JobState::Uncertain
+    );
+
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), uncertain_time + 1)
+                .resolve_uncertain_job(job_id, Resolution::Retry),
+        )
+        .unwrap();
+
+    let retry_ready = uncertain_time + 1001;
+    let reclaimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w2".into(),
+            now_ms: retry_ready,
+            lease_ms: 10,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].job_id, job_id);
+
+    let uncertain_again = retry_ready + 100;
+    assert_eq!(
+        store.job_state(job_id, uncertain_again).unwrap(),
+        minisqlite::JobState::Uncertain
+    );
+
+    // Mark dead to finish the lifecycle cleanly.
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), uncertain_again + 1)
+                .resolve_uncertain_job(job_id, Resolution::MarkDead),
+        )
+        .unwrap();
+    assert_eq!(
+        store.job_state(job_id, uncertain_again + 2).unwrap(),
+        minisqlite::JobState::Dead
+    );
+}
+
+#[cfg(feature = "fuzzing")]
+#[test]
+fn injected_entropy_failure_does_not_panic_or_poison_store() {
+    use minisqlite::id::__set_test_entropy_failure;
+
+    let tmp = common::TempDir::new();
+    let path = tmp.path().join("entropy_failure.mini");
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+
+    let job_id = Id::from(13u128);
+    let now = now_ms();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"payload".to_vec(),
+            )),
+        )
+        .unwrap();
+
+    __set_test_entropy_failure(true);
+    // `Id::new` itself should fail without panicking.
+    assert!(minisqlite::Id::new().is_err());
+    // `claim_jobs` must propagate the failure, not panic or poison the store.
+    let result = store.claim_jobs(ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms: now,
+        lease_ms: 1000,
+        limit: 1,
+    });
+    assert!(
+        result.is_err(),
+        "entropy failure should be reported as an error"
+    );
+
+    // After the outage is cleared, the store must remain usable.
+    __set_test_entropy_failure(false);
+    let claimed = store
+        .claim_jobs(ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: now,
+            lease_ms: 1000,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].job_id, job_id);
 }
 
 #[test]
@@ -412,9 +635,21 @@ fn multi_stream_receipt_is_stable_across_reopen() {
         .unwrap();
 
     let now = now_ms();
-    let batch = CommitBatch::new(Id::new(), now)
-        .append_event(Event::with_json_payload(Id::new(), "b", "e", now, b""))
-        .append_event(Event::with_json_payload(Id::new(), "a", "e", now, b""));
+    let batch = CommitBatch::new(Id::new().unwrap(), now)
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "b",
+            "e",
+            now,
+            b"",
+        ))
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "a",
+            "e",
+            now,
+            b"",
+        ));
     let receipt = store.commit(batch).unwrap();
     let first = receipt.stream_versions.clone();
 

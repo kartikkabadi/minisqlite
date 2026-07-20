@@ -193,6 +193,11 @@ impl Limits {
                 "max_records_per_transaction must be greater than 0".into(),
             ));
         }
+        if self.max_records_per_transaction > u32::MAX as usize {
+            return Err(crate::Error::Validation(
+                "max_records_per_transaction exceeds u32::MAX".into(),
+            ));
+        }
         if self.max_replace_entries == 0 {
             return Err(crate::Error::Validation(
                 "max_replace_entries must be greater than 0".into(),

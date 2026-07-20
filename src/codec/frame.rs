@@ -108,6 +108,13 @@ impl FileHeader {
                 offset: 0,
             });
         }
+        // Reserved bytes must be canonical zero.
+        if bytes[26..60].iter().any(|&b| b != 0) {
+            return Err(Error::Corruption {
+                message: "file header reserved bytes are non-zero".into(),
+                offset: 0,
+            });
+        }
         Ok(Self {
             major,
             minor,
@@ -189,6 +196,13 @@ impl FrameHeader {
         let commit_timestamp_ms = r.read_i64()?;
         let record_count = r.read_u32()?;
         let payload_length = r.read_u32()?;
+        // Reserved bytes must be canonical zero.
+        if bytes[58..60].iter().any(|&b| b != 0) {
+            return Err(Error::Corruption {
+                message: "frame header reserved bytes are non-zero".into(),
+                offset: 0,
+            });
+        }
         Ok(Self {
             version,
             total_frame_length,
@@ -233,6 +247,13 @@ impl FrameTrailer {
         let transaction_sequence = r.read_u64()?;
         let total_frame_length = r.read_u64()?;
         let checksum = r.read_u32()?;
+        // Reserved bytes must be canonical zero.
+        if bytes[28..32].iter().any(|&b| b != 0) {
+            return Err(Error::Corruption {
+                message: "frame trailer reserved bytes are non-zero".into(),
+                offset: 0,
+            });
+        }
         Ok(Self {
             transaction_sequence,
             total_frame_length,

@@ -74,6 +74,21 @@ fn frame_decode_never_panics() {
         let mut header = FileHeader::new(0).encode().to_vec();
         header.extend_from_slice(&raw);
         let _ = Frame::decode(&header);
+
+        // Mutate a valid frame. Any mutation must not panic; it may decode or fail.
+        let valid_header = minisqlite::codec::frame::FrameHeader {
+            version: minisqlite::codec::frame::FRAME_FORMAT_VERSION,
+            total_frame_length: 0,
+            transaction_sequence: seed,
+            transaction_id: minisqlite::Id::from(seed as u128),
+            commit_timestamp_ms: seed as i64,
+            record_count: 0,
+            payload_length: 0,
+        };
+        let valid =
+            minisqlite::codec::frame::Frame::new(valid_header, fuzz_bytes(seed, 256)).encode();
+        let mutated = mutate_bytes(seed + 30_000, &valid);
+        let _ = Frame::decode(&mutated);
     }
 }
 
@@ -83,8 +98,30 @@ fn record_decode_never_panics() {
         let bytes = fuzz_bytes(seed, 2048);
         let _ = decode_records(&bytes);
 
-        // Mutate a valid roundtrip payload.
-        let base = minisqlite::codec::record::encode_records(&[]);
+        // Mutate a valid non-empty record payload.
+        let e = minisqlite::Event::with_json_payload(
+            minisqlite::Id::from(seed as u128),
+            "stream",
+            "e",
+            seed as i64,
+            b"{}",
+        );
+        let base =
+            minisqlite::codec::record::encode_records(&[minisqlite::codec::record::Record::Event(
+                minisqlite::codec::record::EventRecord {
+                    global_sequence: 1,
+                    stream_version: 1,
+                    event_id: e.event_id,
+                    stream_id: e.stream_id,
+                    event_type: e.event_type,
+                    schema_version: e.schema_version,
+                    occurred_at_ms: e.occurred_at_ms,
+                    causation_id: e.causation_id,
+                    correlation_id: e.correlation_id,
+                    payload: e.payload,
+                    metadata: e.metadata,
+                },
+            )]);
         let mutated = mutate_bytes(seed + 20_000, &base);
         let _ = decode_records(&mutated);
     }
@@ -100,7 +137,27 @@ fn recovery_scan_never_panics() {
 
         let mut file = DataFile::open_or_create(&path, Durability::Memory, false).unwrap();
         let _ = file.append_frame(&bytes, bytes.len() as u64);
-        let _ = recovery::scan(&mut file);
+        let _ = recovery::scan(&mut file, |_, _| Ok(()));
+
+        // Also scan a valid frame that has been mutated. Mutations must not panic.
+        let _ = std::fs::remove_file(&path);
+        let valid_header = minisqlite::codec::frame::FrameHeader {
+            version: minisqlite::codec::frame::FRAME_FORMAT_VERSION,
+            total_frame_length: 0,
+            transaction_sequence: 1,
+            transaction_id: minisqlite::Id::from(seed as u128),
+            commit_timestamp_ms: 1,
+            record_count: 0,
+            payload_length: 0,
+        };
+        let valid_frame =
+            minisqlite::codec::frame::Frame::new(valid_header, fuzz_bytes(seed, 256)).encode();
+        let mut file = DataFile::open_or_create(&path, Durability::Memory, false).unwrap();
+        let _ = file.append_frame(&valid_frame, valid_frame.len() as u64);
+        let mutated = mutate_bytes(seed + 40_000, &valid_frame);
+        let _ = file.append_frame(&mutated, mutated.len() as u64);
+        let _ = recovery::scan(&mut file, |_, _| Ok(()));
+
         let _ = std::fs::remove_file(&path);
     }
 }

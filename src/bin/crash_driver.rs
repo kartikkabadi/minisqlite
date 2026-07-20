@@ -11,22 +11,22 @@ fn now_ms() -> i64 {
 }
 
 fn first_batch() -> CommitBatch {
-    CommitBatch::new(Id::new(), now_ms())
+    CommitBatch::new(Id::new().unwrap(), now_ms())
         .append_event(Event::with_json_payload(
-            Id::new(),
+            Id::new().unwrap(),
             "stream",
             "init",
             now_ms(),
             b"{}",
         ))
         .projection_put("state", 1, b"key".to_vec(), b"first".to_vec())
-        .enqueue_job(JobSpec::new(Id::new(), "q", "p", b"work".to_vec()))
+        .enqueue_job(JobSpec::new(Id::new().unwrap(), "q", "p", b"work".to_vec()))
 }
 
 fn second_batch() -> CommitBatch {
-    CommitBatch::new(Id::new(), now_ms())
+    CommitBatch::new(Id::new().unwrap(), now_ms())
         .append_event(Event::with_json_payload(
-            Id::new(),
+            Id::new().unwrap(),
             "stream",
             "second",
             now_ms(),
@@ -34,7 +34,7 @@ fn second_batch() -> CommitBatch {
         ))
         .projection_put("state", 2, b"key".to_vec(), b"second".to_vec())
         .enqueue_job(
-            JobSpec::new(Id::new(), "q", "p", b"more".to_vec())
+            JobSpec::new(Id::new().unwrap(), "q", "p", b"more".to_vec())
                 .with_effect_mode(EffectMode::UncertainOnLeaseExpiry),
         )
 }

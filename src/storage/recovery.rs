@@ -6,37 +6,54 @@ use crate::Error;
 
 #[derive(Debug)]
 pub struct ScanResult {
-    pub frames: Vec<Frame>,
     /// Whether the file ended with an incomplete final frame that was safely ignored.
     pub tail_truncated: bool,
     /// The file offset after the last valid frame.
     pub last_valid_offset: u64,
 }
 
-/// Scan the primary data file sequentially, validating every frame boundary and checksum.
+/// Scan the primary data file sequentially, replaying each valid frame through `on_frame`.
 ///
-/// Mid-file corruption causes a hard failure. An incomplete tail frame is reported so the
-/// caller can truncate to `last_valid_offset`.
-pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
+/// Mid-file corruption causes a hard failure. An incomplete or full-length but corrupt
+/// final frame is reported as a torn tail so the caller can truncate to `last_valid_offset`.
+/// Frames are not accumulated; the callback handles each frame as it is validated.
+pub fn scan(
+    data_file: &mut DataFile,
+    mut on_frame: impl FnMut(Frame, u64) -> Result<(), Error>,
+) -> Result<ScanResult, Error> {
     let file_len = data_file.file_len();
     let mut offset = FILE_HEADER_SIZE as u64;
     let mut last_valid = offset;
-    let mut frames = Vec::new();
     let mut tail_truncated = false;
 
     while offset < file_len {
         // A torn tail must be shorter than a complete frame header. Once the file
         // metadata reports enough bytes, any read failure is an I/O error, not a
         // recoverable tail.
-        if file_len - offset < FRAME_HEADER_SIZE as u64 {
+        let remaining = file_len
+            .checked_sub(offset)
+            .ok_or_else(|| Error::Corruption {
+                message: "file offset exceeds file length".into(),
+                offset,
+            })?;
+        if remaining < FRAME_HEADER_SIZE as u64 {
             tail_truncated = true;
             break;
         }
 
         let header_bytes = data_file.read_at(offset, FRAME_HEADER_SIZE)?;
 
-        let header = FrameHeader::decode(header_bytes[..FRAME_HEADER_SIZE].try_into().unwrap())
-            .map_err(|e| with_offset(e, offset))?;
+        // A full header that fails to decode at the very end of the file is a torn
+        // tail header rather than mid-file corruption.
+        let header =
+            match FrameHeader::decode(header_bytes[..FRAME_HEADER_SIZE].try_into().unwrap()) {
+                Ok(h) => h,
+                Err(_e) if remaining == FRAME_HEADER_SIZE as u64 => {
+                    tail_truncated = true;
+                    break;
+                }
+                Err(e) => return Err(with_offset(e, offset)),
+            };
 
         if header.total_frame_length < (FRAME_HEADER_SIZE + FRAME_TRAILER_SIZE) as u64 {
             return Err(Error::Corruption {
@@ -45,14 +62,20 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
             });
         }
 
-        if header.total_frame_length as usize > MAX_FRAME_SIZE {
+        if header.total_frame_length > MAX_FRAME_SIZE as u64 {
             return Err(Error::Corruption {
                 message: "frame exceeds maximum allowed size".into(),
                 offset,
             });
         }
 
-        if offset + header.total_frame_length > file_len {
+        let frame_end = offset
+            .checked_add(header.total_frame_length)
+            .ok_or_else(|| Error::Corruption {
+                message: "frame offset overflow".into(),
+                offset,
+            })?;
+        if frame_end > file_len {
             // Declared frame extends past EOF: incomplete tail.
             tail_truncated = true;
             break;
@@ -60,17 +83,25 @@ pub fn scan(data_file: &mut DataFile) -> Result<ScanResult, Error> {
 
         // Read the complete frame (header + payload + trailer) and decode it.
         let frame_bytes = data_file.read_at(offset, header.total_frame_length as usize)?;
-        let frame = match Frame::decode(&frame_bytes) {
-            Ok(f) => f,
+        let is_final = frame_end == file_len;
+        match Frame::decode(&frame_bytes) {
+            Ok(frame) => {
+                on_frame(frame, offset)?;
+                offset = frame_end;
+                last_valid = offset;
+            }
+            // A full-length final frame whose checksum or trailer is corrupt is treated as a
+            // torn tail: the process probably crashed after the header was written but before
+            // the body/fsync completed.
+            Err(_) if is_final => {
+                tail_truncated = true;
+                break;
+            }
             Err(e) => return Err(with_offset(e, offset)),
-        };
-        frames.push(frame);
-        offset += header.total_frame_length;
-        last_valid = offset;
+        }
     }
 
     Ok(ScanResult {
-        frames,
         tail_truncated,
         last_valid_offset: last_valid,
     })
@@ -114,7 +145,7 @@ mod tests {
                 f.write_all(&suffix).unwrap();
             }
             if let Ok(mut file) = DataFile::open_or_create(&tmp, Durability::Memory, false) {
-                let _ = scan(&mut file);
+                let _ = scan(&mut file, |_, _| Ok(()));
             }
             let _ = std::fs::remove_file(&tmp);
         }
@@ -125,8 +156,8 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        let result = scan(&mut file).unwrap();
-        assert!(result.frames.is_empty());
+        let result = scan(&mut file, |_, _| Ok(())).unwrap();
+        assert_eq!(result.last_valid_offset, FILE_HEADER_SIZE as u64);
         assert!(!result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
@@ -135,7 +166,7 @@ mod tests {
         Record::Event(EventRecord {
             global_sequence: sequence,
             stream_version,
-            event_id: Id::new(),
+            event_id: Id::new().unwrap(),
             stream_id: "stream".into(),
             event_type: "e".into(),
             schema_version: 1,
@@ -173,10 +204,15 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_multi_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
-        append_frame(&mut file, 2, Id::new());
-        let result = scan(&mut file).unwrap();
-        assert_eq!(result.frames.len(), 2);
+        append_frame(&mut file, 1, Id::new().unwrap());
+        append_frame(&mut file, 2, Id::new().unwrap());
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 2);
         assert!(!result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
@@ -186,12 +222,17 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_hdr_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
+        append_frame(&mut file, 1, Id::new().unwrap());
         // Append a few bytes of a second header.
-        let partial = &make_frame(2, Id::new()).encode()[..20];
+        let partial = &make_frame(2, Id::new().unwrap()).encode()[..20];
         file.append_frame(partial, 0).unwrap();
-        let result = scan(&mut file).unwrap();
-        assert_eq!(result.frames.len(), 1);
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
         assert!(result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
@@ -201,12 +242,17 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_pay_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
-        let frame = make_frame(2, Id::new()).encode();
+        append_frame(&mut file, 1, Id::new().unwrap());
+        let frame = make_frame(2, Id::new().unwrap()).encode();
         let partial = &frame[..FRAME_HEADER_SIZE + 5];
         file.append_frame(partial, 0).unwrap();
-        let result = scan(&mut file).unwrap();
-        assert_eq!(result.frames.len(), 1);
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
         assert!(result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
@@ -216,13 +262,18 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_trl_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
-        let frame = make_frame(2, Id::new()).encode();
-        let payload_len = make_frame(2, Id::new()).header.payload_length as usize;
+        append_frame(&mut file, 1, Id::new().unwrap());
+        let frame = make_frame(2, Id::new().unwrap()).encode();
+        let payload_len = make_frame(2, Id::new().unwrap()).header.payload_length as usize;
         let partial = &frame[..FRAME_HEADER_SIZE + payload_len + 5];
         file.append_frame(partial, 0).unwrap();
-        let result = scan(&mut file).unwrap();
-        assert_eq!(result.frames.len(), 1);
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
         assert!(result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
@@ -232,22 +283,59 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_mid_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
-        append_frame(&mut file, 2, Id::new());
+        append_frame(&mut file, 1, Id::new().unwrap());
+        let frame2 = make_frame(2, Id::new().unwrap());
+        let frame2_bytes = frame2.encode();
+        file.append_frame(&frame2_bytes, frame2.header.payload_length as u64)
+            .unwrap();
+        append_frame(&mut file, 3, Id::new().unwrap());
 
-        // Corrupt one byte in the second frame's trailer.
+        // Corrupt one byte in the second frame's trailer. Because a third frame follows,
+        // this is mid-file corruption and must fail hard.
         let frame2_offset =
-            FILE_HEADER_SIZE as u64 + make_frame(1, Id::new()).header.total_frame_length;
+            FILE_HEADER_SIZE as u64 + make_frame(1, Id::new().unwrap()).header.total_frame_length;
         let mut bytes = file.read_all().unwrap();
         let corrupt_offset = (frame2_offset as usize)
             + FRAME_HEADER_SIZE
-            + make_frame(2, Id::new()).header.payload_length as usize
+            + frame2.header.payload_length as usize
             + 10;
         bytes[corrupt_offset] = bytes[corrupt_offset].wrapping_add(1);
         std::fs::write(&tmp, &bytes).unwrap();
 
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        assert!(scan(&mut file).is_err());
+        assert!(scan(&mut file, |_, _| Ok(())).is_err());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn corrupt_final_frame_checksum_is_torn_tail() {
+        let tmp = std::env::temp_dir().join(format!("minisqlite_rec_final_{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
+        append_frame(&mut file, 1, Id::new().unwrap());
+        append_frame(&mut file, 2, Id::new().unwrap());
+
+        // Corrupt one byte in the final frame's trailer. The frame has the declared
+        // length and is the last one in the file, so it is treated as a torn tail.
+        let frame2_offset =
+            FILE_HEADER_SIZE as u64 + make_frame(1, Id::new().unwrap()).header.total_frame_length;
+        let mut bytes = file.read_all().unwrap();
+        let corrupt_offset = (frame2_offset as usize)
+            + FRAME_HEADER_SIZE
+            + make_frame(2, Id::new().unwrap()).header.payload_length as usize
+            + 10;
+        bytes[corrupt_offset] = bytes[corrupt_offset].wrapping_add(1);
+        std::fs::write(&tmp, &bytes).unwrap();
+
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
 
@@ -256,8 +344,8 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_seq_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        append_frame(&mut file, 1, Id::new());
-        append_frame(&mut file, 1, Id::new());
+        append_frame(&mut file, 1, Id::new().unwrap());
+        append_frame(&mut file, 1, Id::new().unwrap());
         // Replay (not just scan) enforces monotonic transaction sequence.
         assert!(crate::StoreBuilder::new(&tmp).open().is_err());
         let _ = std::fs::remove_file(&tmp);
@@ -274,7 +362,7 @@ mod tests {
             version: 1,
             total_frame_length: 0,
             transaction_sequence: 1,
-            transaction_id: Id::new(),
+            transaction_id: Id::new().unwrap(),
             commit_timestamp_ms: 1,
             record_count: 1,
             payload_length: payload.len() as u32,
@@ -289,7 +377,7 @@ mod tests {
             version: 1,
             total_frame_length: 0,
             transaction_sequence: 2,
-            transaction_id: Id::new(),
+            transaction_id: Id::new().unwrap(),
             commit_timestamp_ms: 2,
             record_count: 1,
             payload_length: payload2.len() as u32,
@@ -323,7 +411,7 @@ mod tests {
             version: 1,
             total_frame_length: (MAX_FRAME_SIZE + 1) as u64,
             transaction_sequence: 1,
-            transaction_id: Id::new(),
+            transaction_id: Id::new().unwrap(),
             commit_timestamp_ms: 1,
             record_count: 1,
             payload_length: payload.len() as u32,
@@ -352,7 +440,30 @@ mod tests {
         drop(file);
 
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        assert!(scan(&mut file).is_err());
+        assert!(scan(&mut file, |_, _| Ok(())).is_err());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn streaming_recovery_processes_many_frames_without_accumulating() {
+        let tmp =
+            std::env::temp_dir().join(format!("minisqlite_rec_stream_{}", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
+        for i in 1..=100 {
+            append_frame(&mut file, i, Id::new().unwrap());
+        }
+
+        // The scan callback receives frames one at a time. `ScanResult` does not carry a
+        // `frames` vector, so recovery memory use is bounded by one frame.
+        let mut count = 0;
+        let result = scan(&mut file, |_, _| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 100);
+        assert!(!result.tail_truncated);
         let _ = std::fs::remove_file(&tmp);
     }
 }

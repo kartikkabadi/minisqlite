@@ -536,13 +536,13 @@ mod tests {
             Record::Event(EventRecord {
                 global_sequence: 1,
                 stream_version: 1,
-                event_id: Id::new(),
+                event_id: Id::new().unwrap(),
                 stream_id: "thread:abc".into(),
                 event_type: "thread.created".into(),
                 schema_version: 1,
                 occurred_at_ms: 123456789,
                 causation_id: None,
-                correlation_id: Some(Id::new()),
+                correlation_id: Some(Id::new().unwrap()),
                 payload: vec![1, 2, 3],
                 metadata: vec![],
             }),
@@ -553,7 +553,7 @@ mod tests {
                 value: b"{}".to_vec(),
             },
             Record::JobEnqueue {
-                job_id: Id::new(),
+                job_id: Id::new().unwrap(),
                 queue: "provider-command".into(),
                 partition: "thread:abc".into(),
                 payload: b"cmd".to_vec(),
@@ -574,7 +574,7 @@ mod tests {
         let mut bytes = Record::Event(EventRecord {
             global_sequence: 1,
             stream_version: 1,
-            event_id: Id::new(),
+            event_id: Id::new().unwrap(),
             stream_id: "thread:abc".into(),
             event_type: "thread.created".into(),
             schema_version: 1,
@@ -594,7 +594,7 @@ mod tests {
         let mut bytes = Record::Event(EventRecord {
             global_sequence: 1,
             stream_version: 1,
-            event_id: Id::new(),
+            event_id: Id::new().unwrap(),
             stream_id: "thread:abc".into(),
             event_type: "thread.created".into(),
             schema_version: 1,
@@ -614,7 +614,7 @@ mod tests {
         let mut bytes = Record::Event(EventRecord {
             global_sequence: 1,
             stream_version: 1,
-            event_id: Id::new(),
+            event_id: Id::new().unwrap(),
             stream_id: "thread:abc".into(),
             event_type: "thread.created".into(),
             schema_version: 1,

@@ -65,13 +65,18 @@ fn claimed_jobs_can_be_acknowledged() {
         let mut max_not_before = 0i64;
         for job in &jobs {
             max_not_before = max_not_before.max(job.not_before_ms);
-            let spec = JobSpec::new(Id::new(), &job.queue, &job.partition, job.payload.clone())
-                .with_not_before_ms(job.not_before_ms)
-                .with_max_attempts(job.max_attempts)
-                .with_effect_mode(job.effect_mode);
+            let spec = JobSpec::new(
+                Id::new().unwrap(),
+                &job.queue,
+                &job.partition,
+                job.payload.clone(),
+            )
+            .with_not_before_ms(job.not_before_ms)
+            .with_max_attempts(job.max_attempts)
+            .with_effect_mode(job.effect_mode);
             ids.push(spec.job_id);
             store
-                .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(spec))
+                .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(spec))
                 .unwrap();
         }
 
@@ -98,7 +103,7 @@ fn claimed_jobs_can_be_acknowledged() {
 
         for (&job_id, &(lease_token, _)) in &claimed {
             store
-                .commit(CommitBatch::new(Id::new(), t).acknowledge_job(
+                .commit(CommitBatch::new(Id::new().unwrap(), t).acknowledge_job(
                     job_id,
                     lease_token,
                     Some(b"ok".to_vec()),
@@ -117,7 +122,11 @@ fn claimed_jobs_can_be_acknowledged() {
 
         if let Some((&job_id, &(lease_token, _))) = claimed.iter().next() {
             assert!(store
-                .commit(CommitBatch::new(Id::new(), t).acknowledge_job(job_id, lease_token, None),)
+                .commit(CommitBatch::new(Id::new().unwrap(), t).acknowledge_job(
+                    job_id,
+                    lease_token,
+                    None
+                ),)
                 .is_err());
         }
     }

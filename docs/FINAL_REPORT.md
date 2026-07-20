@@ -240,6 +240,37 @@ Per PR comment ID 4732599741, the 13 merge-blocking findings were addressed and 
   * `tests/cli.rs` validates `export --format jsonl` and projection scan JSON output with hex payloads.
 * `Cargo.lock` contains no `libc`, `wasi`, or `zerocopy`.
 
+## Review #4 final hardening pass
+
+Per the Review #4 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. `max_attempts` no longer deadlocks a partition after a worker crash on the final attempt; expired idempotent leases at the attempt ceiling become `Dead` and release the partition.
+2. `Resolution::Retry` at the attempt ceiling decrements `attempt`, introduces a `retry_after_ms` cooldown, and allows exactly one additional lease cycle.
+3. The operational CLI commands now use `open_existing` semantics and fail with a typed `Validation` error when the source database does not exist.
+4. `examples/synara_control_plane.rs` no longer deletes any default or caller-supplied path; the example uses a process-specific temp file and leaves it for inspection.
+5. `Store::backup` creates the sibling temporary file with `create_new` and `0o600` permissions before writing bytes, so backup confidentiality does not depend on a permission race.
+6. `Id::new()` returns a typed `Io`/`Validation` error on entropy failure; callers in `Store` propagate the error without panicking or poisoning the `RwLock`.
+7. Symlink rejection is atomic: `open_or_create` opens the primary path with `O_NOFOLLOW` semantics and rejects any symlink component in the canonical parent path.
+8. Recovery treats a full-length final frame whose checksum/trailer fails as a torn tail, truncating to the last valid offset; mid-file corruption still fails closed.
+9. New regression tests cover final-attempt lease expiry without `fail_job` and a later job in the same partition before and after reopen.
+10. New regression tests cover uncertain `Resolution::Retry` at the attempt ceiling and full-length final-frame checksum corruption.
+11. `tests/property.rs` was replaced with a full job-lifecycle reference model (`enqueue → claim → ack/fail/cancel/resolve → reopen`) that compares `Store` state after every operation.
+12. Recovery now streams frames through `recovery::scan` with a callback; `ScanResult` does not accumulate decoded `Frame` objects, giving bounded memory use.
+13. Projection names and all string-like identifiers are validated against `Limits::max_string_length` before serialization.
+14. Durable sequence arithmetic (global transaction sequence, stream versions, job attempt counters) uses `checked_add`/`checked_sub` and returns `Validation` errors on overflow.
+15. File header, frame header, and frame trailer reserved bytes must be zero; noncanonical bytes are rejected as corruption.
+
+### Adversarial regression tests added
+
+* `final_attempt_expiry_without_fail_job_allows_later_partition_jobs`
+* `uncertain_resolution_retry_at_attempt_ceiling_can_be_reclaimed_once`
+* `cli_rejects_missing_source`
+* `backup_file_is_owner_only`
+* `injected_entropy_failure_does_not_panic_or_poison_store`
+* `streaming_recovery_processes_many_frames_without_accumulating`
+* `corrupt_final_frame_checksum_is_torn_tail`
+* `mismatched_frame_record_count_is_rejected`
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All P1/P2 findings are addressed, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #4 merge-blocking findings are addressed, the property model matches store behavior across reopen, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.

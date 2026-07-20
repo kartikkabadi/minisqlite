@@ -21,14 +21,17 @@ impl Id {
     pub const ZERO: Self = Self([0; 16]);
 
     /// Generate a new 128-bit identifier from the OS CSPRNG.
-    pub fn new() -> Self {
+    ///
+    /// Entropy failures are returned as [`Error::Io`] instead of panicking, so callers
+    /// decide how to surface the outage.
+    pub fn new() -> Result<Self, crate::Error> {
         let mut bytes = [0u8; 16];
-        secure_random(&mut bytes).expect("failed to read random bytes for Id");
+        secure_random(&mut bytes).map_err(|e| crate::Error::Io(e.to_string()))?;
         if bytes == [0; 16] {
             // The zero ID is reserved; this is astronomically unlikely.
             bytes[15] = 1;
         }
-        Self(bytes)
+        Ok(Self(bytes))
     }
 
     /// Construct an ID from a fixed 16-byte slice.
@@ -67,11 +70,8 @@ impl Id {
     }
 }
 
-impl Default for Id {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// `Id` intentionally does not implement `Default`: a random identifier requires a
+// fallible OS call, and a zero default would be a dangerous silent error.
 
 impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,7 +110,26 @@ impl fmt::Display for InvalidId {
 
 impl std::error::Error for InvalidId {}
 
+#[cfg(any(test, feature = "fuzzing"))]
+thread_local! {
+    static TEST_ENTROPY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test-only hook to simulate a CSPRNG failure in the current thread.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub fn __set_test_entropy_failure(fail: bool) {
+    TEST_ENTROPY_FAILURE.with(|f| f.set(fail));
+}
+
 fn secure_random(buf: &mut [u8]) -> io::Result<()> {
+    // Test-only hook: when set, simulate a CSPRNG failure to verify that callers
+    // return an error instead of panicking or poisoning locks.
+    #[cfg(any(test, feature = "fuzzing"))]
+    if TEST_ENTROPY_FAILURE.with(|f| f.get()) {
+        return Err(io::Error::other("simulated entropy failure"));
+    }
+
     #[cfg(unix)]
     {
         static URANDOM: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
@@ -184,7 +203,7 @@ mod tests {
 
     #[test]
     fn roundtrip_hex() {
-        let id = Id::new();
+        let id = Id::new().unwrap();
         let s = id.to_hex();
         assert_eq!(s.len(), 32);
         let parsed = Id::from_hex(&s).unwrap();
@@ -202,7 +221,7 @@ mod tests {
     fn new_is_non_zero() {
         let mut saw_non_zero = false;
         for _ in 0..32 {
-            if Id::new() != Id::ZERO {
+            if Id::new().unwrap() != Id::ZERO {
                 saw_non_zero = true;
             }
         }

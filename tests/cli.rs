@@ -35,10 +35,11 @@ fn cli_verify_and_doctor_succeed() {
         .durability(Durability::Memory)
         .open()
         .unwrap();
-    let event = Event::with_json_payload(Id::new(), "thread:abc", "thread.created", 0, b"{}");
+    let event =
+        Event::with_json_payload(Id::new().unwrap(), "thread:abc", "thread.created", 0, b"{}");
     store
         .commit(
-            CommitBatch::new(Id::new(), 0)
+            CommitBatch::new(Id::new().unwrap(), 0)
                 .append_event(event)
                 .projection_put("threads", 1, b"thread-1".to_vec(), b"hello".to_vec()),
         )
@@ -114,6 +115,40 @@ fn cli_verify_and_doctor_succeed() {
 }
 
 #[test]
+fn cli_rejects_missing_source() {
+    let missing = "/tmp/minisqlite_does_not_exist_7a3f9e2c.mini";
+    let dest = "/tmp/minisqlite_should_not_be_created_9e8d7c6b.mini";
+    // Remove any leftover files from a previous run.
+    let _ = std::fs::remove_file(missing);
+    let _ = std::fs::remove_file(dest);
+
+    for args in [
+        vec![missing, "verify"],
+        vec![missing, "doctor"],
+        vec![missing, "stats"],
+        vec![missing, "events", "tail", "1"],
+        vec![missing, "events", "stream", "s", "1"],
+        vec![missing, "projections", "list"],
+        vec![missing, "jobs", "list"],
+        vec![missing, "export"],
+        vec![missing, "backup", dest],
+    ] {
+        let output = Command::new(bin_path())
+            .args(&args)
+            .output()
+            .expect("failed to spawn minisqlite CLI");
+        assert!(
+            !output.status.success(),
+            "command {:?} should fail for missing source",
+            args
+        );
+    }
+
+    // None of the missing-source commands should have created the destination.
+    assert!(!std::path::Path::new(dest).exists());
+}
+
+#[test]
 fn cli_jobs_round_trip() {
     let tmp = common::TempDir::new();
     let path = tmp.path().join("jobs_cli.mini");
@@ -122,9 +157,9 @@ fn cli_jobs_round_trip() {
         .durability(Durability::Memory)
         .open()
         .unwrap();
-    let job = JobSpec::new(Id::new(), "provider", "p1", b"work".to_vec());
+    let job = JobSpec::new(Id::new().unwrap(), "provider", "p1", b"work".to_vec());
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
     drop(store);
 

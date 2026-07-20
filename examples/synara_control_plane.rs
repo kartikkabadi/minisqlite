@@ -13,25 +13,22 @@ fn now_ms() -> i64 {
 }
 
 fn main() {
-    let path: std::path::PathBuf = std::env::args()
-        .nth(1)
-        .map(Into::into)
-        .unwrap_or_else(|| std::env::temp_dir().join("synara_control_plane.mini"));
-    let delete_after = std::env::args().len() < 2;
-    if delete_after {
-        let _ = std::fs::remove_file(&path);
-    }
+    let path: std::path::PathBuf = std::env::args().nth(1).map(Into::into).unwrap_or_else(|| {
+        // Use a process-specific temporary file so the default example does not
+        // delete or collide with a shared, predictable path.
+        std::env::temp_dir().join(format!("synara_control_plane_{}.mini", std::process::id()))
+    });
     let store = StoreBuilder::new(&path)
         .durability(Durability::Strict)
         .open()
         .unwrap();
 
-    let thread_id = Id::new();
+    let thread_id = Id::new().unwrap();
     let stream = format!("thread:{thread_id}");
 
     // Flow A: Create a thread.
     let created = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         &stream,
         "thread.created",
         1,
@@ -43,7 +40,7 @@ fn main() {
     );
     let receipt = store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .append_event(created.clone())
                 .projection_put(
                     "threads",
@@ -62,7 +59,7 @@ fn main() {
 
     // Flow B: Request a provider turn.
     let requested = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         &stream,
         "thread.turn-requested",
         1,
@@ -73,7 +70,7 @@ fn main() {
         b"",
     );
     let job = JobSpec::new(
-        Id::new(),
+        Id::new().unwrap(),
         "provider",
         stream.clone(),
         thread_id.to_string().into_bytes(),
@@ -81,7 +78,7 @@ fn main() {
     let job_id = job.job_id;
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .expect_stream_version(&stream, 1)
                 .append_event(requested)
                 .projection_put(
@@ -115,7 +112,7 @@ fn main() {
     println!("Flow C: claimed job {job_id} with token {token}");
 
     let completed = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         &stream,
         "thread.turn-completed",
         1,
@@ -127,7 +124,7 @@ fn main() {
     );
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .expect_stream_version(&stream, 2)
                 .append_event(completed)
                 .projection_put(
@@ -151,7 +148,7 @@ fn main() {
 
     // Flow D part 1: Idempotent effect can be reclaimed after lease expiry.
     let idempotent_job = JobSpec::new(
-        Id::new(),
+        Id::new().unwrap(),
         "provider",
         "partition-idempotent",
         b"idempotent-call".to_vec(),
@@ -160,7 +157,7 @@ fn main() {
     .with_idempotency_key("idempotent-key-1");
     let idempotent_id = idempotent_job.job_id;
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(idempotent_job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(idempotent_job))
         .unwrap();
 
     let mut idem_claim = ClaimRequest {
@@ -190,12 +187,17 @@ fn main() {
     println!("Flow D: idempotent job reclaimed and acknowledged after expiry");
 
     // Flow D part 2: Non-idempotent effect becomes uncertain after expiry.
-    let uncertain_job = JobSpec::new(Id::new(), "provider", "partition-2", b"call-api".to_vec())
-        .with_effect_mode(EffectMode::UncertainOnLeaseExpiry)
-        .with_max_attempts(1);
+    let uncertain_job = JobSpec::new(
+        Id::new().unwrap(),
+        "provider",
+        "partition-2",
+        b"call-api".to_vec(),
+    )
+    .with_effect_mode(EffectMode::UncertainOnLeaseExpiry)
+    .with_max_attempts(1);
     let uncertain_id = uncertain_job.job_id;
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(uncertain_job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(uncertain_job))
         .unwrap();
 
     let mut claim2 = ClaimRequest {
@@ -232,10 +234,10 @@ fn main() {
     println!("Flow D: uncertain job resolved");
 
     // Flow E: Durable loop scheduling with a future job.
-    let loop_id = Id::new();
+    let loop_id = Id::new().unwrap();
     let loop_stream = format!("loop:{loop_id}");
     let iteration = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         &loop_stream,
         "loop.iteration",
         1,
@@ -245,12 +247,17 @@ fn main() {
         b"1",
         b"",
     );
-    let next_job = JobSpec::new(Id::new(), "loop", loop_id.to_string(), b"next".to_vec())
-        .with_not_before_ms(now_ms() + 10_000);
+    let next_job = JobSpec::new(
+        Id::new().unwrap(),
+        "loop",
+        loop_id.to_string(),
+        b"next".to_vec(),
+    )
+    .with_not_before_ms(now_ms() + 10_000);
     let next_id = next_job.job_id;
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .append_event(iteration)
                 .projection_put(
                     "loops",
@@ -310,7 +317,10 @@ fn main() {
         rebuilt.push(ProjectionEntry::new(key.to_vec(), status));
     }
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).projection_replace("threads", 4, rebuilt))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now_ms())
+                .projection_replace("threads", 4, rebuilt),
+        )
         .unwrap();
     let threads = store.scan_projection_prefix("threads", b"").unwrap();
     assert!(!threads.is_empty());
@@ -322,7 +332,4 @@ fn main() {
 
     println!("All Synara-shaped flows completed.");
     drop(store);
-    if delete_after {
-        let _ = std::fs::remove_file(&path);
-    }
 }

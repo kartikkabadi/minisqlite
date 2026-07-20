@@ -410,7 +410,11 @@ fn run() -> Result<(), Error> {
 }
 
 fn open_store(path: &str, durability: Durability) -> Result<minisqlite::Store, Error> {
-    StoreBuilder::new(path).durability(durability).open()
+    // Operational commands must fail on a missing source rather than silently
+    // creating an empty database.
+    StoreBuilder::new(path)
+        .durability(durability)
+        .open_existing()
 }
 
 fn parse_durability(s: &str) -> Result<Durability, Error> {

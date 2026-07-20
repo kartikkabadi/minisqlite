@@ -22,10 +22,15 @@ fn main() {
 
             let start = Instant::now();
             for i in 0..n {
-                let event =
-                    Event::with_json_payload(Id::new(), "bench", "event", i as i64, br#"{"i":0}"#);
+                let event = Event::with_json_payload(
+                    Id::new().unwrap(),
+                    "bench",
+                    "event",
+                    i as i64,
+                    br#"{"i":0}"#,
+                );
                 store
-                    .commit(CommitBatch::new(Id::new(), i as i64).append_event(event))
+                    .commit(CommitBatch::new(Id::new().unwrap(), i as i64).append_event(event))
                     .unwrap();
             }
             let elapsed = start.elapsed();
@@ -66,7 +71,7 @@ fn main() {
     }
     let start = Instant::now();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_replace("kv", 1, entries))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_replace("kv", 1, entries))
         .unwrap();
     println!(
         "replaced 10,000 projection entries in {:?}",
@@ -93,13 +98,13 @@ fn main() {
     let start = Instant::now();
     for i in 0..10_000u32 {
         let job = JobSpec::new(
-            Id::new(),
+            Id::new().unwrap(),
             "provider",
             "partition",
             format!("work-{i}").into_bytes(),
         );
         store
-            .commit(CommitBatch::new(Id::new(), i as i64).enqueue_job(job))
+            .commit(CommitBatch::new(Id::new().unwrap(), i as i64).enqueue_job(job))
             .unwrap();
     }
     println!("enqueued 10,000 jobs in {:?}", start.elapsed());

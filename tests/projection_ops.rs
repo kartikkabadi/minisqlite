@@ -14,7 +14,7 @@ fn store() -> (common::TempDir, Store) {
 fn put_and_get_round_trip() {
     let (_tmp, store) = store();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"hello".to_vec(),
@@ -32,14 +32,14 @@ fn delete_removes_key() {
     let (_tmp, store) = store();
     store
         .commit(
-            CommitBatch::new(Id::new(), 0)
+            CommitBatch::new(Id::new().unwrap(), 0)
                 .projection_put("kv", 1, b"a".to_vec(), b"1".to_vec())
                 .projection_put("kv", 2, b"b".to_vec(), b"2".to_vec()),
         )
         .unwrap();
 
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_delete("kv", 3, b"a".to_vec()))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_delete("kv", 3, b"a".to_vec()))
         .unwrap();
 
     assert!(store.get_projection("kv", b"a").unwrap().is_none());
@@ -52,14 +52,14 @@ fn clear_removes_all_keys() {
     let (_tmp, store) = store();
     store
         .commit(
-            CommitBatch::new(Id::new(), 0)
+            CommitBatch::new(Id::new().unwrap(), 0)
                 .projection_put("kv", 1, b"a".to_vec(), b"1".to_vec())
                 .projection_put("kv", 2, b"b".to_vec(), b"2".to_vec()),
         )
         .unwrap();
 
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_clear("kv", 3))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_clear("kv", 3))
         .unwrap();
 
     let all = store.scan_projection_prefix("kv", b"").unwrap();
@@ -71,7 +71,7 @@ fn clear_removes_all_keys() {
 fn replace_atomically_swaps_contents() {
     let (_tmp, store) = store();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"old".to_vec(),
@@ -84,7 +84,7 @@ fn replace_atomically_swaps_contents() {
         ProjectionEntry::new(b"b".to_vec(), b"2".to_vec()),
     ];
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_replace("kv", 2, entries))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_replace("kv", 2, entries))
         .unwrap();
 
     assert!(store.get_projection("kv", b"old").unwrap().is_none());
@@ -97,7 +97,7 @@ fn replace_atomically_swaps_contents() {
 fn version_mismatch_fails() {
     let (_tmp, store) = store();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"k".to_vec(),
@@ -105,7 +105,7 @@ fn version_mismatch_fails() {
         ))
         .unwrap();
 
-    let result = store.commit(CommitBatch::new(Id::new(), 0).projection_put(
+    let result = store.commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
         "kv",
         3,
         b"k".to_vec(),
@@ -113,7 +113,7 @@ fn version_mismatch_fails() {
     ));
     assert!(result.is_err(), "skipping a version must fail");
 
-    let result = store.commit(CommitBatch::new(Id::new(), 0).projection_put(
+    let result = store.commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
         "kv",
         1,
         b"k".to_vec(),
@@ -129,7 +129,7 @@ fn version_mismatch_fails() {
 fn no_op_same_version_is_allowed() {
     let (_tmp, store) = store();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"k".to_vec(),
@@ -139,7 +139,7 @@ fn no_op_same_version_is_allowed() {
 
     // Re-putting the same key/value with the same version is a no-op.
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"k".to_vec(),
@@ -152,7 +152,7 @@ fn no_op_same_version_is_allowed() {
 #[test]
 fn prefix_scan_is_ordered() {
     let (_tmp, store) = store();
-    let mut batch = CommitBatch::new(Id::new(), 0);
+    let mut batch = CommitBatch::new(Id::new().unwrap(), 0);
     for (i, key) in ["c", "a", "b"].into_iter().enumerate() {
         let version = (i + 1) as u64;
         batch = batch.projection_put(
@@ -176,7 +176,7 @@ fn prefix_scan_is_ordered() {
 #[test]
 fn range_scan_excludes_end() {
     let (_tmp, store) = store();
-    let mut batch = CommitBatch::new(Id::new(), 0);
+    let mut batch = CommitBatch::new(Id::new().unwrap(), 0);
     for (i, key) in ["a", "b", "c", "d"].into_iter().enumerate() {
         let version = (i + 1) as u64;
         batch = batch.projection_put(
@@ -201,7 +201,7 @@ fn range_scan_excludes_end() {
 fn projection_persisted_across_reopen() {
     let (tmp, store) = store();
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             1,
             b"k".to_vec(),
@@ -232,14 +232,14 @@ fn delete_on_missing_projection_materializes_empty_projection() {
     // Deleting from a projection that does not yet exist should create it at version 1
     // so a later mutation at version 2 does not conflict.
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_delete("kv", 1, b"k".to_vec()))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_delete("kv", 1, b"k".to_vec()))
         .unwrap();
 
     assert_eq!(store.projection_version("kv").unwrap(), 1);
     assert!(store.get_projection("kv", b"k").unwrap().is_none());
 
     store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "kv",
             2,
             b"k".to_vec(),

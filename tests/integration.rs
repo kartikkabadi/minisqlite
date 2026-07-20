@@ -28,9 +28,9 @@ fn roundtrip_event_and_projection() {
         .open()
         .unwrap();
 
-    let tx = minisqlite::Id::new();
+    let tx = minisqlite::Id::new().unwrap();
     let event = Event::new(
-        minisqlite::Id::new(),
+        minisqlite::Id::new().unwrap(),
         "user:1",
         "user.created",
         1,
@@ -90,7 +90,7 @@ fn stream_version_conflict() {
         .unwrap();
 
     let event = Event::new(
-        minisqlite::Id::new(),
+        minisqlite::Id::new().unwrap(),
         "stream",
         "a",
         1,
@@ -101,11 +101,11 @@ fn stream_version_conflict() {
         b"",
     );
     store
-        .commit(CommitBatch::new(minisqlite::Id::new(), now_ms()).append_event(event))
+        .commit(CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms()).append_event(event))
         .unwrap();
 
     let bad = Event::new(
-        minisqlite::Id::new(),
+        minisqlite::Id::new().unwrap(),
         "stream",
         "b",
         1,
@@ -116,7 +116,7 @@ fn stream_version_conflict() {
         b"",
     );
     let result = store.commit(
-        CommitBatch::new(minisqlite::Id::new(), now_ms())
+        CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms())
             .expect_stream_version("stream", 0)
             .append_event(bad),
     );
@@ -134,14 +134,14 @@ fn job_lifecycle() {
         .unwrap();
 
     let job = JobSpec::new(
-        minisqlite::Id::new(),
+        minisqlite::Id::new().unwrap(),
         "queue",
         "part-a",
         b"payload".to_vec(),
     );
     let job_id = job.job_id;
     let receipt = store
-        .commit(CommitBatch::new(minisqlite::Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
     assert_eq!(receipt.job_ids, vec![job_id]);
 
@@ -195,7 +195,7 @@ fn projection_version_mismatch() {
 
     store
         .commit(
-            CommitBatch::new(minisqlite::Id::new(), now_ms()).projection_put(
+            CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms()).projection_put(
                 "p",
                 1,
                 b"k".to_vec(),
@@ -205,7 +205,7 @@ fn projection_version_mismatch() {
         .unwrap();
 
     let result = store.commit(
-        CommitBatch::new(minisqlite::Id::new(), now_ms()).projection_put(
+        CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms()).projection_put(
             "p",
             3,
             b"k".to_vec(),
@@ -232,9 +232,9 @@ fn backup_and_verify() {
         .unwrap();
     store
         .commit(
-            CommitBatch::new(minisqlite::Id::new(), now_ms())
+            CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms())
                 .append_event(Event::new(
-                    minisqlite::Id::new(),
+                    minisqlite::Id::new().unwrap(),
                     "s",
                     "e",
                     1,
@@ -271,7 +271,7 @@ fn reopen_recovers_multiple_frames() {
 
     for i in 0..5 {
         let event = Event::new(
-            minisqlite::Id::new(),
+            minisqlite::Id::new().unwrap(),
             "s",
             "e",
             1,
@@ -282,7 +282,9 @@ fn reopen_recovers_multiple_frames() {
             b"",
         );
         store
-            .commit(CommitBatch::new(minisqlite::Id::new(), now_ms() + i).append_event(event))
+            .commit(
+                CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms() + i).append_event(event),
+            )
             .unwrap();
     }
 
@@ -308,8 +310,8 @@ fn recovery_truncates_incomplete_tail() {
         .unwrap();
     store
         .commit(
-            CommitBatch::new(minisqlite::Id::new(), now_ms()).append_event(Event::new(
-                minisqlite::Id::new(),
+            CommitBatch::new(minisqlite::Id::new().unwrap(), now_ms()).append_event(Event::new(
+                minisqlite::Id::new().unwrap(),
                 "s",
                 "e",
                 1,
@@ -352,12 +354,12 @@ fn synara_shaped_flows() {
         .open()
         .unwrap();
 
-    let thread_id = Id::new();
+    let thread_id = Id::new().unwrap();
     let stream = format!("thread:{thread_id}");
 
     // Flow A.
     let created = Event::with_json_payload(
-        Id::new(),
+        Id::new().unwrap(),
         &stream,
         "thread.created",
         now_ms(),
@@ -365,7 +367,7 @@ fn synara_shaped_flows() {
     );
     let receipt = store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .append_event(created)
                 .projection_put(
                     "threads",
@@ -379,10 +381,15 @@ fn synara_shaped_flows() {
     assert_eq!(store.stream_version(&stream), Some(1));
 
     // Flow B.
-    let requested =
-        Event::with_json_payload(Id::new(), &stream, "thread.turn-requested", now_ms(), b"");
+    let requested = Event::with_json_payload(
+        Id::new().unwrap(),
+        &stream,
+        "thread.turn-requested",
+        now_ms(),
+        b"",
+    );
     let job = JobSpec::new(
-        Id::new(),
+        Id::new().unwrap(),
         "provider",
         stream.clone(),
         thread_id.to_string().into_bytes(),
@@ -390,7 +397,7 @@ fn synara_shaped_flows() {
     let job_id = job.job_id;
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .expect_stream_version(&stream, 1)
                 .append_event(requested)
                 .projection_put(
@@ -421,11 +428,16 @@ fn synara_shaped_flows() {
     assert_eq!(claimed.len(), 1);
     let token = claimed[0].lease_token;
 
-    let completed =
-        Event::with_json_payload(Id::new(), &stream, "thread.turn-completed", now_ms(), b"");
+    let completed = Event::with_json_payload(
+        Id::new().unwrap(),
+        &stream,
+        "thread.turn-completed",
+        now_ms(),
+        b"",
+    );
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .expect_stream_version(&stream, 2)
                 .append_event(completed)
                 .projection_put(
@@ -444,12 +456,17 @@ fn synara_shaped_flows() {
     assert!(store.ack_job(job_id, token, None, now_ms()).is_err());
 
     // Flow D.
-    let uncertain_job = JobSpec::new(Id::new(), "provider", "partition-2", b"call-api".to_vec())
-        .with_effect_mode(EffectMode::UncertainOnLeaseExpiry)
-        .with_max_attempts(1);
+    let uncertain_job = JobSpec::new(
+        Id::new().unwrap(),
+        "provider",
+        "partition-2",
+        b"call-api".to_vec(),
+    )
+    .with_effect_mode(EffectMode::UncertainOnLeaseExpiry)
+    .with_max_attempts(1);
     let uncertain_id = uncertain_job.job_id;
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(uncertain_job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(uncertain_job))
         .unwrap();
     let claim2 = ClaimRequest {
         queue: "provider".into(),
@@ -471,16 +488,26 @@ fn synara_shaped_flows() {
         .unwrap();
 
     // Flow E.
-    let loop_id = Id::new();
+    let loop_id = Id::new().unwrap();
     let loop_stream = format!("loop:{loop_id}");
-    let iteration =
-        Event::with_json_payload(Id::new(), &loop_stream, "loop.iteration", now_ms(), b"1");
-    let next_job = JobSpec::new(Id::new(), "loop", loop_id.to_string(), b"next".to_vec())
-        .with_not_before_ms(now_ms() + 10_000);
+    let iteration = Event::with_json_payload(
+        Id::new().unwrap(),
+        &loop_stream,
+        "loop.iteration",
+        now_ms(),
+        b"1",
+    );
+    let next_job = JobSpec::new(
+        Id::new().unwrap(),
+        "loop",
+        loop_id.to_string(),
+        b"next".to_vec(),
+    )
+    .with_not_before_ms(now_ms() + 10_000);
     let next_id = next_job.job_id;
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .append_event(iteration)
                 .projection_put(
                     "loops",
@@ -535,7 +562,10 @@ fn synara_shaped_flows() {
         rebuilt.push(ProjectionEntry::new(key.to_vec(), status));
     }
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).projection_replace("threads", 4, rebuilt))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), now_ms())
+                .projection_replace("threads", 4, rebuilt),
+        )
         .unwrap();
     assert!(!store
         .scan_projection_prefix("threads", b"")
@@ -550,9 +580,9 @@ fn transaction_id_is_idempotent_across_reopen() {
     let path = tmp_path("idempotency.mini");
     let _ = std::fs::remove_file(&path);
 
-    let tx = Id::new();
+    let tx = Id::new().unwrap();
     let event = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         "stream",
         "e",
         1,
@@ -589,9 +619,29 @@ fn transaction_id_conflicts_on_different_content() {
     let path = tmp_path("idempotency_conflict.mini");
     let _ = std::fs::remove_file(&path);
 
-    let tx = Id::new();
-    let event1 = Event::new(Id::new(), "s", "e", 1, now_ms(), None, None, b"1", b"");
-    let event2 = Event::new(Id::new(), "s", "e", 1, now_ms(), None, None, b"2", b"");
+    let tx = Id::new().unwrap();
+    let event1 = Event::new(
+        Id::new().unwrap(),
+        "s",
+        "e",
+        1,
+        now_ms(),
+        None,
+        None,
+        b"1",
+        b"",
+    );
+    let event2 = Event::new(
+        Id::new().unwrap(),
+        "s",
+        "e",
+        1,
+        now_ms(),
+        None,
+        None,
+        b"2",
+        b"",
+    );
 
     let store = StoreBuilder::new(&path)
         .durability(Durability::Memory)
@@ -619,13 +669,13 @@ fn claim_jobs_respects_partition_ordering() {
         .open()
         .unwrap();
 
-    let first = JobSpec::new(Id::new(), "q", "p1", b"first".to_vec());
-    let second = JobSpec::new(Id::new(), "q", "p1", b"second".to_vec());
-    let other = JobSpec::new(Id::new(), "q", "p2", b"other".to_vec());
+    let first = JobSpec::new(Id::new().unwrap(), "q", "p1", b"first".to_vec());
+    let second = JobSpec::new(Id::new().unwrap(), "q", "p1", b"second".to_vec());
+    let other = JobSpec::new(Id::new().unwrap(), "q", "p2", b"other".to_vec());
 
     store
         .commit(
-            CommitBatch::new(Id::new(), 0)
+            CommitBatch::new(Id::new().unwrap(), 0)
                 .enqueue_job(first)
                 .enqueue_job(second)
                 .enqueue_job(other),
@@ -662,7 +712,7 @@ fn projection_prefix_with_all_ff_bytes() {
     let key3 = vec![0xff, 0xff, 0x00];
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms())
+            CommitBatch::new(Id::new().unwrap(), now_ms())
                 .projection_put("p", 1, key1.clone(), b"1".to_vec())
                 .projection_put("p", 2, key2.clone(), b"2".to_vec())
                 .projection_put("p", 3, key3.clone(), b"3".to_vec()),
@@ -686,10 +736,10 @@ fn claimed_job_includes_worker_id() {
         .open()
         .unwrap();
 
-    let job = JobSpec::new(Id::new(), "q", "p", b"work".to_vec());
+    let job = JobSpec::new(Id::new().unwrap(), "q", "p", b"work".to_vec());
     let job_id = job.job_id;
     store
-        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), now_ms()).enqueue_job(job))
         .unwrap();
 
     let claimed = store
@@ -718,11 +768,11 @@ fn transaction_correlation_id_and_metadata_roundtrip() {
         .open()
         .unwrap();
 
-    let correlation = Id::new();
+    let correlation = Id::new().unwrap();
     let metadata = b"causal context".to_vec();
-    let tx = Id::new();
+    let tx = Id::new().unwrap();
     let event = Event::new(
-        Id::new(),
+        Id::new().unwrap(),
         "tx-meta",
         "meta.test",
         1,
@@ -772,8 +822,8 @@ fn backup_rejects_primary_path_and_preserves_store() {
         .unwrap();
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
-                Id::new(),
+            CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(Event::new(
+                Id::new().unwrap(),
                 "s",
                 "e",
                 1,
@@ -793,8 +843,8 @@ fn backup_rejects_primary_path_and_preserves_store() {
     assert_eq!(store.high_water_sequence(), 1);
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
-                Id::new(),
+            CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(Event::new(
+                Id::new().unwrap(),
                 "s",
                 "e2",
                 1,
@@ -816,9 +866,9 @@ fn duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen() {
     let path = tmp_path("dup_event.mini");
     let _ = std::fs::remove_file(&path);
 
-    let event_id = Id::new();
+    let event_id = Id::new().unwrap();
     let event = Event::new(event_id, "s", "e", 1, now_ms(), None, None, b"first", b"");
-    let batch = CommitBatch::new(Id::new(), now_ms())
+    let batch = CommitBatch::new(Id::new().unwrap(), now_ms())
         .append_event(event.clone())
         .append_event(Event::new(
             event_id,
@@ -840,7 +890,7 @@ fn duplicate_event_id_in_same_batch_is_rejected_and_idempotent_across_reopen() {
     assert!(result.is_err(), "duplicate event id in one batch must fail");
 
     // A single-event batch should still commit and remain idempotent after reopen.
-    let single = CommitBatch::new(Id::new(), now_ms()).append_event(event.clone());
+    let single = CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(event.clone());
     let receipt1 = store.commit(single.clone()).unwrap();
     let receipt2 = store.commit(single.clone()).unwrap();
     assert_eq!(receipt1, receipt2);
@@ -875,8 +925,8 @@ fn backup_temp_path_cannot_collide_with_primary_file() {
         .unwrap();
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
-                Id::new(),
+            CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(Event::new(
+                Id::new().unwrap(),
                 "s",
                 "e",
                 1,
@@ -921,8 +971,8 @@ fn backup_does_not_remove_preexisting_temp_file() {
         .unwrap();
     store
         .commit(
-            CommitBatch::new(Id::new(), now_ms()).append_event(Event::new(
-                Id::new(),
+            CommitBatch::new(Id::new().unwrap(), now_ms()).append_event(Event::new(
+                Id::new().unwrap(),
                 "s",
                 "e",
                 1,
@@ -961,10 +1011,10 @@ fn fail_job_default_retry_overflow_is_rejected() {
         .open()
         .unwrap();
 
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
         .commit(
-            CommitBatch::new(Id::new(), i64::MAX - 500)
+            CommitBatch::new(Id::new().unwrap(), i64::MAX - 500)
                 .enqueue_job(JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_max_attempts(3)),
         )
         .unwrap();
@@ -980,12 +1030,14 @@ fn fail_job_default_retry_overflow_is_rejected() {
         .unwrap();
     let lease_token = claimed[0].lease_token;
 
-    let result = store.commit(CommitBatch::new(Id::new(), i64::MAX - 500).fail_job(
-        job_id,
-        lease_token,
-        "boom",
-        None,
-    ));
+    let result = store.commit(
+        CommitBatch::new(Id::new().unwrap(), i64::MAX - 500).fail_job(
+            job_id,
+            lease_token,
+            "boom",
+            None,
+        ),
+    );
     assert!(
         result.is_err(),
         "default retry_after_ms would overflow and must be rejected"
@@ -1004,11 +1056,11 @@ fn fail_job_explicit_default_retry_is_idempotent_across_reopen() {
         .open()
         .unwrap();
 
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     let now = now_ms();
     store
         .commit(
-            CommitBatch::new(Id::new(), now)
+            CommitBatch::new(Id::new().unwrap(), now)
                 .enqueue_job(JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_max_attempts(3)),
         )
         .unwrap();
@@ -1024,7 +1076,7 @@ fn fail_job_explicit_default_retry_is_idempotent_across_reopen() {
         .unwrap();
     let lease_token = claimed[0].lease_token;
 
-    let tx = Id::new();
+    let tx = Id::new().unwrap();
     let batch = CommitBatch::new(tx, now).fail_job(job_id, lease_token, "boom", Some(now + 1000));
     let receipt1 = store.commit(batch.clone()).unwrap();
 

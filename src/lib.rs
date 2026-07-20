@@ -19,10 +19,10 @@
 //!     .open()
 //!     .unwrap();
 //!
-//! let tx = minisqlite::Id::new();
+//! let tx = minisqlite::Id::new().unwrap();
 //! let now = 0; // caller-supplied wall-clock millis
 //! let event = Event::with_json_payload(
-//!     minisqlite::Id::new(),
+//!     minisqlite::Id::new().unwrap(),
 //!     "thread:abc",
 //!     "thread.created",
 //!     now,

@@ -6,6 +6,16 @@ use crate::codec::frame::{FileHeader, FILE_HEADER_SIZE};
 use crate::config::Durability;
 use crate::Error;
 
+/// `O_NOFOLLOW` for `open` so the final path component is never a symlink.
+///
+/// These values are taken from the platform fcntl headers. On non-Unix targets
+/// the flag is unused because `OpenOptionsExt` is Unix-only.
+#[cfg(all(unix, target_os = "macos"))]
+const O_NOFOLLOW: i32 = 0x00000100;
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const O_NOFOLLOW: i32 = 0o400000;
+
 /// Owns the primary data file and the normal append path.
 ///
 /// The underlying `File` is locked exclusively with `try_lock` for the lifetime of this
@@ -33,32 +43,92 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
     ) -> Result<Self, Error> {
+        Self::open(path, durability, acquire_lock, true)
+    }
+
+    /// Open an existing primary data file. Fails if the file does not exist.
+    ///
+    /// This is the path used by read-only and operational CLI commands so a missing source
+    /// is reported as an error instead of silently creating an empty database.
+    pub fn open_existing(
+        path: impl AsRef<Path>,
+        durability: Durability,
+        acquire_lock: bool,
+    ) -> Result<Self, Error> {
+        Self::open(path, durability, acquire_lock, false)
+    }
+
+    fn open(
+        path: impl AsRef<Path>,
+        durability: Durability,
+        acquire_lock: bool,
+        create: bool,
+    ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
 
-        // Refuse to follow an existing symlink for the primary data path.
-        if std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(Error::Validation(
-                "primary database path is a symlink".into(),
-            ));
+        // Reject any existing symlink component in the path.  This is a best-effort
+        // pre-check; the actual `open` also passes `O_NOFOLLOW` so the final component
+        // cannot be replaced by a symlink between the check and the syscall.
+        for ancestor in path.ancestors() {
+            if ancestor.as_os_str().is_empty() {
+                continue;
+            }
+            match std::fs::symlink_metadata(ancestor) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(Error::Validation(format!(
+                        "database path contains a symlink: {}",
+                        ancestor.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(Error::Io(e.to_string())),
+                Ok(_) => {}
+            }
         }
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                create_private_dirs(parent)?;
+        if create {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    create_private_dirs(parent)?;
+                }
             }
         }
 
         let mut opts = OpenOptions::new();
-        opts.read(true).write(true).create(true).truncate(false);
+        opts.read(true).write(true);
+        if create {
+            opts.create(true).truncate(false);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
+            opts.custom_flags(O_NOFOLLOW);
         }
-        let mut file = opts.open(&path)?;
+
+        let mut file = match opts.open(&path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !create => {
+                return Err(Error::Validation(format!(
+                    "database file does not exist: {}",
+                    path.display()
+                )));
+            }
+            Err(e) => {
+                // If the path is (or became) a symlink, the open failed because of
+                // `O_NOFOLLOW`.  Report it as a symlink rejection.
+                if std::fs::symlink_metadata(&path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                {
+                    return Err(Error::Validation(format!(
+                        "database path is a symlink: {}",
+                        path.display()
+                    )));
+                }
+                return Err(Error::Io(e.to_string()));
+            }
+        };
 
         if acquire_lock {
             match file.try_lock() {

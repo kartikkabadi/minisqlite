@@ -16,10 +16,10 @@ fn store() -> (common::TempDir, Store) {
 #[test]
 fn ack_with_wrong_token_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     let job = JobSpec::new(job_id, "q", "p", b"work".to_vec());
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
 
     let claimed = store
@@ -33,7 +33,7 @@ fn ack_with_wrong_token_fails() {
         .unwrap();
     assert_eq!(claimed.len(), 1);
 
-    let wrong_token = Id::new();
+    let wrong_token = Id::new().unwrap();
     let result = store.ack_job(job_id, wrong_token, None, 0);
     assert!(result.is_err(), "ack with wrong token must fail");
 }
@@ -41,14 +41,16 @@ fn ack_with_wrong_token_fails() {
 #[test]
 fn ack_after_lease_expiry_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     let claimed = store
@@ -69,14 +71,16 @@ fn ack_after_lease_expiry_fails() {
 #[test]
 fn fail_with_wrong_token_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     store
@@ -89,17 +93,17 @@ fn fail_with_wrong_token_fails() {
         })
         .unwrap();
 
-    let result = store.fail_job(job_id, Id::new(), "boom", None, 0);
+    let result = store.fail_job(job_id, Id::new().unwrap(), "boom", None, 0);
     assert!(result.is_err(), "fail with wrong token must fail");
 }
 
 #[test]
 fn cancel_terminal_job_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     let job = JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_max_attempts(1);
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
 
     let claimed = store
@@ -121,14 +125,16 @@ fn cancel_terminal_job_fails() {
 #[test]
 fn resolve_non_uncertain_job_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     let result = store.resolve_uncertain_job(job_id, Resolution::MarkSucceeded, 0);
@@ -138,14 +144,16 @@ fn resolve_non_uncertain_job_fails() {
 #[test]
 fn double_claim_without_expiry_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     store
@@ -176,10 +184,10 @@ fn double_claim_without_expiry_fails() {
 #[test]
 fn claim_before_not_before_fails() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     let job = JobSpec::new(job_id, "q", "p", b"work".to_vec()).with_not_before_ms(1000);
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
 
     let claimed = store
@@ -200,10 +208,10 @@ fn claim_before_not_before_fails() {
 #[test]
 fn stale_token_cannot_fail_newer_lease() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     let job = JobSpec::new(job_id, "q", "p", b"work".to_vec());
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap();
 
     let first = store
@@ -236,14 +244,16 @@ fn stale_token_cannot_fail_newer_lease() {
 #[test]
 fn claim_jobs_rejects_non_positive_lease() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     let result = store.claim_jobs(ClaimRequest {
@@ -268,14 +278,16 @@ fn claim_jobs_rejects_non_positive_lease() {
 #[test]
 fn claim_jobs_rejects_lease_arithmetic_overflow() {
     let (_tmp, store) = store();
-    let job_id = Id::new();
+    let job_id = Id::new().unwrap();
     store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(JobSpec::new(
-            job_id,
-            "q",
-            "p",
-            b"work".to_vec(),
-        )))
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(JobSpec::new(
+                job_id,
+                "q",
+                "p",
+                b"work".to_vec(),
+            )),
+        )
         .unwrap();
 
     let result = store.claim_jobs(ClaimRequest {

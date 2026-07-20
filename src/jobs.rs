@@ -216,10 +216,7 @@ impl JobStateRecord {
     }
 
     pub fn is_ready_at(&self, now_ms: i64) -> bool {
-        if self.is_terminal() {
-            return false;
-        }
-        if self.attempt >= self.spec.max_attempts {
+        if self.is_terminal() || self.attempt >= self.spec.max_attempts {
             return false;
         }
         match self.state {
@@ -231,6 +228,15 @@ impl JobStateRecord {
             }
             _ => false,
         }
+    }
+
+    /// True when an idempotent job's lease has expired on its final attempt and it
+    /// must be marked dead before later jobs in the same partition can be claimed.
+    pub fn is_expired_at_attempt_limit(&self, now_ms: i64) -> bool {
+        matches!(self.state, JobInternalState::Leased)
+            && now_ms >= self.lease_expires_at_ms
+            && self.spec.effect_mode == EffectMode::Idempotent
+            && self.attempt >= self.spec.max_attempts
     }
 
     /// Lease the job to a worker. Fails if the job is not ready.
@@ -279,6 +285,10 @@ impl JobStateRecord {
     }
 
     /// Mark the job as failed under the given lease token.
+    ///
+    /// A failure at the attempt ceiling may be reported even after the lease has expired,
+    /// because the only possible outcome is terminal. This lets the store durably remove
+    /// an idempotent job whose last worker crashed before acknowledging it.
     pub fn fail(
         &mut self,
         now_ms: i64,
@@ -286,12 +296,17 @@ impl JobStateRecord {
         error_summary: impl Into<String>,
         retry_after_ms: Option<i64>,
     ) -> Result<(), Error> {
-        if self.lease_token != Some(token) || now_ms >= self.lease_expires_at_ms {
+        let terminal = self.attempt >= self.spec.max_attempts;
+        if self.lease_token != Some(token) {
             return Err(Error::InvalidLease {
                 job_id: self.spec.job_id,
             });
         }
-        let terminal = self.attempt >= self.spec.max_attempts;
+        if now_ms >= self.lease_expires_at_ms && !terminal {
+            return Err(Error::InvalidLease {
+                job_id: self.spec.job_id,
+            });
+        }
         self.error_summary = Some(error_summary.into());
         self.lease_token = None;
         self.worker_id = None;
@@ -353,6 +368,14 @@ impl JobStateRecord {
         self.lease_expires_at_ms = 0;
         match resolution {
             Resolution::Retry => {
+                // A retry authorizes one more attempt. Decrement the consumed attempt
+                // count (the failed lease did not count) and schedule the retry for the
+                // standard retry delay.  This preserves the `RetryWait` public state while
+                // preventing the attempt ceiling from permanently blocking the partition.
+                self.attempt = self
+                    .attempt
+                    .checked_sub(1)
+                    .ok_or_else(|| Error::Validation("retry attempt underflow".into()))?;
                 self.state = JobInternalState::RetryWait;
                 self.retry_after_ms = now_ms
                     .checked_add(1000)
@@ -393,7 +416,7 @@ mod tests {
     use crate::id::Id;
 
     fn spec(effect_mode: EffectMode) -> JobSpec {
-        JobSpec::new(Id::new(), "q", "p", b"work".to_vec()).with_effect_mode(effect_mode)
+        JobSpec::new(Id::new().unwrap(), "q", "p", b"work".to_vec()).with_effect_mode(effect_mode)
     }
 
     #[test]

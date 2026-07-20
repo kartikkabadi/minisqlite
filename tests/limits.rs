@@ -45,9 +45,9 @@ fn event_payload_above_limit_is_rejected() {
         .limits(limits)
         .open()
         .unwrap();
-    let event = Event::with_json_payload(Id::new(), "s", "e", 0, b"hello");
+    let event = Event::with_json_payload(Id::new().unwrap(), "s", "e", 0, b"hello");
     let err = store
-        .commit(CommitBatch::new(Id::new(), 0).append_event(event))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).append_event(event))
         .unwrap_err();
     assert!(err.to_string().contains("event payload"));
 }
@@ -63,7 +63,7 @@ fn projection_value_above_limit_is_rejected() {
         .open()
         .unwrap();
     let err = store
-        .commit(CommitBatch::new(Id::new(), 0).projection_put(
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).projection_put(
             "p",
             1,
             b"k".to_vec(),
@@ -83,9 +83,9 @@ fn job_payload_above_limit_is_rejected() {
         .limits(limits)
         .open()
         .unwrap();
-    let job = minisqlite::JobSpec::new(Id::new(), "q", "p", b"payload".to_vec());
+    let job = minisqlite::JobSpec::new(Id::new().unwrap(), "q", "p", b"payload".to_vec());
     let err = store
-        .commit(CommitBatch::new(Id::new(), 0).enqueue_job(job))
+        .commit(CommitBatch::new(Id::new().unwrap(), 0).enqueue_job(job))
         .unwrap_err();
     assert!(err.to_string().contains("job payload"));
 }
@@ -100,10 +100,28 @@ fn too_many_records_per_transaction_is_rejected() {
         .limits(limits)
         .open()
         .unwrap();
-    let batch = CommitBatch::new(Id::new(), 0)
-        .append_event(Event::with_json_payload(Id::new(), "s", "e", 0, b""))
-        .append_event(Event::with_json_payload(Id::new(), "s", "e", 0, b""))
-        .append_event(Event::with_json_payload(Id::new(), "s", "e", 0, b""));
+    let batch = CommitBatch::new(Id::new().unwrap(), 0)
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "s",
+            "e",
+            0,
+            b"",
+        ))
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "s",
+            "e",
+            0,
+            b"",
+        ))
+        .append_event(Event::with_json_payload(
+            Id::new().unwrap(),
+            "s",
+            "e",
+            0,
+            b"",
+        ));
     let err = store.commit(batch).unwrap_err();
     assert!(err.to_string().contains("records"));
 }
