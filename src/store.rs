@@ -1100,7 +1100,7 @@ impl StoreInner {
     fn commit(&mut self, batch: CommitBatch) -> Result<CommitReceipt, Error> {
         if self.poisoned {
             return Err(Error::StorePoisoned {
-                transaction_id: batch.transaction_id,
+                transaction_id: self.poisoned_transaction_id,
             });
         }
         if self.needs_repair {
