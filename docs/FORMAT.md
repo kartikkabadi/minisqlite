@@ -84,6 +84,9 @@ Record kinds include `TransactionMeta`, `Event`, `ProjectionPut`, `ProjectionDel
 Unknown kernel record kinds are rejected.
 The number of records declared in a frame header is bounded by `MAX_RECORDS_PER_FRAME` before decoding, so a malicious record count cannot force unbounded allocation.
 `ProjectionReplace` entry counts are bounded by `MAX_REPLACE_ENTRIES_PER_RECORD` (1,000,000) and checked before allocation.
+Decoded records are additionally bounded by measured in-memory cost: `MAX_RECORD_MEMORY` (96 MiB) per record and `MAX_TRANSACTION_MEMORY` (256 MiB) per frame, so metadata amplification (e.g. many maximal `ProjectionReplace` records) is rejected even when the on-disk frame is within `MAX_FRAME_SIZE`.
+Decode-path allocations use fallible `try_reserve`/`try_reserve_exact`; allocation failure is a typed error, never an abort.
+Frame lengths are validated as `u64` against `MAX_FRAME_SIZE` before conversion to `usize`, with `usize::try_from` and checked offset arithmetic; targets with pointers narrower than 32 bits are rejected at compile time.
 Application event types are opaque bytes and may be anything.
 
 ## Checksum
