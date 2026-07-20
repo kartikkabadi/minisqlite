@@ -167,7 +167,7 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 
 Per PR comment corrective follow-up, the branch was re-audited against the full spec and implementation.
 
-* Head SHA: `HEAD_SHA_PLACEHOLDER`
+* Head SHA: `c237ec5aae18a2c1a04136683affc5d7e601a129`
 * Branch: `feat/control-plane-state-engine`
 * Merge conflict with `main`: none
 * Full verification suite (run on the box at `2026-07-19 10:34 UTC`):
