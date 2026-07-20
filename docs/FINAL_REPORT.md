@@ -398,6 +398,36 @@ Per the Review #8 merge-blocking findings, the following fixes and adversarial r
 * `repair_on_strict_sync_failure_returns_outcome_uncertain`
 * `projection_replace_within_limit_roundtrips`
 
+## Review #9 final hardening pass
+
+Per the Review #9 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. **Unsafe effect-mode default.** `EffectMode::UncertainOnLeaseExpiry` is now the `Default`; an expired lease is never silently reclaimed unless the caller explicitly opted into `EffectMode::Idempotent`. Existing tests that relied on implicit reclaim were updated to declare `Idempotent` explicitly.
+2. **Empty claims created durable transactions.** `ClaimOutcome` was redesigned with a `Noop` variant (the `Deref`/`IntoIterator`/`into_claims` conveniences were removed in favor of explicit `claims()` / `transaction_id()` accessors). `Store::claim_jobs` returns `Noop` for an empty queue or when no ops are ready, and delays transaction-ID allocation until a non-empty `CommitBatch` exists, so an idle poller can no longer burn IDs or write empty frames.
+3. **Partition starvation under strict lexicographic priority.** `claim_jobs` now implements durable round-robin partition fairness: a per-queue cursor records the last partition served and per-partition head indexes skip terminal jobs. Both structures are rebuilt from the journal during replay (`JobLease`/`JobAck`/`JobFail`/`JobCancel`/`JobResolve`/`JobExpire` advance them), so fairness is stable across reopen. The Review #8 lexicographic-priority test was replaced by a round-robin test that proves the `(a, b, a)` claim order and its durability across reopen.
+4. **Unbounded in-memory allocation from valid frames.** Decoded records are bounded by measured in-memory cost via `Record::in_memory_cost()`, with hard ceilings `MAX_RECORD_MEMORY = 96 MiB` per record and `MAX_TRANSACTION_MEMORY = 256 MiB` per frame. A maximal legitimate frame (up to `MAX_RECORDS_PER_FRAME` over a 64 MiB payload) always fits, while metadata-amplification attacks such as many maximal `ProjectionReplace` records are rejected. `Reader::read_bytes`, frame payload decoding, and `encode_records` use fallible `try_reserve`/`try_reserve_exact` (`encode_records` now returns `Result`), and replay avoids `records.clone()`, `CommitBatch` reconstruction, and full-copy regeneration.
+5. **32-bit length overflow in frame decoding.** `total_frame_length` and `payload_length` are compared against `MAX_FRAME_SIZE as u64` before any `usize` conversion; conversions use `usize::try_from` and offset arithmetic uses `checked_add`. A `compile_error!` rejects targets with pointers narrower than 32 bits. Crafted headers declaring `u64::MAX`, `u32::MAX + 1`, and `MAX_FRAME_SIZE + 1` are rejected without panic.
+6. **`verify` raced an active writer.** `Store::verify` / `StoreBuilder::verify` now read a stable snapshot instead of racing the appender, so verification during active writes cannot report spurious corruption from a partially appended frame.
+7. **No CLI repair path.** A `minisqlite repair <database>` command was added. It reports the current file length, the last valid offset, and the bytes removed; `--force` skips the confirmation and JSON output is supported for machine consumption. Tests cover the clean no-op, torn-tail truncation, strict-sync uncertainty (`RepairOutcomeUncertain`), and complete-frame corruption (refused, fail closed).
+8. **JSON export buffered the whole store.** Export is now a streaming/iterable dump: events are written in bounded pages ordered by global sequence, projections are streamed entry by entry, and jobs are paginated, so export memory stays bounded regardless of store size. The export is documented as a diagnostic dump rather than a byte-exact restorable snapshot; per-transaction frame boundaries and internal offsets are intentionally not part of the dump contract.
+9. **Inconsistent poisoned transaction ID.** The store preserves the original poisoning transaction ID in `poisoned_transaction_id`, and every subsequent `StorePoisoned` error reports that same ID rather than the ID of the rejected write.
+10. **Concurrency test barrier gated too late.** The barrier in `tests/concurrency.rs` now gates before commit, assertions check exact typed conflict results, and a synchronized conflict race test was added.
+
+### Adversarial regression tests added
+
+* `crafted_huge_total_frame_length_is_rejected_without_panic` (`u64::MAX`, `u32::MAX + 1`, `MAX_FRAME_SIZE + 1`, `1 << 32`)
+* `total_frame_length_at_cap_with_short_buffer_is_truncated_error`
+* `constrained_rss_decodes_exact_cap_frame` (child process with a limited address space)
+* `constrained_rss_decodes_near_max_frame` (near-64-MiB valid frame under constrained RSS)
+* `transaction_memory_ceiling_rejects_metadata_amplification`
+* `frame_one_byte_over_cap_is_rejected`
+* Round-robin fairness regression replacing `claim_jobs_limit_one_uses_strict_lexicographic_priority`, proving `(a, b, a)` ordering and durability across reopen
+* Explicit-`Idempotent` lease-expiry reclaim regression (the default no longer reclaims silently)
+* Repair CLI tests: clean no-op, torn tail, strict-sync uncertainty, complete-frame corruption
+* Constrained-memory streaming export test
+* Poisoned-transaction-ID stability regression
+* Synchronized conflict race test with exact typed conflict assertions
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All Review #8 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes on the Devin host and in CI (Ubuntu, macOS, Windows, MSRV), and `docs/FINAL_REPORT.md` claims only what the tests prove. Final head is the current `feat/control-plane-state-engine` HEAD. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #9 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes on the Devin host and in CI (Ubuntu, macOS, Windows, MSRV), and `docs/FINAL_REPORT.md` claims only what the tests prove. Final head is the current `feat/control-plane-state-engine` HEAD. The PR remains open and unmerged per the review instruction.
