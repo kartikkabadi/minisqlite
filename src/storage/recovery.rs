@@ -82,7 +82,14 @@ pub fn scan(
 
         // Read the complete frame (header + payload + trailer) and decode it. If the frame
         // is fully present and still fails to decode, it is semantic/physical corruption.
-        let frame_bytes = data_file.read_at(offset, header.total_frame_length as usize)?;
+        // The length is at most MAX_FRAME_SIZE (checked above), so the conversion cannot
+        // truncate on supported targets.
+        let frame_len =
+            usize::try_from(header.total_frame_length).map_err(|_| Error::Corruption {
+                message: "frame length does not fit in usize".into(),
+                offset,
+            })?;
+        let frame_bytes = data_file.read_at(offset, frame_len)?;
         let frame = Frame::decode(&frame_bytes).map_err(|e| with_offset(e, offset))?;
         on_frame(frame, offset)?;
         offset = frame_end;
