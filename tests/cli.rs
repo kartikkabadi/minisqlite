@@ -148,6 +148,140 @@ fn cli_rejects_missing_source() {
     assert!(!std::path::Path::new(dest).exists());
 }
 
+/// Build a store with two commits and return (path, file length after first commit,
+/// file length after second commit).
+fn two_commit_store(tmp: &common::TempDir, name: &str) -> (PathBuf, u64, u64) {
+    let path = tmp.path().join(name);
+    let store = StoreBuilder::new(&path)
+        .durability(Durability::Memory)
+        .open()
+        .unwrap();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).append_event(Event::with_json_payload(
+                Id::new().unwrap(),
+                "s",
+                "first",
+                0,
+                b"{}",
+            )),
+        )
+        .unwrap();
+    let after_first = std::fs::metadata(&path).unwrap().len();
+    store
+        .commit(
+            CommitBatch::new(Id::new().unwrap(), 0).append_event(Event::with_json_payload(
+                Id::new().unwrap(),
+                "s",
+                "second",
+                0,
+                b"{}",
+            )),
+        )
+        .unwrap();
+    let after_second = std::fs::metadata(&path).unwrap().len();
+    drop(store);
+    (path, after_first, after_second)
+}
+
+#[test]
+fn cli_repair_clean_store_is_a_no_op() {
+    let tmp = common::TempDir::new();
+    let (path, _, len) = two_commit_store(&tmp, "repair_clean.mini");
+    let p = path.to_str().unwrap();
+
+    let (out, status) = run(&[p, "repair", "--json"]);
+    assert!(status.success());
+    assert!(out.contains(&format!("\"file_length\":{len}")));
+    assert!(out.contains(&format!("\"last_valid_offset\":{len}")));
+    assert!(out.contains("\"bytes_removed\":0"));
+    assert!(out.contains("\"repaired\":false"));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+}
+
+#[test]
+fn cli_repair_truncates_torn_tail_only_with_force() {
+    let tmp = common::TempDir::new();
+    let (path, after_first, after_second) = two_commit_store(&tmp, "repair_torn.mini");
+    // Tear the final frame in half, as a crashed writer would.
+    let torn_len = after_first + (after_second - after_first) / 2;
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_len(torn_len).unwrap();
+    drop(f);
+    let p = path.to_str().unwrap();
+
+    // Without --force: report the plan, leave the file untouched, exit non-zero.
+    let output = Command::new(bin_path())
+        .args([p, "repair", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(23));
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(out.contains(&format!("\"file_length\":{torn_len}")));
+    assert!(out.contains(&format!("\"last_valid_offset\":{after_first}")));
+    assert!(out.contains("\"needs_repair\":true"));
+    assert!(out.contains("\"repaired\":false"));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), torn_len);
+
+    // With --force: truncate to the last valid offset and verify cleanly.
+    let (out, status) = run(&[p, "repair", "--force", "--json"]);
+    assert!(status.success());
+    assert!(out.contains(&format!("\"bytes_removed\":{}", torn_len - after_first)));
+    assert!(out.contains("\"repaired\":true"));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), after_first);
+    let (_, status) = run(&[p, "verify"]);
+    assert!(status.success());
+}
+
+#[test]
+fn cli_repair_refuses_complete_frame_corruption() {
+    let tmp = common::TempDir::new();
+    let (path, after_first, after_second) = two_commit_store(&tmp, "repair_corrupt.mini");
+    // Flip a byte inside the first (complete, non-tail) frame.
+    let mut bytes = std::fs::read(&path).unwrap();
+    let inside_first_frame = (after_first - 8) as usize;
+    bytes[inside_first_frame] ^= 0xff;
+    std::fs::write(&path, &bytes).unwrap();
+    let p = path.to_str().unwrap();
+
+    let output = Command::new(bin_path())
+        .args([p, "repair", "--force"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "complete-frame corruption must fail as corruption, not be truncated"
+    );
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        after_second,
+        "repair must never truncate mid-file corruption"
+    );
+}
+
+#[cfg(feature = "failpoint")]
+#[test]
+fn cli_repair_reports_uncertain_outcome_when_sync_fails() {
+    let tmp = common::TempDir::new();
+    let (path, after_first, after_second) = two_commit_store(&tmp, "repair_uncertain.mini");
+    let torn_len = after_first + (after_second - after_first) / 2;
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_len(torn_len).unwrap();
+    drop(f);
+
+    let output = Command::new(bin_path())
+        .args([path.to_str().unwrap(), "repair", "--force"])
+        .env("MINISQLITE_FAILPOINT", "truncate-sync-error")
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(24),
+        "a failed truncate sync must surface RepairOutcomeUncertain"
+    );
+}
+
 #[test]
 fn cli_jobs_round_trip() {
     let tmp = common::TempDir::new();

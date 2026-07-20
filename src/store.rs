@@ -588,6 +588,18 @@ impl Store {
         Ok(())
     }
 
+    /// Whether the store has a recoverable torn tail that must be repaired before writes.
+    pub fn needs_repair(&self) -> bool {
+        let guard = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        guard.needs_repair
+    }
+
+    /// Byte offset of the end of the last fully valid frame.
+    pub fn last_valid_offset(&self) -> u64 {
+        let guard = self.inner.read().unwrap_or_else(|p| p.into_inner());
+        guard.last_valid_offset
+    }
+
     /// Repair an un-repaired tail by truncating to the last valid frame offset.
     /// After repair, the store can accept writes again.
     pub fn repair(&self) -> Result<(), Error> {

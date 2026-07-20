@@ -23,6 +23,7 @@ Commands:
                                   Scan a projection for keys with a prefix.
   jobs list <database> [--queue <queue>] [--state <state>]
                                   List jobs, optionally filtered.
+  repair <database> [--force]     Report a recoverable torn tail; --force truncates it.
   export <database> [--format jsonl]
                                   Dump a JSONL snapshot.
   backup <database> <destination>   Atomically copy the primary file.
@@ -46,6 +47,7 @@ struct CommandOpts {
     queue: Option<String>,
     state: Option<JobState>,
     format: Option<String>,
+    force: bool,
 }
 
 enum Command {
@@ -79,6 +81,10 @@ enum Command {
         path: String,
         queue: Option<String>,
         state: Option<JobState>,
+    },
+    Repair {
+        path: String,
+        force: bool,
     },
     Export {
         path: String,
@@ -128,7 +134,15 @@ fn exit_code(error: &Error) -> i32 {
 fn is_top_level_command(s: &str) -> bool {
     matches!(
         s,
-        "doctor" | "verify" | "stats" | "events" | "projections" | "jobs" | "export" | "backup"
+        "doctor"
+            | "verify"
+            | "stats"
+            | "events"
+            | "projections"
+            | "jobs"
+            | "repair"
+            | "export"
+            | "backup"
     )
 }
 
@@ -153,6 +167,7 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
         queue: None,
         state: None,
         format: None,
+        force: false,
     };
     let mut positionals: Vec<String> = Vec::new();
 
@@ -198,6 +213,7 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
                         .ok_or_else(|| Error::Usage("missing --state value".into()))?;
                     cmd_opts.state = Some(parse_job_state(&value)?);
                 }
+                "--force" => cmd_opts.force = true,
                 "--format" => {
                     let value = args
                         .next()
@@ -266,6 +282,10 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
             path,
             queue: cmd_opts.queue,
             state: cmd_opts.state,
+        },
+        ("repair", None) => Command::Repair {
+            path,
+            force: cmd_opts.force,
         },
         ("export", None) => {
             let format = cmd_opts.format.unwrap_or_else(|| "jsonl".into());
@@ -407,6 +427,7 @@ fn run() -> Result<(), Error> {
             queue.as_deref(),
             state,
         ),
+        Command::Repair { path, force } => repair(&path, opts.durability, opts.json, force),
         Command::Export { path } => export(&path, opts.durability),
         Command::Backup { path, dest } => backup(&path, opts.durability, opts.json, &dest),
     }
@@ -707,6 +728,59 @@ fn jobs_list(
                 println!("    {}", bytes_repr(&info.spec.payload, true));
             }
         }
+    }
+    Ok(())
+}
+
+fn repair(path: &str, durability: Durability, json: bool, force: bool) -> Result<(), Error> {
+    // `open_existing` recovers the valid prefix, leaves the torn tail on disk, and marks
+    // the store as needing repair. Mid-file corruption of a complete frame fails the open
+    // and is never truncated.
+    let store = open_store(path, durability)?;
+    let file_length = std::fs::metadata(store.path())
+        .map(|m| m.len())
+        .map_err(|e| Error::Io(e.to_string()))?;
+    let last_valid_offset = store.last_valid_offset();
+    let needs_repair = store.needs_repair();
+    let bytes_removed = file_length.saturating_sub(last_valid_offset);
+
+    let repaired = if needs_repair && force {
+        store.repair()?;
+        true
+    } else {
+        false
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "path": store.path().to_string_lossy(),
+                "file_length": file_length,
+                "last_valid_offset": last_valid_offset,
+                "bytes_removed": if repaired { bytes_removed } else { 0 },
+                "needs_repair": needs_repair && !repaired,
+                "repaired": repaired,
+            })
+        );
+    } else {
+        println!("path:              {}", store.path().display());
+        println!("file_length:       {file_length}");
+        println!("last_valid_offset: {last_valid_offset}");
+        if repaired {
+            println!("bytes_removed:     {bytes_removed}");
+            println!("status:            REPAIRED");
+        } else if needs_repair {
+            println!("bytes_to_remove:   {bytes_removed}");
+            println!("status:            NEEDS_REPAIR (re-run with --force to truncate)");
+        } else {
+            println!("bytes_removed:     0");
+            println!("status:            OK (no repair needed)");
+        }
+    }
+
+    if needs_repair && !repaired {
+        return Err(Error::StoreNeedsRepair);
     }
     Ok(())
 }
