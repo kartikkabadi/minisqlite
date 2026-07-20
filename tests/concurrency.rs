@@ -1,8 +1,8 @@
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, Barrier};
 mod common;
 use std::thread;
 
-use minisqlite::{ClaimRequest, CommitBatch, Durability, Event, Id, JobSpec, StoreBuilder};
+use minisqlite::{ClaimRequest, CommitBatch, Durability, Error, Event, Id, JobSpec, StoreBuilder};
 
 #[test]
 fn concurrent_commits_serialize() {
@@ -48,31 +48,53 @@ fn concurrent_stream_conflict_is_explicit() {
             .unwrap(),
     );
 
-    // Pre-condition: stream at version 0.
-    let mut senders = Vec::new();
+    // Pre-condition: stream at version 0. All workers rendezvous at the barrier and
+    // then race their commits simultaneously.
+    let barrier = Arc::new(Barrier::new(5));
     let mut handles = Vec::new();
     for _ in 0..5 {
-        let (tx, rx) = mpsc::channel();
-        senders.push(tx);
         let s = store.clone();
+        let b = barrier.clone();
         handles.push(thread::spawn(move || {
             let event = Event::with_json_payload(Id::new().unwrap(), "stream", "e", 0, b"{}");
-            let result = s.commit(
-                CommitBatch::new(Id::new().unwrap(), 0)
-                    .expect_stream_version("stream", 0)
-                    .append_event(event),
-            );
-            let _ = rx.recv();
-            result.is_ok()
+            let batch = CommitBatch::new(Id::new().unwrap(), 0)
+                .expect_stream_version("stream", 0)
+                .append_event(event);
+            b.wait();
+            s.commit(batch)
         }));
     }
 
-    // Release all threads at once to race.
-    for tx in senders {
-        tx.send(()).unwrap();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let mut ok = 0;
+    let mut conflicts = 0;
+    for result in results {
+        match result {
+            Ok(receipt) => {
+                ok += 1;
+                assert_eq!(
+                    receipt.stream_versions,
+                    vec![minisqlite::StreamVersion {
+                        stream_id: "stream".into(),
+                        version: 1,
+                    }]
+                );
+            }
+            Err(Error::Conflict {
+                stream_id,
+                expected,
+                actual,
+            }) => {
+                conflicts += 1;
+                assert_eq!(stream_id, "stream");
+                assert_eq!(expected, 0);
+                assert_eq!(actual, 1, "losers must observe the winner's version");
+            }
+            Err(other) => panic!("expected Conflict, got {other:?}"),
+        }
     }
-    let results: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-    assert_eq!(results.iter().filter(|&&b| b).count(), 1);
+    assert_eq!(ok, 1, "exactly one racer must win");
+    assert_eq!(conflicts, 4, "all losers must fail with a typed conflict");
     assert_eq!(store.stream_version("stream"), Some(1));
 }
 
@@ -154,10 +176,13 @@ fn concurrent_job_claims_do_not_duplicate_lease() {
         )
         .unwrap();
 
+    let barrier = Arc::new(Barrier::new(10));
     let mut handles = Vec::new();
     for i in 0..10 {
         let s = store.clone();
+        let b = barrier.clone();
         handles.push(thread::spawn(move || {
+            b.wait();
             s.claim_jobs(ClaimRequest {
                 queue: "q".into(),
                 worker_id: format!("worker-{i}"),
