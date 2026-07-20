@@ -560,7 +560,9 @@ fn stats(
     let store = open_store(path, durability, lock_path)?;
     let stats = store.stats();
     if json {
-        println!("{}", serde_json::to_string(&stats).unwrap());
+        let json = serde_json::to_string(&stats)
+            .map_err(|e| Error::Io(format!("failed to serialize stats: {e}")))?;
+        println!("{json}");
         return Ok(());
     }
     println!("file_size {}", stats.file_size);

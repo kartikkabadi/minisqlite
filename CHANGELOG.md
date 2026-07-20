@@ -36,6 +36,7 @@
 - `Store::apply_commit` applies the staged delta before inserting the batch into the idempotency index so a failure cannot leave a receiptless batch.
 - `PersistedEvent::frame_offset` is now `pub(crate)` and no longer emitted in JSON CLI output, so internal file offsets are not exposed as stable public identifiers.
 - `README.md` install instructions now reference building from `feat/control-plane-state-engine` instead of `crates.io`, because `v0.3.0-alpha.1` is not yet published.
+- Removed the last avoidable `unwrap` in the CLI JSON stats path.
 - Added `tests/security.rs` (symlink rejection and owner-only file permissions on Unix) and `tests/limits.rs` (bounds and validation tests).
 - Refreshed `docs/PERFORMANCE.md` numbers from a release benchmark run and updated `docs/FINAL_REPORT.md` with latest fuzz counts and test coverage.
 
