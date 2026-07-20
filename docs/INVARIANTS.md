@@ -16,10 +16,13 @@ These invariants are encoded in the implementation and exercised by tests.
 10. An incomplete final frame cannot corrupt earlier state.
 11. `open_existing` and `StoreBuilder::verify` are non-mutating.
 12. `StoreBuilder::verify` replays every frame through the full semantic validation path.
-13. `Store::repair` is the only public write path that truncates a torn tail.
+13. `StoreBuilder::open` auto-repairs a structurally torn tail; `Store::repair` is the explicit public write path for an `open_existing` store with `needs_repair`. `StoreBuilder::open_existing` and `StoreBuilder::verify` never truncate.
 14. Backup refuses an existing destination and validates the temporary copy before the atomic rename.
-15. `Limits::max_records_per_transaction` cannot exceed the hard frame record ceiling.
+15. `Limits::max_records_per_transaction` and `Limits::max_replace_entries` cannot exceed the hard format ceilings.
 16. Uncertain truncate outcomes are reported as `RepairOutcomeUncertain`.
+17. Uncertain claim outcomes are reported as `ClaimOutcome::Uncertain` carrying the proposed transaction ID and the claimed jobs (including their lease tokens).
+18. Backup publication ambiguity (post-link or post-publication / parent-sync failure) is reported as `BackupOutcomeUncertain` rather than a plain I/O error.
+19. Job partition ordering is strict lexicographic; `claim_jobs` does not implement round-robin or durable cursor fairness.
 
 ## Projections
 

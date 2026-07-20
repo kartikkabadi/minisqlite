@@ -62,6 +62,15 @@
 - `StoreInner::replay_frame` wraps all semantic reconstruction/validation failures as `Error::Corruption { offset }` carrying the offending frame offset.
 - Synchronized `docs/RECOVERY.md`, `docs/ARCHITECTURE.md`, and `docs/INVARIANTS.md` with the structural-vs-semantic failure distinction and verify contract.
 - Added `tests/review7.rs` adversarial regression tests covering all ten Review #7 findings.
+- Added hard format ceiling `MAX_REPLACE_ENTRIES_PER_RECORD = 1_000_000` in `record.rs`; `Limits::max_replace_entries` is validated against it and `ProjectionReplace` decoding checks the count before allocation, using `try_reserve_exact` bounded by payload geometry.
+- `Store::claim_jobs` now returns `ClaimOutcome::Committed`/`Uncertain` so callers recover the proposed transaction ID and `ClaimedJob` values (including lease tokens) after an uncertain commit.
+- `Store::backup` refuses a poisoned store and reports post-link / post-publication / parent-sync failures as `BackupOutcomeUncertain`.
+- `storage::file::rename_no_replace` is stage-aware and supports `backup-after-link` and `backup-after-publication` failpoints.
+- `DataFile::truncate` has a `truncate-sync-error` failpoint in the `Strict` sync block; the `RepairOutcomeUncertain` path is exercised under `Durability::Strict`.
+- Duplicate `EnqueueJob` operations in `validate_job_ops`/`ops_to_records` are treated consistently, preserving existing/simulated lease state for identical enqueues.
+- `examples/benchmark.rs` uses a random-suffixed directory created with `std::fs::create_dir` and removes only the directory this invocation creates.
+- Documented strict lexicographic partition ordering (no round-robin fairness) in `docs/JOBS.md` and `docs/INVARIANTS.md`.
+- Added `tests/review8.rs` adversarial regression tests covering all Review #8 findings.
 
 ## 0.2.1
 

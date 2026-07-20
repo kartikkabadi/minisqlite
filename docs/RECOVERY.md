@@ -84,12 +84,25 @@ configured `Limits` have changed.
 
 `Strict` is the default. `Memory` must be chosen explicitly.
 
-## Uncertain commits and repairs
+## Uncertain commits, claims, repairs, and backups
 
 If an append or sync fails, the store attempts to truncate the file back to its original
 length. If the truncate is confirmed, the commit is definitely failed. If the truncate
 cannot be confirmed, the store is poisoned and `CommitOutcomeUncertain` is returned.
 
+When the internal commit of `Store::claim_jobs` returns `CommitOutcomeUncertain`, the public
+API returns `ClaimOutcome::Uncertain { transaction_id, claims }`. The caller receives the
+proposed transaction ID and the `ClaimedJob` values, including the lease tokens. Reopening the
+store reveals whether the frame was durably written; if it was, the lease tokens are valid
+and can be used to acknowledge or fail the jobs.
+
 Likewise, if `DataFile::truncate` is called during repair and `fsync` fails, it returns
 `RepairOutcomeUncertain` containing the requested and actual file length. The application
-must reopen to discover the durable state.
+must reopen to discover the durable state. This path is exercised under `Durability::Strict`
+so a memory-only configuration does not mask the uncertainty.
+
+`Store::backup` uses an atomic `hard_link` + `remove_file` publication. If the link or rename
+succeeds but a later stage (parent-directory sync, or a simulated failpoint immediately after
+link or publication) cannot be confirmed, the operation returns `BackupOutcomeUncertain`. The
+destination may already exist and be a valid copy of the durable prefix; the caller must
+reopen or verify the backup before relying on it.

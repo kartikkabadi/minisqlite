@@ -19,7 +19,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Atomic `CommitBatch` of events, projection mutations, and job operations.
 * Ordered domain events with global sequence and per-stream version checks.
 * Named ordered-map projections with versioned put/delete/clear/replace, prefix/range scans.
-* Durable jobs: enqueue, claim with `worker_id` and lease token, ack, fail with retry, cancel, and explicit uncertain-resolution. `Store::jobs` returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, and `terminal_at_ms`.
+* Durable jobs: enqueue, claim with `worker_id` and lease token, ack, fail with retry, cancel, and explicit uncertain-resolution. `Store::jobs` returns a `JobInfo` snapshot with `attempt`, `worker_id`, `lease_expires_at_ms`, `retry_after_ms`, `terminal_at_ms`, and `lease_token`. `claim_jobs` returns `ClaimOutcome::Committed`/`Uncertain` carrying the transaction ID and claimed jobs/lease tokens.
 * `CommitBatch::with_correlation_id` and `with_metadata` persist optional transaction-level context as the first `TransactionMeta` record in a frame; `CommitReceipt` and `get_transaction` return them.
 * Strict vs Memory durability modes.
 * `MINISQL3` file format with `MINIFRAM` frame headers and `FRAMETRL` trailers, CRC32 via `crc32fast`.
@@ -370,6 +370,34 @@ Per the Review #7 merge-blocking findings, the following fixes and adversarial r
 * `job_expire_rejects_non_idempotent_effect_mode_during_replay`
 * `truncate_reports_repair_outcome_uncertain_after_set_len_before_sync`
 
+## Review #8 final hardening pass
+
+Per the Review #8 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. A hard format ceiling `MAX_REPLACE_ENTRIES_PER_RECORD = 1_000_000` limits the number of entries in a single `ProjectionReplace` record. `Limits::max_replace_entries` is validated against this ceiling, and `Record::decode` for `ProjectionReplace` checks the count before allocating.
+2. `Record::decode` for `ProjectionReplace` uses `try_reserve_exact` bounded by `remaining / 8` so a valid-but-enormous record count cannot force an unbounded allocation; the count ceiling is checked first.
+3. `Store::claim_jobs` now returns `Result<ClaimOutcome, Error>`. When the internal commit returns `CommitOutcomeUncertain`, it returns `ClaimOutcome::Uncertain { transaction_id, claims }` so callers can recover the proposed transaction ID and lease tokens after reopen.
+4. `Store::backup` rejects a poisoned store with `StorePoisoned`; a poisoned store cannot silently omit a durable uncertain commit.
+5. Job partition ordering is documented as strict lexicographic. `claim_jobs` sorts partitions lexicographically, claims at most one ready job per partition per call, and makes progress within a partition. A `limit=1` caller always receives a job from the earliest ready partition; later partitions can be starved if earlier partitions are continuously replenished. There is no fairness/round-robin claim.
+6. `storage::file::rename_no_replace` is stage-aware and supports `backup-after-link` and `backup-after-publication` failpoints. A post-link or post-publication / parent-sync failure is reported as `BackupOutcomeUncertain` instead of `Error::Io`.
+7. Duplicate `EnqueueJob` operations in `validate_job_ops`/`ops_to_records` are treated consistently: an identical enqueue is a no-op and does not reset the simulated state, so a duplicate enqueue followed by an `acknowledge` or `fail` in the same batch preserves the lease token.
+8. `examples/benchmark.rs` uses a cryptographically/randomly suffixed directory created with `std::fs::create_dir` and removes only the directory this invocation successfully creates.
+9. `DataFile::truncate` has a `truncate-sync-error` failpoint inside the `Strict` sync block, and the `RepairOutcomeUncertain` path is exercised under `Durability::Strict`.
+10. `docs/INVARIANTS.md`, `docs/RECOVERY.md`, `docs/JOBS.md`, and `docs/FINAL_REPORT.md` were updated to document the `open` auto-repair vs `repair` public truncation path, uncertain claim outcomes, backup publication ambiguity, and strict lexicographic partition ordering.
+
+### Adversarial regression tests added
+
+* `max_replace_entries_is_capped_to_hard_format_ceiling`
+* `projection_replace_decoder_rejects_overlarge_entry_count` (valid near-64-MiB fixture)
+* `claim_jobs_uncertain_returns_proposed_claims_and_recoverable_tokens`
+* `backup_is_rejected_while_store_is_poisoned`
+* `backup_after_link_returns_outcome_uncertain_and_leaves_destination`
+* `backup_after_publication_returns_outcome_uncertain_with_valid_destination`
+* `claim_jobs_limit_one_uses_strict_lexicographic_priority` (before and after reopen)
+* `duplicate_enqueue_preserves_lease_token_for_ack_and_fail` (before and after reopen)
+* `repair_on_strict_sync_failure_returns_outcome_uncertain`
+* `projection_replace_within_limit_roundtrips`
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All Review #7 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes on the Devin host and in CI (Ubuntu, macOS, Windows, MSRV), and `docs/FINAL_REPORT.md` claims only what the tests prove. A follow-up commit also fixed a Windows file-lock interaction in `claim_jobs_exact_lease_fits_minimum_160_byte_frame` by closing the store before re-reading the primary file. Final head: `01adc3781ac21bb2ff398d8514578df93d8a5d2c`. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #8 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes on the Devin host and in CI (Ubuntu, macOS, Windows, MSRV), and `docs/FINAL_REPORT.md` claims only what the tests prove. Final head is the current `feat/control-plane-state-engine` HEAD. The PR remains open and unmerged per the review instruction.

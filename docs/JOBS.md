@@ -39,12 +39,17 @@ let request = ClaimRequest {
     lease_ms: 60_000,
     limit: 1,
 };
-let jobs = store.claim_jobs(request)?;
+let outcome = store.claim_jobs(request)?;
+for job in outcome.claims() {
+    println!("claimed {} partition={} token={}", job.job_id, job.partition, job.lease_token);
+}
 ```
 
-* Claims are ordered by `(queue, partition)` and then by insertion order.
+* `claim_jobs` returns `ClaimOutcome::Committed { transaction_id, claims }` on a durable commit, or `ClaimOutcome::Uncertain { transaction_id, claims }` when the frame was written but the in-memory apply could not be confirmed (the caller can reopen and use the returned lease tokens if the frame is present).
+* Claims are ordered by `(queue, partition)` lexicographically and then by insertion order within a partition.
 * Only one ready job per partition is claimed per request, up to `limit` total.
 * A new lease token is generated for every claim.
+* Strict lexicographic ordering means a `limit=1` caller always receives a job from the earliest partition with a ready job. Later partitions can be starved if earlier partitions are continuously replenished; there is no round-robin or durable cursor fairness.
 * Expired final-attempt jobs are maintained with a fixed-size `JobExpire` record that is independent of `max_summary_len` and `max_frame_size`.
 * `claim_jobs` builds one atomic `CommitBatch` containing all maintenance and candidate lease ops; if the configured `max_records_per_transaction` or `max_frame_size` does not fit everything, it commits a safe bounded prefix and makes progress without leaving a partial durable state.
 
@@ -54,7 +59,7 @@ let jobs = store.claim_jobs(request)?;
 * `fail_job(job_id, lease_token, error_summary, retry_after_ms, now_ms)` — retry or dead after `max_attempts`.
 * `cancel_job(job_id, lease_token, now_ms)` — explicit cancellation.
 
-`Store::jobs(now_ms, queue, state)` returns a `JobInfo` snapshot for each job, including `attempt`, `lease_expires_at_ms`, `worker_id`, `retry_after_ms`, and `terminal_at_ms` so callers can render queues without extra lookups.
+`Store::jobs(now_ms, queue, state)` returns a `JobInfo` snapshot for each job, including `attempt`, `lease_expires_at_ms`, `worker_id`, `retry_after_ms`, `terminal_at_ms`, and `lease_token` (when the job is currently leased) so callers can render queues without extra lookups.
 
 A stale lease token is rejected.
 

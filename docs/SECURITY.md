@@ -24,9 +24,13 @@ list or access its contents.
 
 Opening the primary data file uses `O_NOFOLLOW` (via the audited `libc` crate on Unix and
 `FILE_FLAG_OPEN_REPARSE_POINT` on Windows) so an existing symlink is rejected. This avoids
-accidentally writing through a symlink placed by another user. Backup destinations are also
-checked: an existing destination is refused and the temporary copy is scanned before the
-atomic rename so a corrupted source cannot overwrite a good backup.
+accidentally writing through a symlink placed by another user.
+
+`Store::backup` copies the durable valid prefix to a temporary sibling file, validates the
+temporary copy, and then atomically publishes it with `hard_link` + `remove_file`. An existing
+destination is refused, a dangling symlink cannot overwrite a real file, and post-link or
+post-publication / parent-sync failures are reported as `BackupOutcomeUncertain` so the caller
+knows the destination may already exist and must be verified before use.
 
 ## Payload privacy
 

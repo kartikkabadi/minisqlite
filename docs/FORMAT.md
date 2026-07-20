@@ -83,6 +83,7 @@ Record kinds include `TransactionMeta`, `Event`, `ProjectionPut`, `ProjectionDel
 `JobExpire` is a small fixed-size record used for internal final-attempt lease expiry maintenance; it does not carry an error summary and is independent of `max_summary_len`.
 Unknown kernel record kinds are rejected.
 The number of records declared in a frame header is bounded by `MAX_RECORDS_PER_FRAME` before decoding, so a malicious record count cannot force unbounded allocation.
+`ProjectionReplace` entry counts are bounded by `MAX_REPLACE_ENTRIES_PER_RECORD` (1,000,000) and checked before allocation.
 Application event types are opaque bytes and may be anything.
 
 ## Checksum
@@ -100,6 +101,7 @@ The defaults are:
 * max projection key/value: 1 MiB / 4 MiB
 * max job payload: 1 MiB
 * max records per transaction: 1024
+* max replace entries per transaction: 1024 (hard format ceiling 1,000,000)
 * max transaction frame size: 16 MiB
 * max string length: 4096
 
