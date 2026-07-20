@@ -167,8 +167,7 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 
 Per PR comment ID 4732347323, the branch was audited against the seven merge-blocking findings, with focused regression tests added for each and `docs/FINAL_REPORT.md` corrected to match what the tests prove.
 
-* Head SHA: `5b7dbbdcfd4a5fc4cf34a8a0bcccb0cf3b3852a5`
-* Branch: `feat/control-plane-state-engine`
+* Branch: `feat/control-plane-state-engine` (head SHA is the latest commit on this branch)
 * Merge conflict with `main`: none
 * Full verification suite (run on the box at `2026-07-20 05:34 UTC`):
   * `cargo fmt --all -- --check` — passed
