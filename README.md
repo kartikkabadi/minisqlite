@@ -138,10 +138,11 @@ minisqlite projections list app.mini
 minisqlite projections scan app.mini users
 minisqlite jobs list app.mini
 minisqlite export app.mini --format jsonl > snapshot.jsonl
+minisqlite repair app.mini
 minisqlite backup app.mini app-backup.mini
 ```
 
-`verify` scans the file read-only without modifying it. `doctor` reports whether the store needs explicit `repair` after an unclean shutdown.
+`verify` scans the file read-only without modifying it. `doctor` reports whether the store needs explicit `repair` after an unclean shutdown. `repair` truncates a torn tail, reporting the current length, last valid offset, and bytes removed (`--force` skips confirmation; JSON output is supported); it refuses complete-frame corruption. `export` streams a bounded-memory JSONL diagnostic dump; it is not a byte-exact restorable snapshot.
 
 ## Crash recovery guarantee
 
@@ -152,6 +153,7 @@ minisqlite backup app.mini app-backup.mini
 * Mid-file corruption is reported as a hard error.
 * `Strict` mode calls `fsync` before returning success.
 * Replay enforces immutable invariants (non-zero IDs, `max_attempts > 0`, valid lease tokens and attempt sequence, `lease_expires_at_ms > claimed_at_ms`).
+* Replay memory is bounded by hard per-record and per-transaction in-memory ceilings with fallible allocation.
 
 ## Limitations
 
