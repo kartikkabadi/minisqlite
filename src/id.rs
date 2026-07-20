@@ -154,8 +154,8 @@ fn secure_random(buf: &mut [u8]) -> io::Result<()> {
         };
         if status < 0 {
             return Err(io::Error::other(format!(
-            "BCryptGenRandom failed with status {status}"
-        )));
+                "BCryptGenRandom failed with status {status}"
+            )));
         }
         Ok(())
     }
