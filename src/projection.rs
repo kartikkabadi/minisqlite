@@ -44,44 +44,19 @@ impl ProjectionState {
         self.data.clear();
     }
 
-    pub fn replace(&mut self, entries: &[ProjectionEntry]) {
-        // Canonicalize duplicate keys by last-wins semantics so no-op detection and mutation
-        // always use the same representation. This keeps projection version monotonicity:
-        // a duplicate-key replace at the current version either matches the current map or
-        // requires a version bump, and a bumped-version replace produces a deterministic state.
+    /// Replace the projection contents with the canonical, last-wins form of `pairs`.
+    /// Canonicalizing here keeps projection version monotonicity: a duplicate-key
+    /// replace at the current version either matches the current map or requires a
+    /// version bump, and a bumped-version replace produces a deterministic state.
+    pub fn replace_pairs<'a>(
+        &mut self,
+        pairs: impl IntoIterator<Item = (&'a Vec<u8>, &'a Vec<u8>)>,
+    ) {
         let mut canonical = BTreeMap::new();
-        for e in entries {
-            canonical.insert(e.key.clone(), e.value.clone());
+        for (k, v) in pairs {
+            canonical.insert(k.clone(), v.clone());
         }
         self.data = canonical;
-    }
-
-    pub fn put_changes(&self, key: &[u8], value: &[u8]) -> bool {
-        self.data.get(key).is_none_or(|v| v.as_slice() != value)
-    }
-
-    pub fn delete_changes(&self, key: &[u8]) -> bool {
-        self.data.contains_key(key)
-    }
-
-    pub fn clear_changes(&self) -> bool {
-        !self.data.is_empty()
-    }
-
-    pub fn replace_changes(&self, entries: &[ProjectionEntry]) -> bool {
-        // Build the same canonical, last-wins representation that `replace` will apply.
-        let mut canonical = BTreeMap::new();
-        for e in entries {
-            canonical.insert(e.key.clone(), e.value.clone());
-        }
-        if canonical.len() != self.data.len() {
-            return true;
-        }
-        canonical.iter().any(|(k, v)| {
-            self.data
-                .get(k)
-                .is_none_or(|dv| dv.as_slice() != v.as_slice())
-        })
     }
 
     pub fn scan_prefix(&self, prefix: &[u8]) -> Vec<ProjectionEntry> {

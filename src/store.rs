@@ -91,6 +91,69 @@ pub struct Store {
     inner: RwLock<StoreInner>,
 }
 
+/// A borrowed view of one projection during batch validation: the current durable
+/// state (if any) plus staged mutations from earlier ops in the same batch. Values
+/// are borrowed from the base state or the batch, so validation never copies keys
+/// or values. `staged` maps a key to `Some(value)` (put) or `None` (tombstone);
+/// `base` is dropped entirely by a clear or replace.
+struct ProjectionOverlay<'a> {
+    version: u64,
+    base: Option<&'a BTreeMap<Vec<u8>, Vec<u8>>>,
+    staged: BTreeMap<&'a [u8], Option<&'a [u8]>>,
+}
+
+impl<'a> ProjectionOverlay<'a> {
+    fn new(state: Option<&'a ProjectionState>) -> Self {
+        Self {
+            version: state.map_or(0, |s| s.version),
+            base: state.map(|s| &s.data),
+            staged: BTreeMap::new(),
+        }
+    }
+
+    fn get(&self, key: &[u8]) -> Option<&'a [u8]> {
+        match self.staged.get(key) {
+            Some(staged) => *staged,
+            None => self
+                .base
+                .and_then(|base| base.get(key).map(|v| v.as_slice())),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        if self.staged.values().any(|v| v.is_some()) {
+            return false;
+        }
+        match self.base {
+            None => true,
+            Some(base) => base.keys().all(|k| self.staged.contains_key(k.as_slice())),
+        }
+    }
+
+    /// True when the effective contents equal `canonical`.
+    fn matches(&self, canonical: &BTreeMap<&[u8], &[u8]>) -> bool {
+        for (k, v) in canonical {
+            if self.get(k) != Some(*v) {
+                return false;
+            }
+        }
+        for (k, v) in &self.staged {
+            if v.is_some() && !canonical.contains_key(k) {
+                return false;
+            }
+        }
+        if let Some(base) = self.base {
+            for k in base.keys() {
+                if !self.staged.contains_key(k.as_slice()) && !canonical.contains_key(k.as_slice())
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
 #[derive(Debug)]
 struct StoreInner {
     path: PathBuf,
@@ -840,11 +903,7 @@ impl StoreInner {
                     entries,
                 } => {
                     let state = self.projections.entry(projection.clone()).or_default();
-                    let as_entries: Vec<ProjectionEntry> = entries
-                        .iter()
-                        .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))
-                        .collect();
-                    state.replace(&as_entries);
+                    state.replace_pairs(entries.iter().map(|(k, v)| (k, v)));
                     state.version = *new_version;
                 }
                 Record::JobEnqueue {
@@ -1368,8 +1427,12 @@ impl StoreInner {
         Ok(())
     }
 
+    /// Validate projection mutations against a borrowed base state plus a small
+    /// per-batch overlay. The current `ProjectionState` is never cloned: puts and
+    /// deletes stage borrowed key/value references, a clear or replace drops the
+    /// base, and a replacement is canonicalized once and reused as the staged map.
     fn validate_projection_ops(&self, batch: &CommitBatch) -> Result<(), Error> {
-        let mut simulated: HashMap<String, ProjectionState> = HashMap::new();
+        let mut simulated: HashMap<&str, ProjectionOverlay<'_>> = HashMap::new();
         for op in &batch.ops {
             let (projection, version) = match op {
                 Op::ProjectionPut {
@@ -1394,17 +1457,28 @@ impl StoreInner {
                 _ => continue,
             };
 
-            let current = self
-                .projections
-                .get(projection)
-                .cloned()
-                .unwrap_or_else(ProjectionState::new);
-            let sim = simulated.entry(projection.clone()).or_insert(current);
-            let changes = match op {
-                Op::ProjectionPut { key, value, .. } => sim.put_changes(key, value),
-                Op::ProjectionDelete { key, .. } => sim.delete_changes(key),
-                Op::ProjectionClear { .. } => sim.clear_changes(),
-                Op::ProjectionReplace { entries, .. } => sim.replace_changes(entries),
+            let sim = simulated
+                .entry(projection.as_str())
+                .or_insert_with(|| ProjectionOverlay::new(self.projections.get(projection)));
+
+            // Canonicalize a replacement once (last key wins) so change detection and
+            // the staged map use the same representation.
+            let canonical = match op {
+                Op::ProjectionReplace { entries, .. } => {
+                    let mut canonical: BTreeMap<&[u8], &[u8]> = BTreeMap::new();
+                    for e in entries {
+                        canonical.insert(e.key.as_slice(), e.value.as_slice());
+                    }
+                    Some(canonical)
+                }
+                _ => None,
+            };
+
+            let changes = match (op, &canonical) {
+                (Op::ProjectionPut { key, value, .. }, _) => sim.get(key) != Some(value.as_slice()),
+                (Op::ProjectionDelete { key, .. }, _) => sim.get(key).is_some(),
+                (Op::ProjectionClear { .. }, _) => !sim.is_empty(),
+                (Op::ProjectionReplace { .. }, Some(canonical)) => !sim.matches(canonical),
                 _ => false,
             };
             if *version == sim.version && !changes && sim.version > 0 {
@@ -1420,11 +1494,21 @@ impl StoreInner {
                     supplied: *version,
                 });
             }
-            match op {
-                Op::ProjectionPut { key, value, .. } => sim.put(key.clone(), value.clone()),
-                Op::ProjectionDelete { key, .. } => sim.delete(key),
-                Op::ProjectionClear { .. } => sim.clear(),
-                Op::ProjectionReplace { entries, .. } => sim.replace(entries),
+            match (op, canonical) {
+                (Op::ProjectionPut { key, value, .. }, _) => {
+                    sim.staged.insert(key, Some(value));
+                }
+                (Op::ProjectionDelete { key, .. }, _) => {
+                    sim.staged.insert(key, None);
+                }
+                (Op::ProjectionClear { .. }, _) => {
+                    sim.base = None;
+                    sim.staged.clear();
+                }
+                (Op::ProjectionReplace { .. }, Some(canonical)) => {
+                    sim.base = None;
+                    sim.staged = canonical.into_iter().map(|(k, v)| (k, Some(v))).collect();
+                }
                 _ => {}
             }
             sim.version = *version;
