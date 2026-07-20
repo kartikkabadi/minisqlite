@@ -6,15 +6,24 @@ use crate::codec::frame::{FileHeader, FILE_HEADER_SIZE};
 use crate::config::Durability;
 use crate::Error;
 
-/// `O_NOFOLLOW` for `open` so the final path component is never a symlink.
-///
-/// These values are taken from the platform fcntl headers. On non-Unix targets
-/// the flag is unused because `OpenOptionsExt` is Unix-only.
-#[cfg(all(unix, target_os = "macos"))]
-const O_NOFOLLOW: i32 = 0x00000100;
-
-#[cfg(all(unix, not(target_os = "macos")))]
+// `O_NOFOLLOW` values for the Unix targets we support. Unknown Unix targets fall back to a
+// best-effort `symlink_metadata` check after `open` instead of guessing a wrong constant.
+#[cfg(all(unix, any(target_os = "linux", target_os = "android")))]
 const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(all(
+    unix,
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "solaris",
+        target_os = "illumos"
+    )
+))]
+const O_NOFOLLOW: i32 = 0x100;
 
 /// Owns the primary data file and the normal append path.
 ///
@@ -28,7 +37,6 @@ pub struct DataFile {
     pub durability: Durability,
     pub len: u64,
     header: FileHeader,
-    #[allow(dead_code)]
     path: PathBuf,
 }
 
@@ -96,17 +104,6 @@ impl DataFile {
     ) -> Result<Self, Error> {
         let path = resolve_database_path(path, create)?;
 
-        // Final-component symlink check for platforms without `O_NOFOLLOW`.
-        if std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            return Err(Error::Validation(format!(
-                "database path is a symlink: {}",
-                path.display()
-            )));
-        }
-
         let mut opts = OpenOptions::new();
         opts.read(true).write(true);
         if create {
@@ -116,7 +113,28 @@ impl DataFile {
         {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
-            opts.custom_flags(O_NOFOLLOW);
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "android",
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd",
+                target_os = "dragonfly",
+                target_os = "solaris",
+                target_os = "illumos"
+            ))]
+            {
+                opts.custom_flags(O_NOFOLLOW);
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_FLAG_OPEN_REPARSE_POINT opens a reparse point (e.g. a symlink) itself,
+            // so we can detect and reject a symlinked final component after the open.
+            opts.custom_flags(0x00200000);
         }
 
         let mut file = match opts.open(&path) {
@@ -128,8 +146,6 @@ impl DataFile {
                 )));
             }
             Err(e) => {
-                // If the path is (or became) a symlink, the open failed because of
-                // `O_NOFOLLOW`.  Report it as a symlink rejection.
                 if std::fs::symlink_metadata(&path)
                     .map(|m| m.file_type().is_symlink())
                     .unwrap_or(false)
@@ -142,6 +158,15 @@ impl DataFile {
                 return Err(Error::Io(e.to_string()));
             }
         };
+
+        // A post-open `is_symlink` check protects unknown Unix targets and Windows
+        // (where we opened the reparse point itself).
+        if file.metadata()?.file_type().is_symlink() {
+            return Err(Error::Validation(format!(
+                "database path is a symlink: {}",
+                path.display()
+            )));
+        }
 
         if acquire_lock {
             match file.try_lock() {
@@ -198,6 +223,10 @@ impl DataFile {
 
     pub fn file_len(&self) -> u64 {
         self.len
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn format_version(&self) -> (u16, u16) {

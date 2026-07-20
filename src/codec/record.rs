@@ -401,15 +401,34 @@ impl Record {
                 result_digest: r.read_optional_bytes()?,
                 acknowledged_at_ms: r.read_i64()?,
             },
-            JOB_FAIL => Record::JobFail {
-                job_id: r.read_id()?,
-                lease_token: r.read_id()?,
-                error_summary: r.read_string()?,
-                attempt: r.read_u32()?,
-                retry_after_ms: r.read_i64()?,
-                terminal: r.read_u8()? != 0,
-                failed_at_ms: r.read_i64()?,
-            },
+            JOB_FAIL => {
+                let job_id = r.read_id()?;
+                let lease_token = r.read_id()?;
+                let error_summary = r.read_string()?;
+                let attempt = r.read_u32()?;
+                let retry_after_ms = r.read_i64()?;
+                let terminal_marker = r.read_u8()?;
+                let terminal = match terminal_marker {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(Error::Corruption {
+                            message: format!("invalid JobFail terminal marker {terminal_marker}"),
+                            offset: 0,
+                        })
+                    }
+                };
+                let failed_at_ms = r.read_i64()?;
+                Record::JobFail {
+                    job_id,
+                    lease_token,
+                    error_summary,
+                    attempt,
+                    retry_after_ms,
+                    terminal,
+                    failed_at_ms,
+                }
+            }
             JOB_CANCEL => Record::JobCancel {
                 job_id: r.read_id()?,
                 lease_token: r.read_optional_id()?,
@@ -460,19 +479,25 @@ impl Writer {
 impl Reader<'_> {
     fn read_optional_string(&mut self) -> Result<Option<String>, Error> {
         let present = self.read_u8()?;
-        if present != 0 {
-            Ok(Some(self.read_string()?))
-        } else {
-            Ok(None)
+        match present {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_string()?)),
+            _ => Err(Error::Corruption {
+                message: format!("invalid optional string marker {present}"),
+                offset: self.pos as u64,
+            }),
         }
     }
 
     fn read_optional_bytes(&mut self) -> Result<Option<Vec<u8>>, Error> {
         let present = self.read_u8()?;
-        if present != 0 {
-            Ok(Some(self.read_bytes()?))
-        } else {
-            Ok(None)
+        match present {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_bytes()?)),
+            _ => Err(Error::Corruption {
+                message: format!("invalid optional bytes marker {present}"),
+                offset: self.pos as u64,
+            }),
         }
     }
 }

@@ -3,8 +3,6 @@ use std::io;
 #[cfg(unix)]
 use std::io::Read;
 use std::str::FromStr;
-#[cfg(unix)]
-use std::sync::{Mutex, OnceLock};
 
 /// A 128-bit opaque identifier used for transaction IDs, event IDs, job IDs, and lease tokens.
 ///
@@ -113,6 +111,7 @@ impl std::error::Error for InvalidId {}
 #[cfg(any(test, feature = "fuzzing"))]
 thread_local! {
     static TEST_ENTROPY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TEST_ENTROPY_OPEN_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Test-only hook to simulate a CSPRNG failure in the current thread.
@@ -120,6 +119,11 @@ thread_local! {
 #[doc(hidden)]
 pub fn __set_test_entropy_failure(fail: bool) {
     TEST_ENTROPY_FAILURE.with(|f| f.set(fail));
+}
+
+#[cfg(any(test, feature = "fuzzing"))]
+fn __set_test_entropy_open_failure(fail: bool) {
+    TEST_ENTROPY_OPEN_FAILURE.with(|f| f.set(fail));
 }
 
 fn secure_random(buf: &mut [u8]) -> io::Result<()> {
@@ -132,16 +136,11 @@ fn secure_random(buf: &mut [u8]) -> io::Result<()> {
 
     #[cfg(unix)]
     {
-        static URANDOM: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
-        let mut file = URANDOM
-            .get_or_init(|| {
-                Mutex::new(
-                    std::fs::File::open("/dev/urandom")
-                        .expect("/dev/urandom must be available for secure ID generation"),
-                )
-            })
-            .lock()
-            .map_err(|e| io::Error::other(e.to_string()))?;
+        #[cfg(any(test, feature = "fuzzing"))]
+        if TEST_ENTROPY_OPEN_FAILURE.with(|f| f.get()) {
+            return Err(io::Error::other("simulated entropy source open failure"));
+        }
+        let mut file = std::fs::File::open("/dev/urandom")?;
         file.read_exact(buf)?;
         Ok(())
     }
@@ -181,8 +180,7 @@ fn secure_random(buf: &mut [u8]) -> io::Result<()> {
 
     #[cfg(not(any(unix, windows)))]
     {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
+        Err(io::Error::other(
             "no secure random source for this platform",
         ))
     }
@@ -226,5 +224,32 @@ mod tests {
             }
         }
         assert!(saw_non_zero);
+    }
+
+    #[test]
+    fn entropy_failure_is_fallible() {
+        // On Unix, simulate a failure to open `/dev/urandom`. On Windows the CSPRNG has no
+        // open phase, so simulate a generation failure instead. Both must return `Err`
+        // without panicking or poisoning state.
+        #[cfg(unix)]
+        {
+            __set_test_entropy_open_failure(true);
+            let result = Id::new();
+            __set_test_entropy_open_failure(false);
+            assert!(
+                result.is_err(),
+                "Id::new() must return an error when the entropy source cannot be opened"
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            TEST_ENTROPY_FAILURE.with(|f| f.set(true));
+            let result = Id::new();
+            TEST_ENTROPY_FAILURE.with(|f| f.set(false));
+            assert!(
+                result.is_err(),
+                "Id::new() must return an error when the CSPRNG fails"
+            );
+        }
     }
 }

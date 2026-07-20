@@ -302,7 +302,11 @@ impl JobStateRecord {
                 job_id: self.spec.job_id,
             });
         }
-        if now_ms >= self.lease_expires_at_ms && !terminal {
+        let expired = now_ms >= self.lease_expires_at_ms;
+        // Only an idempotent job that has exhausted its attempts may be marked dead after
+        // its lease expires without explicit resolution. Expired non-idempotent jobs must
+        // transition to `Uncertain` and be resolved by the operator.
+        if expired && !(terminal && self.spec.effect_mode == EffectMode::Idempotent) {
             return Err(Error::InvalidLease {
                 job_id: self.spec.job_id,
             });

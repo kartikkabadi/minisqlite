@@ -83,7 +83,7 @@ struct StoreInner {
     high_water_sequence: u64,
     events: Vec<PersistedEvent>,
     event_ids: HashMap<Id, u64>,
-    transaction_batches: HashMap<Id, CommitBatch>,
+    transaction_frame_offsets: HashMap<Id, (u64, u64)>,
     transaction_receipts: HashMap<Id, CommitReceipt>,
     stream_versions: HashMap<String, u64>,
     projections: HashMap<String, ProjectionState>,
@@ -144,7 +144,7 @@ impl Store {
             high_water_sequence: 0,
             events: Vec::new(),
             event_ids: HashMap::new(),
-            transaction_batches: HashMap::new(),
+            transaction_frame_offsets: HashMap::new(),
             transaction_receipts: HashMap::new(),
             stream_versions: HashMap::new(),
             projections: HashMap::new(),
@@ -152,6 +152,10 @@ impl Store {
             queue_partitions: HashMap::new(),
             recovered_tail: false,
         };
+
+        // Resolve the canonical path from the open file handle so callers cannot
+        // bypass the same-file check by changing the working directory.
+        let resolved_path = data_file.path().to_path_buf();
 
         // Stream frames one at a time through `replay_frame` without accumulating them.
         // The callback borrows `inner` while `scan` borrows `data_file`; the two handles are
@@ -161,6 +165,7 @@ impl Store {
         })?;
 
         inner.data_file = Some(data_file);
+        inner.path = resolved_path;
         inner.recovered_tail = scan.tail_truncated;
 
         if scan.tail_truncated {
@@ -465,20 +470,51 @@ impl Store {
     pub fn backup(&self, destination: impl AsRef<Path>) -> Result<(), Error> {
         let mut guard = self.inner.write().unwrap_or_else(|p| p.into_inner());
         guard.df_mut().sync()?;
+        // Use the resolved canonical path that `DataFile` actually opened, not the original
+        // caller spelling. This makes the same-file check robust against `chdir` and relative
+        // path aliases.
         let src_path = guard.path.clone();
-        let dest = destination.as_ref().to_path_buf();
 
-        if dest == src_path {
+        let dest = destination.as_ref();
+        let dest_abs = if dest.is_absolute() {
+            dest.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| Error::Io(e.to_string()))?
+                .join(dest)
+        };
+        let dest_file_name = dest_abs
+            .file_name()
+            .ok_or_else(|| Error::Validation("backup destination must have a file name".into()))?;
+        let dest_parent = dest_abs
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !dest_parent.exists() {
+            return Err(Error::Validation(format!(
+                "backup destination parent does not exist: {}",
+                dest_parent.display()
+            )));
+        }
+        let dest_parent_canonical =
+            std::fs::canonicalize(dest_parent).map_err(|e| Error::Io(e.to_string()))?;
+        let dest_canonical = dest_parent_canonical.join(dest_file_name);
+
+        if src_path == dest_canonical {
             return Err(Error::Validation(
                 "backup destination cannot be the primary data file".into(),
             ));
         }
-        if is_same_file(&src_path, &dest).unwrap_or(false) {
+        // If the destination exists, verify it is not the same file as the primary.
+        // Identity-check errors are propagated; they are never treated as proof of difference.
+        if dest_canonical.exists()
+            && is_same_file(&src_path, &dest_canonical).map_err(|e| Error::Io(e.to_string()))?
+        {
             return Err(Error::Validation(
                 "backup destination cannot be the same file as the primary data file".into(),
             ));
         }
-        if std::fs::symlink_metadata(&dest)
+        if std::fs::symlink_metadata(&dest_canonical)
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
         {
@@ -487,14 +523,7 @@ impl Store {
             ));
         }
 
-        let parent = dest
-            .parent()
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
-        let name = dest
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_else(|| "backup".into());
+        let name = dest_file_name.to_string_lossy();
         let pid = std::process::id();
         let time = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -503,8 +532,9 @@ impl Store {
 
         let tmp = loop {
             let counter = BACKUP_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let candidate = parent.join(format!("{name}.mini.tmp.{pid}.{time}.{counter}"));
-            if candidate == src_path || candidate == dest {
+            let candidate =
+                dest_parent_canonical.join(format!("{name}.mini.tmp.{pid}.{time}.{counter}"));
+            if candidate == src_path || candidate == dest_canonical {
                 continue;
             }
             let mut tmp_opts = OpenOptions::new();
@@ -530,12 +560,20 @@ impl Store {
             // never readable by anyone but the owner while the backup is in flight.
             // Open with Strict durability so `sync()` performs an fsync on the copied bytes
             // before the atomic rename, satisfying the documented durability guarantee.
-            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Strict, false)?;
+            let mut tmp_file = DataFile::open_existing(&tmp, Durability::Strict, false)?;
             tmp_file.sync()?;
             drop(tmp_file);
-            std::fs::rename(&tmp, &dest)?;
-            DataFile::sync_parent_dir(&dest)?;
-            let mut backup_file = DataFile::open_or_create(&dest, Durability::Strict, false)?;
+            std::fs::rename(&tmp, &dest_canonical)?;
+            DataFile::sync_parent_dir(&dest_canonical)?;
+            // Re-validate identity after publication: the primary path and the just-renamed
+            // destination must still be different files.
+            if is_same_file(&src_path, &dest_canonical).map_err(|e| Error::Io(e.to_string()))? {
+                return Err(Error::Validation(
+                    "backup destination collided with the primary data file after rename".into(),
+                ));
+            }
+            let mut backup_file =
+                DataFile::open_existing(&dest_canonical, Durability::Strict, false)?;
             let _scan = recovery::scan(&mut backup_file, |_, _| Ok(()))?;
             Ok(())
         })();
@@ -588,7 +626,7 @@ impl StoreInner {
             });
         }
         if self
-            .transaction_batches
+            .transaction_frame_offsets
             .contains_key(&frame.header.transaction_id)
         {
             return Err(Error::Corruption {
@@ -613,7 +651,8 @@ impl StoreInner {
         // the state rebuilt so far. This catches corrupted frames that pass checksums.
         // We do not re-run `validate_batch` here because configured `Limits` can change
         // between runs; committed frames are bounded by the hard frame-size limit and are
-        // decoded safely without allocating from untrusted lengths.
+        // decoded safely without allocating from untrusted lengths. The reconstructed batch
+        // is transient and is not retained in `StoreInner`.
         let batch = CommitBatch::from_records(
             frame.header.transaction_id,
             frame.header.commit_timestamp_ms,
@@ -639,8 +678,10 @@ impl StoreInner {
             frame.header.transaction_sequence,
             frame_offset,
         );
-        self.transaction_batches
-            .insert(frame.header.transaction_id, batch);
+        self.transaction_frame_offsets.insert(
+            frame.header.transaction_id,
+            (frame_offset, frame.header.total_frame_length),
+        );
         self.transaction_receipts
             .insert(frame.header.transaction_id, receipt);
         Ok(())
@@ -888,8 +929,20 @@ impl StoreInner {
 
         // Idempotency is checked first so a resubmitted transaction returns its original
         // receipt without re-running validation that would fail on already-committed event IDs.
-        if let Some(prev) = self.transaction_batches.get(&batch.transaction_id) {
-            if batch.logical_eq(prev) {
+        if let Some(&(prev_offset, prev_total_length)) =
+            self.transaction_frame_offsets.get(&batch.transaction_id)
+        {
+            let prev_bytes = self
+                .df_mut()
+                .read_at(prev_offset, prev_total_length as usize)?;
+            let prev_frame = Frame::decode(&prev_bytes)?;
+            let prev_records = record::decode_records(&prev_frame.payload)?;
+            let prev_batch = CommitBatch::from_records(
+                batch.transaction_id,
+                prev_frame.header.commit_timestamp_ms,
+                prev_records,
+            )?;
+            if batch.logical_eq(&prev_batch) {
                 return self
                     .transaction_receipts
                     .get(&batch.transaction_id)
@@ -910,13 +963,6 @@ impl StoreInner {
         self.validate_job_ops(&batch)?;
 
         let records = self.ops_to_records(&batch)?;
-        if records.len() > self.limits.max_records_per_transaction {
-            return Err(Error::Validation(format!(
-                "too many records: {} > {}",
-                records.len(),
-                self.limits.max_records_per_transaction
-            )));
-        }
         let payload_bytes = encode_records(&records);
 
         if payload_bytes.len()
@@ -947,6 +993,7 @@ impl StoreInner {
         let frame = Frame::new(frame_header, payload_bytes);
         let frame_offset = self.df().file_len();
         let frame_bytes = frame.encode();
+        let frame_total_length = frame_bytes.len() as u64;
 
         let original_file_len = self.df().file_len();
 
@@ -984,7 +1031,12 @@ impl StoreInner {
         }
 
         // Apply the staged delta to memory. From here on, the operation is infallible.
-        let receipt = self.apply_commit(&batch, frame_offset, records)?;
+        let receipt = self.apply_commit(
+            batch.transaction_id,
+            frame_offset,
+            frame_total_length,
+            records,
+        )?;
 
         // Failpoint: after memory apply.
         #[cfg(feature = "failpoint")]
@@ -1001,25 +1053,21 @@ impl StoreInner {
 
     fn apply_commit(
         &mut self,
-        batch: &CommitBatch,
+        transaction_id: Id,
         frame_offset: u64,
+        frame_total_length: u64,
         records: Vec<Record>,
     ) -> Result<CommitReceipt, Error> {
         // Apply the staged delta before making the transaction visible for idempotency,
         // so a failure here does not leave a receiptless batch in the idempotency index.
-        self.apply_records(&records, batch.transaction_id, frame_offset)?;
+        self.apply_records(&records, transaction_id, frame_offset)?;
         self.transaction_seq += 1;
 
-        let receipt = build_receipt(
-            &records,
-            batch.transaction_id,
-            self.transaction_seq,
-            frame_offset,
-        );
-        self.transaction_batches
-            .insert(batch.transaction_id, batch.clone());
+        let receipt = build_receipt(&records, transaction_id, self.transaction_seq, frame_offset);
+        self.transaction_frame_offsets
+            .insert(transaction_id, (frame_offset, frame_total_length));
         self.transaction_receipts
-            .insert(batch.transaction_id, receipt.clone());
+            .insert(transaction_id, receipt.clone());
         Ok(receipt)
     }
 
@@ -1028,11 +1076,17 @@ impl StoreInner {
             return Err(Error::Validation("transaction id cannot be zero".into()));
         }
         self.limits.validate_metadata(batch.metadata.len())?;
-        if batch.ops.len() > self.limits.max_records_per_transaction {
+        // `ops_to_records` may add one TransactionMeta record, so include it in the estimate.
+        let estimated_records = batch.ops.len()
+            + if batch.correlation_id.is_some() || !batch.metadata.is_empty() {
+                1
+            } else {
+                0
+            };
+        if estimated_records > self.limits.max_records_per_transaction {
             return Err(Error::Validation(format!(
                 "too many records: {} > {}",
-                batch.ops.len(),
-                self.limits.max_records_per_transaction
+                estimated_records, self.limits.max_records_per_transaction
             )));
         }
         for op in &batch.ops {
@@ -1055,6 +1109,9 @@ impl StoreInner {
                     self.limits.validate_string("projection", projection)?;
                     self.limits.validate_projection_key(key.len())?;
                     self.limits.validate_projection_value(value.len())?;
+                }
+                Op::ProjectionClear { projection, .. } => {
+                    self.limits.validate_string("projection", projection)?;
                 }
                 Op::ProjectionDelete {
                     projection, key, ..
@@ -1153,7 +1210,10 @@ impl StoreInner {
             if *version == sim.version && !changes && sim.version > 0 {
                 continue;
             }
-            if *version != sim.version + 1 {
+            let next_version = sim.version.checked_add(1).ok_or_else(|| {
+                Error::Validation(format!("projection version overflow for {projection}"))
+            })?;
+            if *version != next_version {
                 return Err(Error::ProjectionVersionMismatch {
                     projection: projection.clone(),
                     current: sim.version,
@@ -1561,6 +1621,7 @@ impl StoreInner {
         // Idempotent jobs whose lease expired on the final attempt must be durably
         // marked dead before later jobs in the same partition can be claimed.
         let mut expired_at_limit: Vec<(Id, Id)> = Vec::new();
+        let claim_limit = request.limit.min(self.limits.max_records_per_transaction);
         let mut partitions: Vec<(String, String)> = self
             .queue_partitions
             .keys()
@@ -1570,7 +1631,7 @@ impl StoreInner {
         partitions.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (queue, partition) in partitions {
-            if candidates.len() >= request.limit {
+            if candidates.len() >= claim_limit {
                 break;
             }
             let ids = self
@@ -1621,30 +1682,32 @@ impl StoreInner {
             }
         }
 
-        if expired_at_limit.is_empty() && candidates.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+        // Maintenance for final-attempt expired idempotent jobs is committed one job at a time.
+        // This guarantees that a transaction-limit bound can never make the queue permanently
+        // unclaimable: each call durably cleans at least one eligible expired job.
         for (job_id, lease_token) in &expired_at_limit {
-            batch = batch.fail_job(
+            let batch = CommitBatch::new(Id::new()?, request.now_ms).fail_job(
                 *job_id,
                 *lease_token,
                 "lease expired after max attempts",
                 None,
             );
-        }
-        for (job_id, lease_token, attempt, lease_expires_at_ms, _) in &candidates {
-            batch = batch.lease_job(
-                *job_id,
-                *lease_token,
-                request.worker_id.clone(),
-                *attempt,
-                *lease_expires_at_ms,
-            );
+            self.commit(batch)?;
         }
 
-        self.commit(batch)?;
+        if !candidates.is_empty() {
+            let mut batch = CommitBatch::new(Id::new()?, request.now_ms);
+            for (job_id, lease_token, attempt, lease_expires_at_ms, _) in &candidates {
+                batch = batch.lease_job(
+                    *job_id,
+                    *lease_token,
+                    request.worker_id.clone(),
+                    *attempt,
+                    *lease_expires_at_ms,
+                );
+            }
+            self.commit(batch)?;
+        }
 
         let mut claimed = Vec::with_capacity(candidates.len());
         for (job_id, lease_token, attempt, lease_expires_at_ms, spec) in candidates {

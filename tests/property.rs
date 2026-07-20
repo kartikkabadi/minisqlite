@@ -97,12 +97,17 @@ fn rand_valid_op(rng: &mut fastrand::Rng, model: &Model, now: i64) -> Op {
         .map(|(id, _)| *id)
         .collect();
 
+    // `fail_job` succeeds when the lease is still active, or when the lease has expired
+    // and the job is at the attempt ceiling and idempotent. Uncertain expired jobs can
+    // only be resolved, not failed.
     let fail_candidates: Vec<Id> = model
         .jobs
         .iter()
         .filter(|(_, j)| {
             matches!(j.internal_state, InternalState::Leased)
-                && (now < j.lease_expires_at_ms || j.attempt >= j.spec.max_attempts)
+                && (now < j.lease_expires_at_ms
+                    || (j.attempt >= j.spec.max_attempts
+                        && j.spec.effect_mode == EffectMode::Idempotent))
         })
         .map(|(id, _)| *id)
         .collect();

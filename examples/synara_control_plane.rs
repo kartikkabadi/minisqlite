@@ -13,11 +13,22 @@ fn now_ms() -> i64 {
 }
 
 fn main() {
-    let path: std::path::PathBuf = std::env::args().nth(1).map(Into::into).unwrap_or_else(|| {
-        // Use a process-specific temporary file so the default example does not
-        // delete or collide with a shared, predictable path.
-        std::env::temp_dir().join(format!("synara_control_plane_{}.mini", std::process::id()))
-    });
+    let (path, auto_delete): (std::path::PathBuf, bool) = match std::env::args().nth(1) {
+        Some(p) => (p.into(), false),
+        None => {
+            // Use a unique, randomly-suffixed temporary file per invocation so the default
+            // example is safely repeatable even if a previous run left files behind.
+            let id = Id::new().unwrap().to_hex();
+            (
+                std::env::temp_dir().join(format!(
+                    "synara_control_plane_{}_{}.mini",
+                    std::process::id(),
+                    id
+                )),
+                true,
+            )
+        }
+    };
     let store = StoreBuilder::new(&path)
         .durability(Durability::Strict)
         .open()
@@ -332,4 +343,7 @@ fn main() {
 
     println!("All Synara-shaped flows completed.");
     drop(store);
+    if auto_delete {
+        let _ = std::fs::remove_file(&path);
+    }
 }

@@ -257,23 +257,6 @@ impl CommitBatch {
         self
     }
 
-    /// Compare logical content, ignoring the commit timestamp and expected stream versions.
-    /// The timestamp is an application-supplied wall-clock value; expected versions are
-    /// preconditions, not durable content.
-    pub(crate) fn logical_eq(&self, other: &CommitBatch) -> bool {
-        if self.transaction_id != other.transaction_id
-            || self.correlation_id != other.correlation_id
-            || self.metadata != other.metadata
-            || self.ops.len() != other.ops.len()
-        {
-            return false;
-        }
-        self.ops
-            .iter()
-            .zip(other.ops.iter())
-            .all(|(a, b)| op_logical_eq(a, self.now_ms, b, other.now_ms))
-    }
-
     /// Reconstruct a `CommitBatch` from the durable records of a committed frame.
     /// Store-assigned sequences (global sequence, stream version) are stripped because they
     /// are not part of the application's logical commit.
@@ -309,6 +292,55 @@ impl CommitBatch {
             expected_stream_versions: Vec::new(),
             ops,
         })
+    }
+
+    /// Compare logical content, ignoring the commit timestamp and expected stream versions.
+    /// The timestamp is an application-supplied wall-clock value; expected versions are
+    /// preconditions, not durable content. `now_ms` is still used to resolve default
+    /// `retry_after_ms` values for `FailJob` ops.
+    pub(crate) fn logical_eq(&self, other: &CommitBatch) -> bool {
+        if self.transaction_id != other.transaction_id
+            || self.correlation_id != other.correlation_id
+            || self.metadata != other.metadata
+            || self.ops.len() != other.ops.len()
+        {
+            return false;
+        }
+        self.ops
+            .iter()
+            .zip(other.ops.iter())
+            .all(|(a, b)| op_logical_eq(a, self.now_ms, b, other.now_ms))
+    }
+}
+
+fn fail_retry_eq(a: Option<i64>, a_now: i64, b: Option<i64>, b_now: i64) -> bool {
+    let a_eff = a.or_else(|| a_now.checked_add(1000));
+    let b_eff = b.or_else(|| b_now.checked_add(1000));
+    a_eff == b_eff
+}
+
+fn op_logical_eq(a: &Op, a_now: i64, b: &Op, b_now: i64) -> bool {
+    match (a, b) {
+        (
+            Op::FailJob {
+                job_id,
+                lease_token,
+                error_summary,
+                retry_after_ms,
+            },
+            Op::FailJob {
+                job_id: b_job_id,
+                lease_token: b_lease_token,
+                error_summary: b_error_summary,
+                retry_after_ms: b_retry_after_ms,
+            },
+        ) => {
+            job_id == b_job_id
+                && lease_token == b_lease_token
+                && error_summary == b_error_summary
+                && fail_retry_eq(*retry_after_ms, a_now, *b_retry_after_ms, b_now)
+        }
+        _ => a == b,
     }
 }
 
@@ -466,36 +498,5 @@ fn resolution_from_record(r: RecordResolution) -> Resolution {
         RecordResolution::Retry => Resolution::Retry,
         RecordResolution::MarkSucceeded => Resolution::MarkSucceeded,
         RecordResolution::MarkDead => Resolution::MarkDead,
-    }
-}
-
-fn fail_retry_eq(a: Option<i64>, a_now: i64, b: Option<i64>, b_now: i64) -> bool {
-    let a_eff = a.or_else(|| a_now.checked_add(1000));
-    let b_eff = b.or_else(|| b_now.checked_add(1000));
-    a_eff == b_eff
-}
-
-fn op_logical_eq(a: &Op, a_now: i64, b: &Op, b_now: i64) -> bool {
-    match (a, b) {
-        (
-            Op::FailJob {
-                job_id,
-                lease_token,
-                error_summary,
-                retry_after_ms,
-            },
-            Op::FailJob {
-                job_id: b_job_id,
-                lease_token: b_lease_token,
-                error_summary: b_error_summary,
-                retry_after_ms: b_retry_after_ms,
-            },
-        ) => {
-            job_id == b_job_id
-                && lease_token == b_lease_token
-                && error_summary == b_error_summary
-                && fail_retry_eq(*retry_after_ms, a_now, *b_retry_after_ms, b_now)
-        }
-        _ => a == b,
     }
 }

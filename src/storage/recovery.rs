@@ -14,8 +14,9 @@ pub struct ScanResult {
 
 /// Scan the primary data file sequentially, replaying each valid frame through `on_frame`.
 ///
-/// Mid-file corruption causes a hard failure. An incomplete or full-length but corrupt
-/// final frame is reported as a torn tail so the caller can truncate to `last_valid_offset`.
+/// Mid-file corruption and fully synced final-frame corruption (checksum, trailer, magic,
+/// or semantic errors) cause a hard failure. Only a physically incomplete tail at EOF is
+/// reported as `tail_truncated` so the caller can truncate to `last_valid_offset`.
 /// Frames are not accumulated; the callback handles each frame as it is validated.
 pub fn scan(
     data_file: &mut DataFile,
@@ -27,9 +28,6 @@ pub fn scan(
     let mut tail_truncated = false;
 
     while offset < file_len {
-        // A torn tail must be shorter than a complete frame header. Once the file
-        // metadata reports enough bytes, any read failure is an I/O error, not a
-        // recoverable tail.
         let remaining = file_len
             .checked_sub(offset)
             .ok_or_else(|| Error::Corruption {
@@ -43,8 +41,9 @@ pub fn scan(
 
         let header_bytes = data_file.read_at(offset, FRAME_HEADER_SIZE)?;
 
-        // A full header that fails to decode at the very end of the file is a torn
-        // tail header rather than mid-file corruption.
+        // A header that is exactly `FRAME_HEADER_SIZE` bytes long and fails to decode is
+        // treated as an incomplete tail header: the process crashed while writing the header.
+        // A header with trailing bytes after it that fails to decode is mid-file corruption.
         let header =
             match FrameHeader::decode(header_bytes[..FRAME_HEADER_SIZE].try_into().unwrap()) {
                 Ok(h) => h,
@@ -81,24 +80,13 @@ pub fn scan(
             break;
         }
 
-        // Read the complete frame (header + payload + trailer) and decode it.
+        // Read the complete frame (header + payload + trailer) and decode it. If the frame
+        // is fully present and still fails to decode, it is semantic/physical corruption.
         let frame_bytes = data_file.read_at(offset, header.total_frame_length as usize)?;
-        let is_final = frame_end == file_len;
-        match Frame::decode(&frame_bytes) {
-            Ok(frame) => {
-                on_frame(frame, offset)?;
-                offset = frame_end;
-                last_valid = offset;
-            }
-            // A full-length final frame whose checksum or trailer is corrupt is treated as a
-            // torn tail: the process probably crashed after the header was written but before
-            // the body/fsync completed.
-            Err(_) if is_final => {
-                tail_truncated = true;
-                break;
-            }
-            Err(e) => return Err(with_offset(e, offset)),
-        }
+        let frame = Frame::decode(&frame_bytes).map_err(|e| with_offset(e, offset))?;
+        on_frame(frame, offset)?;
+        offset = frame_end;
+        last_valid = offset;
     }
 
     Ok(ScanResult {
@@ -308,15 +296,15 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_final_frame_checksum_is_torn_tail() {
+    fn corrupt_final_frame_checksum_fails_hard() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_final_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new().unwrap());
         append_frame(&mut file, 2, Id::new().unwrap());
 
-        // Corrupt one byte in the final frame's trailer. The frame has the declared
-        // length and is the last one in the file, so it is treated as a torn tail.
+        // Corrupt one byte in the final frame's trailer. The frame is fully present and
+        // synced, so this is bitrot/corruption and must fail without truncation.
         let frame2_offset =
             FILE_HEADER_SIZE as u64 + make_frame(1, Id::new().unwrap()).header.total_frame_length;
         let mut bytes = file.read_all().unwrap();
@@ -328,14 +316,7 @@ mod tests {
         std::fs::write(&tmp, &bytes).unwrap();
 
         let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
-        let mut count = 0;
-        let result = scan(&mut file, |_, _| {
-            count += 1;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(count, 1);
-        assert!(result.tail_truncated);
+        assert!(scan(&mut file, |_, _| Ok(())).is_err());
         let _ = std::fs::remove_file(&tmp);
     }
 

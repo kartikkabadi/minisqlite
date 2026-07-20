@@ -39,7 +39,7 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 
 * **File format**: 64-byte file header + 64-byte frame header + encoded records + 32-byte trailer. Checksums cover header, payload, and trailer. Hard `MAX_FRAME_SIZE = 64 MiB`.
 * **Commit path**: validate batch → check idempotency and stream versions → encode records → append frame → sync (Strict) → apply to in-memory state atomically.
-* **Recovery path**: validate header → scan frames sequentially → decode each frame within the hard frame-size bound → rebuild transaction/event/projection/job indexes → truncate incomplete tail. Configured `Limits` do not affect replay of committed frames.
+* **Recovery path**: validate header → scan frames sequentially → decode each frame within the hard frame-size bound → rebuild transaction/event/projection/job indexes → truncate incomplete tail. A fully synced final frame whose checksum, trailer, or semantics are corrupt fails closed and is not silently truncated. Configured `Limits` do not affect replay of committed frames.
 * **Projection model**: in-memory `BTreeMap` keyed by projection name, each holding an ordered `BTreeMap` of keys to values. Versions are monotonic.
 * **Job model**: `JobStateRecord` tracks spec, internal state, lease token, attempt, expiry, and retry time. Public `JobState` is derived at query time.
 * **Concurrency model**: one process owns the store via an advisory lock. Writes serialize through an `RwLock` write guard; reads take read guards and may run concurrently. No async runtime dependency.
@@ -49,10 +49,10 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * A `CommitBatch` is visible entirely or not at all.
 * Global event sequence and per-stream versions are monotonic.
 * Event and transaction IDs are unique; same logical content is idempotent, different content returns a typed conflict.
-* Frame-level checksum integrity is enforced; torn trailing frames are truncated; mid-file corruption fails closed.
-* Projection version conflicts fail fast and atomic put/delete/clear/replace is visible with its transaction.
+* Frame-level checksum integrity is enforced; torn trailing frames are truncated; mid-file and complete final-frame semantic/physical corruption fails closed.
+* Projection version conflicts fail fast; `ProjectionReplace` canonicalizes duplicate keys by last-wins and rejects same-version changes; `ProjectionClear` validates the projection name; projection version arithmetic is checked.
 * At most one active lease per job; stale tokens cannot ack/fail a newer lease. New IDs are 128 bits from the OS CSPRNG and are not reused across processes or restarts.
-* Partition-ordered job claiming survives concurrent callers.
+* Partition-ordered job claiming survives concurrent callers; final-attempt expired idempotent job maintenance is committed in bounded single-record transactions so a small `max_records_per_transaction` cannot wedge a queue.
 * Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain and are not silently retried.
 * Uncertain outcomes are reported and can be resolved durably.
 * Reopen reconstructs identical in-memory state from durable frames, even if the configured `Limits` have changed.
@@ -63,7 +63,10 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * CLI `export --format jsonl` emits valid JSON with hex keys/values, and projection scan JSON preserves arbitrary binary keys.
 * Strict creation fsyncs the directory entry on Unix, and the primary file is created with restrictive permissions before any data is written.
 * The single-owner lock is held on the primary data file itself; no separate lock file is used.
-* Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected.
+* Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected via `O_NOFOLLOW` on known Unix targets and `FILE_FLAG_OPEN_REPARSE_POINT` plus a post-open `is_symlink` check on Windows.
+* `Id::new()` returns a typed `Io`/`Validation` error on entropy-source failure; the Unix implementation opens `/dev/urandom` per call and does not panic.
+* Record decoding rejects noncanonical boolean/presence markers (only exact `0`/`1` are accepted for optional IDs, strings, bytes, and `JobFail.terminal`).
+* `examples/synara_control_plane.rs` uses a uniquely named temporary file with a random suffix and removes only the file it created.
 * Reads can run concurrently while writes remain serialized.
 
 ## Guarantees not yet proved
@@ -73,6 +76,9 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Exactly-once external side effects; the engine records outcomes and requires idempotency keys or explicit resolution.
 * Distributed or multi-process write coordination.
 * Correctness under arbitrary large clock jumps (timestamps are caller-supplied).
+* A sub-linear memory bound for the open store: in-memory indexes (`events`, `event_ids`, `transaction_frame_offsets`, `transaction_receipts`, `projections`, `jobs`) are proportional to total committed history. Only the transient frame decoder is streaming (one frame at a time).
+* Coverage-guided fuzzing equivalence: the decoder tests are deterministic seeded mutation tests, not a libFuzzer corpus.
+* Universal atomic symlink rejection across every possible race window; the implementation uses handle-based best-effort checks and is honest about the supported platform matrix.
 
 ## Verification
 
@@ -133,7 +139,7 @@ The four required fuzz targets are provided as deterministic `#[test]` harnesses
 | `record_decode` | `tests/fuzz_targets.rs` | Passed (1024 seeds, no panics) |
 | `recovery_scan` | `tests/fuzz_targets.rs` | Passed (256 seeds, no panics) |
 
-These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the build dependency tree while keeping the same decoder coverage.
+These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the build dependency tree. They are deterministic seeded mutation tests that exercise decoder robustness against random bytes; they do not claim coverage-guided fuzzing equivalence.
 
 ## Complexity
 
@@ -251,7 +257,7 @@ Per the Review #4 merge-blocking findings, the following fixes and adversarial r
 5. `Store::backup` creates the sibling temporary file with `create_new` and `0o600` permissions before writing bytes, so backup confidentiality does not depend on a permission race.
 6. `Id::new()` returns a typed `Io`/`Validation` error on entropy failure; callers in `Store` propagate the error without panicking or poisoning the `RwLock`.
 7. Symlink rejection is atomic: `open_or_create` opens the primary path with `O_NOFOLLOW` semantics and rejects any symlink component in the canonical parent path.
-8. Recovery treats a full-length final frame whose checksum/trailer fails as a torn tail, truncating to the last valid offset; mid-file corruption still fails closed.
+8. Recovery truncates only structurally incomplete tails (short header, payload, or trailer). A fully synced final frame whose checksum, trailer, or semantics are corrupt fails closed and is not silently discarded.
 9. New regression tests cover final-attempt lease expiry without `fail_job` and a later job in the same partition before and after reopen.
 10. New regression tests cover uncertain `Resolution::Retry` at the attempt ceiling and full-length final-frame checksum corruption.
 11. `tests/property.rs` was replaced with a full job-lifecycle reference model (`enqueue → claim → ack/fail/cancel/resolve → reopen`) that compares `Store` state after every operation.
@@ -271,6 +277,34 @@ Per the Review #4 merge-blocking findings, the following fixes and adversarial r
 * `corrupt_final_frame_checksum_is_torn_tail`
 * `mismatched_frame_record_count_is_rejected`
 
+## Review #5 P1 fix pass
+
+Per the Review #5 merge-blocking findings, the following fixes and adversarial regression tests were added:
+
+1. `Store::claim_jobs` now cleans final-attempt expired idempotent jobs one at a time in bounded single-record transactions, so a small `max_records_per_transaction` cannot make an entire queue permanently unclaimable.
+2. `storage::recovery::scan` only truncates structurally incomplete tails. A complete final frame whose checksum, trailer, or semantics fail now fails closed and is not silently truncated.
+3. `Store::backup` uses the resolved canonical path held by `DataFile`, resolves the destination to an absolute path, revalidates file identity before and after the rename, and never treats an identity-check error as proof that two files differ.
+4. `JobStateRecord::fail` rejects `fail_job` for expired `UncertainOnLeaseExpiry` leases at the attempt ceiling; only `resolve_uncertain_job` can finalize the outcome.
+5. `ProjectionState::replace` and `replace_changes` canonicalize duplicate replacement keys by last-wins, so no-op detection and mutation always use the same deterministic representation.
+6. `Id::new()` no longer caches a `OnceLock` handle; it opens `/dev/urandom` per call on Unix and returns a typed `Io` error on any entropy-source failure without panicking.
+7. The in-memory `StoreInner` indexes are documented as proportional to total committed history. The transient frame decoder is streaming (one frame at a time), but the open store is not claimed to be one-frame bounded.
+8. `ProjectionClear` now validates the projection name against `Limits::max_string_len`.
+9. Projection version arithmetic uses `checked_add(1)` and returns a typed `Validation` error on overflow.
+10. Symlink rejection uses `O_NOFOLLOW` on known Unix targets and `FILE_FLAG_OPEN_REPARSE_POINT` plus a post-open `is_symlink` check on Windows. The documentation does not claim universal atomicity.
+11. The record decoder rejects noncanonical boolean/presence markers (only exact `0`/`1` for optional IDs, strings, bytes, and `JobFail.terminal`).
+12. `docs/FINAL_REPORT.md` now describes the decoder tests as deterministic seeded mutation tests and does not claim they are equivalent to coverage-guided libFuzzer runs.
+13. `examples/synara_control_plane.rs` creates a uniquely named temporary file with a random suffix and removes only the file created by this invocation.
+
+### Adversarial regression tests added
+
+* `expired_maintenance_makes_progress_with_tiny_transaction_limit`
+* `final_frame_corruption_fails_open_and_verify_does_not_truncate`
+* `backup_rejects_live_path_after_working_directory_change`
+* `expired_uncertain_job_cannot_be_failed`
+* `duplicate_projection_replace_keys_are_canonicalized_and_versioned`
+* `projection_clear_name_length_is_validated`
+* `projection_version_overflow_is_rejected`
+
 ## Verdict
 
-**Fixes applied — do not merge yet.** All Review #4 merge-blocking findings are addressed, the property model matches store behavior across reopen, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.
+**Fixes applied — do not merge yet.** All Review #5 merge-blocking findings are addressed, adversarial regressions pass, the full verification suite passes, and `docs/FINAL_REPORT.md` claims only what the tests prove. The PR remains open and unmerged per the review instruction.

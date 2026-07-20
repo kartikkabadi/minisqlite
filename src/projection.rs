@@ -45,10 +45,15 @@ impl ProjectionState {
     }
 
     pub fn replace(&mut self, entries: &[ProjectionEntry]) {
-        self.data.clear();
+        // Canonicalize duplicate keys by last-wins semantics so no-op detection and mutation
+        // always use the same representation. This keeps projection version monotonicity:
+        // a duplicate-key replace at the current version either matches the current map or
+        // requires a version bump, and a bumped-version replace produces a deterministic state.
+        let mut canonical = BTreeMap::new();
         for e in entries {
-            self.data.insert(e.key.clone(), e.value.clone());
+            canonical.insert(e.key.clone(), e.value.clone());
         }
+        self.data = canonical;
     }
 
     pub fn put_changes(&self, key: &[u8], value: &[u8]) -> bool {
@@ -64,13 +69,18 @@ impl ProjectionState {
     }
 
     pub fn replace_changes(&self, entries: &[ProjectionEntry]) -> bool {
-        if entries.len() != self.data.len() {
+        // Build the same canonical, last-wins representation that `replace` will apply.
+        let mut canonical = BTreeMap::new();
+        for e in entries {
+            canonical.insert(e.key.clone(), e.value.clone());
+        }
+        if canonical.len() != self.data.len() {
             return true;
         }
-        entries.iter().any(|e| {
+        canonical.iter().any(|(k, v)| {
             self.data
-                .get(&e.key)
-                .is_none_or(|dv| dv.as_slice() != e.value.as_slice())
+                .get(k)
+                .is_none_or(|dv| dv.as_slice() != v.as_slice())
         })
     }
 

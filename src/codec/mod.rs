@@ -162,10 +162,13 @@ impl<'a> Reader<'a> {
 
     pub fn read_optional_id(&mut self) -> Result<Option<Id>, Error> {
         let present = self.read_u8()?;
-        if present != 0 {
-            Ok(Some(self.read_id()?))
-        } else {
-            Ok(None)
+        match present {
+            0 => Ok(None),
+            1 => Ok(Some(self.read_id()?)),
+            _ => Err(Error::Corruption {
+                message: format!("invalid optional id marker {present}"),
+                offset: self.pos as u64,
+            }),
         }
     }
 

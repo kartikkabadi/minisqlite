@@ -18,28 +18,28 @@ cargo run --example benchmark --release
 
 | Durability | Events | Commit time | Reopen time | File size |
 |------------|--------|-------------|-------------|-----------|
-| Memory     | 1,000   | 2.4 ms      | 2.4 ms      | 182 KB    |
-| Memory     | 10,000  | 22.1 ms     | 24.7 ms     | 1.82 MB   |
-| Memory     | 100,000 | 233.8 ms    | 253.1 ms    | 18.2 MB   |
-| Memory     | 1,000,000 | 2.69 s    | 3.39 s      | 182 MB    |
-| Strict     | 1,000   | 2.1 ms      | 2.0 ms      | 182 KB    |
-| Strict     | 10,000  | 20.4 ms     | 19.6 ms     | 1.82 MB   |
-| Strict     | 100,000 | 207.4 ms    | 210.7 ms    | 18.2 MB   |
-| Strict     | 1,000,000 | 2.69 s    | 3.28 s      | 182 MB    |
+| Memory     | 1,000   | 4.0 ms      | 2.2 ms      | 182 KB    |
+| Memory     | 10,000  | 40.0 ms     | 23.5 ms     | 1.82 MB   |
+| Memory     | 100,000 | 420.6 ms    | 229.3 ms    | 18.2 MB   |
+| Memory     | 1,000,000 | 4.44 s    | 2.72 s      | 182 MB    |
+| Strict     | 1,000   | 4.1 ms      | 2.0 ms      | 182 KB    |
+| Strict     | 10,000  | 39.2 ms     | 21.2 ms     | 1.82 MB   |
+| Strict     | 100,000 | 397.2 ms    | 208.0 ms    | 18.2 MB   |
+| Strict     | 1,000,000 | 4.44 s    | 2.69 s      | 182 MB    |
 
 ## Projection and job operations
 
 | Operation | Time |
 |-----------|------|
-| Replace 10,000 projection entries | 4.6 ms |
-| Prefix scan (100 matches out of 10,000) | 14 µs |
-| Enqueue 10,000 jobs | 21.8 ms |
-| Claim and acknowledge 10,000 jobs | 927.6 ms |
+| Replace 10,000 projection entries | 5.7 ms |
+| Prefix scan (100 matches out of 10,000) | 13.1 µs |
+| Enqueue 10,000 jobs | 39.9 ms |
+| Claim and acknowledge 10,000 jobs | 937.8 ms |
 
 ## Decision on snapshots and compaction
 
 Replay of 100,000 events completes in well under one second on the reference hardware.
-At 1,000,000 events, replay grows to roughly 2.6-2.7 seconds. Projection and job operations
+At 1,000,000 events, replay grows to roughly 2.7 seconds. Projection and job operations
 are sub-millisecond to low-double-digit milliseconds. The file grows linearly with the number
 of events, which is expected for an append-only format.
 
