@@ -139,7 +139,13 @@ impl<'a> Reader<'a> {
     pub fn read_bytes(&mut self) -> Result<Vec<u8>, Error> {
         let len = self.read_u32()? as usize;
         self.need(len)?;
-        let v = self.bytes[self.pos..self.pos + len].to_vec();
+        let mut v = Vec::new();
+        if let Err(e) = v.try_reserve_exact(len) {
+            return Err(Error::Validation(format!(
+                "cannot allocate {len} byte buffer: {e}"
+            )));
+        }
+        v.extend_from_slice(&self.bytes[self.pos..self.pos + len]);
         self.pos += len;
         Ok(v)
     }
