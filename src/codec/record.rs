@@ -25,6 +25,10 @@ const RECORD_SUPPORTED_FLAGS: u8 = 0;
 /// `Limits::max_records_per_transaction`.
 pub const MAX_RECORDS_PER_FRAME: u32 = 1 << 20; // 1,048,576
 
+/// Smallest possible encoded record size (an empty `TransactionMeta` record).
+/// Used to bound `expected_count` by payload geometry before allocating memory.
+const MIN_ENCODED_RECORD_SIZE: usize = 12;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
     pub global_sequence: u64,
@@ -565,12 +569,23 @@ pub fn encode_records(records: &[Record]) -> Vec<u8> {
 ///
 /// `expected_count` is the record count declared by the frame header. Allocation and the
 /// decoded count are bounded by [`MAX_RECORDS_PER_FRAME`] to avoid unbounded memory growth
-/// from a valid-but-enormous frame.
+/// from a valid-but-enormous frame. Before reserving, `expected_count` is also bounded by
+/// payload geometry so a tiny frame cannot force a giant allocation.
 pub fn decode_records(bytes: &[u8], expected_count: u32) -> Result<Vec<Record>, Error> {
     if expected_count > MAX_RECORDS_PER_FRAME {
         return Err(Error::Corruption {
             message: format!(
                 "record count {expected_count} exceeds maximum {MAX_RECORDS_PER_FRAME}"
+            ),
+            offset: 0,
+        });
+    }
+    let max_records_by_geometry = bytes.len() / MIN_ENCODED_RECORD_SIZE;
+    if expected_count as usize > max_records_by_geometry {
+        return Err(Error::Corruption {
+            message: format!(
+                "record count {expected_count} cannot fit in payload of {} bytes (min {MIN_ENCODED_RECORD_SIZE} bytes/record)",
+                bytes.len()
             ),
             offset: 0,
         });

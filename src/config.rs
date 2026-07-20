@@ -1,4 +1,5 @@
 use crate::codec::frame::{FRAME_HEADER_SIZE, FRAME_TRAILER_SIZE, MAX_FRAME_SIZE};
+use crate::codec::record::MAX_RECORDS_PER_FRAME;
 
 /// Controls how strictly a commit synchronizes to durable storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -195,6 +196,12 @@ impl Limits {
             return Err(crate::Error::Validation(
                 "max_records_per_transaction must be greater than 0".into(),
             ));
+        }
+        if self.max_records_per_transaction > MAX_RECORDS_PER_FRAME as usize {
+            return Err(crate::Error::Validation(format!(
+                "max_records_per_transaction {} exceeds hard frame record ceiling {}",
+                self.max_records_per_transaction, MAX_RECORDS_PER_FRAME
+            )));
         }
         if self.max_records_per_transaction > u32::MAX as usize {
             return Err(crate::Error::Validation(
