@@ -71,10 +71,12 @@ fn cli_verify_and_doctor_succeed() {
     ]);
     assert!(status.success());
     assert!(out.contains("hello"));
+    assert!(out.contains("thread-1"));
 
     let (out, status) = run(&[
         path.to_str().unwrap(),
         "--json",
+        "--show-payloads",
         "projections",
         "scan",
         "threads",
@@ -82,7 +84,8 @@ fn cli_verify_and_doctor_succeed() {
         "thread-",
     ]);
     assert!(status.success());
-    assert!(out.contains("thread-1"));
+    assert!(out.contains("\"key\":\"7468726561642d31\""));
+    assert!(out.contains("\"value\":\"68656c6c6f\""));
 
     let (out, status) = run(&[path.to_str().unwrap(), "events", "tail", "1"]);
     assert!(status.success());

@@ -18,7 +18,9 @@ fn main() {
         .map(Into::into)
         .unwrap_or_else(|| std::env::temp_dir().join("synara_control_plane.mini"));
     let delete_after = std::env::args().len() < 2;
-    let _ = std::fs::remove_file(&path);
+    if delete_after {
+        let _ = std::fs::remove_file(&path);
+    }
     let store = StoreBuilder::new(&path)
         .durability(Durability::Strict)
         .open()

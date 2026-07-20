@@ -31,7 +31,6 @@ Options:
   -j, --json                       Emit machine-readable JSON output.
   -p, --show-payloads              Show full payloads/values in events, jobs, and projections.
   -d, --durability strict|memory   Durability mode (default: strict).
-  -l, --lock <PATH>                Custom lock-file path.
   -h, --help                       Print this help.
 ";
 
@@ -39,7 +38,6 @@ struct GlobalOpts {
     json: bool,
     show_payloads: bool,
     durability: Durability,
-    lock_path: Option<String>,
 }
 
 struct CommandOpts {
@@ -145,7 +143,6 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
         json: false,
         show_payloads: false,
         durability: Durability::Strict,
-        lock_path: None,
     };
     let mut cmd_opts = CommandOpts {
         limit: None,
@@ -170,12 +167,6 @@ fn parse_args() -> Result<(GlobalOpts, Command), Error> {
                         .next()
                         .ok_or_else(|| Error::Usage("missing durability value".into()))?;
                     global.durability = parse_durability(&value)?;
-                }
-                "-l" | "--lock" => {
-                    let value = args
-                        .next()
-                        .ok_or_else(|| Error::Usage("missing lock path".into()))?;
-                    global.lock_path = Some(value);
                 }
                 "--limit" => {
                     let value = args
@@ -378,23 +369,12 @@ fn parse_path_first(positionals: &[String]) -> Result<(Vec<String>, String, Vec<
 fn run() -> Result<(), Error> {
     let (opts, cmd) = parse_args()?;
     match cmd {
-        Command::Doctor { path } => {
-            doctor(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
+        Command::Doctor { path } => doctor(&path, opts.durability, opts.json),
+        Command::Verify { path } => verify(&path, opts.durability, opts.json),
+        Command::Stats { path } => stats(&path, opts.durability, opts.json),
+        Command::EventsTail { path, limit } => {
+            events_tail(&path, opts.durability, opts.json, opts.show_payloads, limit)
         }
-        Command::Verify { path } => {
-            verify(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
-        }
-        Command::Stats { path } => {
-            stats(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
-        }
-        Command::EventsTail { path, limit } => events_tail(
-            &path,
-            opts.durability,
-            opts.lock_path.as_deref(),
-            opts.json,
-            opts.show_payloads,
-            limit,
-        ),
         Command::EventsStream {
             path,
             stream_id,
@@ -402,19 +382,15 @@ fn run() -> Result<(), Error> {
         } => events_stream(
             &path,
             opts.durability,
-            opts.lock_path.as_deref(),
             opts.json,
             opts.show_payloads,
             &stream_id,
             limit,
         ),
-        Command::ProjectionsList { path } => {
-            projections_list(&path, opts.durability, opts.lock_path.as_deref(), opts.json)
-        }
+        Command::ProjectionsList { path } => projections_list(&path, opts.durability, opts.json),
         Command::ProjectionsScan { path, name, prefix } => projections_scan(
             &path,
             opts.durability,
-            opts.lock_path.as_deref(),
             opts.json,
             opts.show_payloads,
             &name,
@@ -423,33 +399,18 @@ fn run() -> Result<(), Error> {
         Command::JobsList { path, queue, state } => jobs_list(
             &path,
             opts.durability,
-            opts.lock_path.as_deref(),
             opts.json,
             opts.show_payloads,
             queue.as_deref(),
             state,
         ),
-        Command::Export { path } => export(&path, opts.durability, opts.lock_path.as_deref()),
-        Command::Backup { path, dest } => backup(
-            &path,
-            opts.durability,
-            opts.lock_path.as_deref(),
-            opts.json,
-            &dest,
-        ),
+        Command::Export { path } => export(&path, opts.durability),
+        Command::Backup { path, dest } => backup(&path, opts.durability, opts.json, &dest),
     }
 }
 
-fn open_store(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-) -> Result<minisqlite::Store, Error> {
-    let mut builder = StoreBuilder::new(path).durability(durability);
-    if let Some(lock) = lock_path {
-        builder = builder.lock_path(lock);
-    }
-    builder.open()
+fn open_store(path: &str, durability: Durability) -> Result<minisqlite::Store, Error> {
+    StoreBuilder::new(path).durability(durability).open()
 }
 
 fn parse_durability(s: &str) -> Result<Durability, Error> {
@@ -460,13 +421,8 @@ fn parse_durability(s: &str) -> Result<Durability, Error> {
     }
 }
 
-fn doctor(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-) -> Result<(), Error> {
-    match open_store(path, durability, lock_path) {
+fn doctor(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
+    match open_store(path, durability) {
         Ok(store) => {
             store.verify()?;
             let stats = store.stats();
@@ -535,13 +491,8 @@ fn doctor(
     }
 }
 
-fn verify(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+fn verify(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
+    let store = open_store(path, durability)?;
     store.verify()?;
     if json {
         println!("{}", serde_json::json!({ "ok": true }));
@@ -551,13 +502,8 @@ fn verify(
     Ok(())
 }
 
-fn stats(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+fn stats(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
+    let store = open_store(path, durability)?;
     let stats = store.stats();
     if json {
         let json = serde_json::to_string(&stats)
@@ -591,12 +537,11 @@ fn stats(
 fn events_tail(
     path: &str,
     durability: Durability,
-    lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
     limit: usize,
 ) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+    let store = open_store(path, durability)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let start = store.high_water_sequence().saturating_sub(limit as u64);
@@ -613,13 +558,12 @@ fn events_tail(
 fn events_stream(
     path: &str,
     durability: Durability,
-    lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
     stream_id: &str,
     limit: usize,
 ) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+    let store = open_store(path, durability)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     let start = store
@@ -636,13 +580,8 @@ fn events_stream(
     Ok(())
 }
 
-fn projections_list(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+fn projections_list(path: &str, durability: Durability, json: bool) -> Result<(), Error> {
+    let store = open_store(path, durability)?;
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
     for name in store.projection_names() {
@@ -663,13 +602,12 @@ fn projections_list(
 fn projections_scan(
     path: &str,
     durability: Durability,
-    lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
     name: &str,
     prefix: Option<&str>,
 ) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+    let store = open_store(path, durability)?;
     let prefix_bytes = prefix.map(|p| p.as_bytes()).unwrap_or_default();
     let entries = store.scan_projection_prefix(name, prefix_bytes)?;
     let stdout = io::stdout();
@@ -686,7 +624,7 @@ fn projections_scan(
                 "{}",
                 serde_json::json!({
                     "projection": name,
-                    "key": String::from_utf8_lossy(&entry.key),
+                    "key": hex(&entry.key),
                     "value": value,
                 })
             )?;
@@ -706,13 +644,12 @@ fn projections_scan(
 fn jobs_list(
     path: &str,
     durability: Durability,
-    lock_path: Option<&str>,
     json: bool,
     show_payloads: bool,
     queue: Option<&str>,
     state: Option<JobState>,
 ) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+    let store = open_store(path, durability)?;
     let now_ms = current_time_ms();
     let queue = queue.map(|s| s.to_string());
     let records = store.jobs(now_ms, queue, state);
@@ -740,6 +677,8 @@ fn jobs_list(
                     "lease_expires_at_ms": info.lease_expires_at_ms,
                     "retry_after_ms": info.retry_after_ms,
                     "terminal_at_ms": info.terminal_at_ms,
+                    "result_digest": info.result_digest.as_deref().map(hex),
+                    "error_summary": info.error_summary,
                 })
             );
         } else {
@@ -764,78 +703,80 @@ fn jobs_list(
     Ok(())
 }
 
-fn export(path: &str, durability: Durability, lock_path: Option<&str>) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+fn export(path: &str, durability: Durability) -> Result<(), Error> {
+    let store = open_store(path, durability)?;
     let now_ms = current_time_ms();
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
     for e in store.events_after(0, usize::MAX) {
-        writeln!(
-            out,
-            r#"{{"type":"event","global_sequence":{},"stream_version":{},"event_id":"{}","stream_id":"{}","event_type":"{}","schema_version":{},"occurred_at_ms":{},"causation_id":"{}","correlation_id":"{}","payload":"{}","metadata":"{}"}}"#,
-            e.global_sequence,
-            e.stream_version,
-            e.event.event_id,
-            json_escape(&e.event.stream_id),
-            json_escape(&e.event.event_type),
-            e.event.schema_version,
-            e.event.occurred_at_ms,
-            e.event.causation_id.unwrap_or(minisqlite::Id::ZERO),
-            e.event.correlation_id.unwrap_or(minisqlite::Id::ZERO),
-            hex(&e.event.payload),
-            hex(&e.event.metadata)
-        )?;
+        let line = serde_json::json!({
+            "type": "event",
+            "transaction_id": e.transaction_id.to_hex(),
+            "global_sequence": e.global_sequence,
+            "stream_version": e.stream_version,
+            "event_id": e.event.event_id.to_hex(),
+            "stream_id": e.event.stream_id,
+            "event_type": e.event.event_type,
+            "schema_version": e.event.schema_version,
+            "occurred_at_ms": e.event.occurred_at_ms,
+            "causation_id": e.event.causation_id.map(|id| id.to_hex()),
+            "correlation_id": e.event.correlation_id.map(|id| id.to_hex()),
+            "payload": hex(&e.event.payload),
+            "metadata": hex(&e.event.metadata),
+        });
+        writeln!(out, "{line}")?;
     }
 
     for name in store.projection_names() {
         let version = store.projection_version(&name)?;
-        let entries = store.scan_projection_prefix(&name, b"")?;
-        for entry in entries {
-            writeln!(
-                out,
-                r#"{{"type":"projection","projection":"{}","version":{},"key":"{}","value":"{}"}}"#,
-                json_escape(&name),
-                version,
-                hex(&entry.key),
-                hex(&entry.value)
-            )?;
-        }
+        let entries: Vec<_> = store
+            .scan_projection_prefix(&name, b"")?
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "key": hex(&entry.key),
+                    "value": hex(&entry.value),
+                })
+            })
+            .collect();
+        let line = serde_json::json!({
+            "type": "projection",
+            "projection": name,
+            "version": version,
+            "entries": entries,
+        });
+        writeln!(out, "{line}")?;
     }
 
     for info in store.jobs(now_ms, None, None) {
-        writeln!(
-            out,
-            r#"{{"type":"job","job_id":"{}","state":"{:?}","queue":"{}","partition":"{}","payload":"{}","attempt":{},"max_attempts":{},"effect_mode":"{:?}","worker_id":"{}","lease_expires_at_ms":{},"retry_after_ms":{},"terminal_at_ms":{}}}"#,
-            info.job_id,
-            info.state,
-            json_escape(&info.spec.queue),
-            json_escape(&info.spec.partition),
-            hex(&info.spec.payload),
-            info.attempt,
-            info.spec.max_attempts,
-            info.spec.effect_mode,
-            info.worker_id.as_deref().unwrap_or(""),
-            info.lease_expires_at_ms
-                .map_or_else(|| "null".to_string(), |v| v.to_string()),
-            info.retry_after_ms
-                .map_or_else(|| "null".to_string(), |v| v.to_string()),
-            info.terminal_at_ms
-                .map_or_else(|| "null".to_string(), |v| v.to_string()),
-        )?;
+        let line = serde_json::json!({
+            "type": "job",
+            "job_id": info.job_id.to_hex(),
+            "state": job_state_str(info.state),
+            "queue": info.spec.queue,
+            "partition": info.spec.partition,
+            "payload": hex(&info.spec.payload),
+            "not_before_ms": info.spec.not_before_ms,
+            "max_attempts": info.spec.max_attempts,
+            "effect_mode": effect_mode_str(info.spec.effect_mode),
+            "idempotency_key": info.spec.idempotency_key,
+            "attempt": info.attempt,
+            "worker_id": info.worker_id,
+            "lease_expires_at_ms": info.lease_expires_at_ms,
+            "retry_after_ms": info.retry_after_ms,
+            "terminal_at_ms": info.terminal_at_ms,
+            "result_digest": info.result_digest.as_deref().map(hex),
+            "error_summary": info.error_summary,
+        });
+        writeln!(out, "{line}")?;
     }
 
     Ok(())
 }
 
-fn backup(
-    path: &str,
-    durability: Durability,
-    lock_path: Option<&str>,
-    json: bool,
-    dest: &str,
-) -> Result<(), Error> {
-    let store = open_store(path, durability, lock_path)?;
+fn backup(path: &str, durability: Durability, json: bool, dest: &str) -> Result<(), Error> {
+    let store = open_store(path, durability)?;
     store.backup(dest)?;
     if json {
         println!("{}", serde_json::json!({ "destination": dest }));
@@ -942,22 +883,6 @@ fn hex(v: &[u8]) -> String {
     for b in v {
         out.push(HEX[(b >> 4) as usize] as char);
         out.push(HEX[(b & 0xf) as usize] as char);
-    }
-    out
-}
-
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
     }
     out
 }

@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,7 +18,6 @@ use crate::jobs::{
 };
 use crate::projection::{ProjectionEntry, ProjectionState};
 use crate::storage::file::DataFile;
-use crate::storage::lock::Lock;
 use crate::storage::recovery;
 use crate::transaction::{CommitBatch, CommitReceipt, Op};
 
@@ -30,19 +29,16 @@ pub struct StoreBuilder {
     path: PathBuf,
     durability: Durability,
     limits: Limits,
-    lock_path: PathBuf,
 }
 
 impl StoreBuilder {
     /// Create a builder for a store at `path`.
     pub fn new(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref().to_path_buf();
-        let lock_path = path.with_extension("mini.lock");
         Self {
             path,
             durability: Durability::default(),
             limits: Limits::default(),
-            lock_path,
         }
     }
 
@@ -58,15 +54,9 @@ impl StoreBuilder {
         self
     }
 
-    /// Set a custom lock-file path.
-    pub fn lock_path(mut self, lock_path: impl AsRef<Path>) -> Self {
-        self.lock_path = lock_path.as_ref().to_path_buf();
-        self
-    }
-
     /// Open or create the store and recover committed state.
     pub fn open(self) -> Result<Store, Error> {
-        Store::open(self.path, self.durability, self.limits, self.lock_path)
+        Store::open(self.path, self.durability, self.limits)
     }
 }
 
@@ -78,8 +68,6 @@ pub struct Store {
 #[derive(Debug)]
 struct StoreInner {
     path: PathBuf,
-    #[allow(dead_code)]
-    lock: Lock,
     data_file: DataFile,
     limits: Limits,
     poisoned: bool,
@@ -112,20 +100,13 @@ fn is_same_file(a: &Path, b: &Path) -> std::io::Result<bool> {
 }
 
 impl Store {
-    fn open(
-        path: PathBuf,
-        durability: Durability,
-        limits: Limits,
-        lock_path: PathBuf,
-    ) -> Result<Self, Error> {
+    fn open(path: PathBuf, durability: Durability, limits: Limits) -> Result<Self, Error> {
         limits.validate()?;
-        let lock = Lock::acquire(&lock_path)?;
-        let mut data_file = DataFile::open_or_create(&path, durability)?;
+        let mut data_file = DataFile::open_or_create(&path, durability, true)?;
         let scan = recovery::scan(&mut data_file)?;
 
         let mut inner = StoreInner {
             path,
-            lock,
             data_file,
             limits,
             poisoned: false,
@@ -389,6 +370,8 @@ impl Store {
                         Some(j.retry_after_ms)
                     },
                     terminal_at_ms: j.terminal_at_ms,
+                    result_digest: j.result_digest.clone(),
+                    error_summary: j.error_summary.clone(),
                 }
             })
             .collect()
@@ -510,12 +493,12 @@ impl Store {
             }
             // Open with Strict durability so `sync()` performs an fsync on the copied bytes
             // before the atomic rename, satisfying the documented durability guarantee.
-            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Strict)?;
+            let mut tmp_file = DataFile::open_or_create(&tmp, Durability::Strict, false)?;
             tmp_file.sync()?;
             drop(tmp_file);
             std::fs::rename(&tmp, &dest)?;
             DataFile::sync_parent_dir(&dest)?;
-            let mut backup_file = DataFile::open_or_create(&dest, Durability::Strict)?;
+            let mut backup_file = DataFile::open_or_create(&dest, Durability::Strict, false)?;
             let _scan = recovery::scan(&mut backup_file)?;
             Ok(())
         })();
@@ -571,6 +554,16 @@ impl StoreInner {
         }
 
         let records = record::decode_records(&frame.payload)?;
+        if records.len() != frame.header.record_count as usize {
+            return Err(Error::Corruption {
+                message: format!(
+                    "frame record count {} does not match decoded records {}",
+                    frame.header.record_count,
+                    records.len()
+                ),
+                offset: frame_offset,
+            });
+        }
 
         // Reconstruct the original commit batch and re-validate every operation against
         // the state rebuilt so far. This catches corrupted frames that pass checksums.
@@ -984,6 +977,9 @@ impl StoreInner {
     }
 
     fn validate_batch(&self, batch: &CommitBatch) -> Result<(), Error> {
+        if batch.transaction_id == Id::ZERO {
+            return Err(Error::Validation("transaction id cannot be zero".into()));
+        }
         self.limits.validate_metadata(batch.metadata.len())?;
         if batch.ops.len() > self.limits.max_records_per_transaction {
             return Err(Error::Validation(format!(
@@ -993,6 +989,9 @@ impl StoreInner {
             )));
         }
         for op in &batch.ops {
+            if let Some(kind) = zero_id_kind(op) {
+                return Err(Error::Validation(format!("{kind} cannot be zero")));
+            }
             match op {
                 Op::AppendEvent(e) => {
                     self.limits
@@ -1359,20 +1358,25 @@ impl StoreInner {
                         .or_else(|| self.jobs.get(job_id))
                         .cloned()
                         .ok_or(Error::JobNotFound(*job_id))?;
+                    let effective_retry = match *retry_after_ms {
+                        Some(v) => v,
+                        None => batch.now_ms.checked_add(1000).ok_or_else(|| {
+                            Error::Validation("retry_after_ms arithmetic overflow".into())
+                        })?,
+                    };
                     job.fail(
                         batch.now_ms,
                         *lease_token,
                         error_summary.clone(),
-                        *retry_after_ms,
+                        Some(effective_retry),
                     )?;
                     let terminal = job.is_terminal();
-                    let retry_after = job.retry_after_ms;
                     records.push(Record::JobFail {
                         job_id: *job_id,
                         lease_token: *lease_token,
                         error_summary: error_summary.clone(),
                         attempt: job.attempt,
-                        retry_after_ms: retry_after,
+                        retry_after_ms: effective_retry,
                         terminal,
                         failed_at_ms: batch.now_ms,
                     });
@@ -1564,6 +1568,23 @@ impl StoreInner {
     }
 }
 
+fn zero_id_kind(op: &Op) -> Option<&'static str> {
+    match op {
+        Op::AppendEvent(e) if e.event_id == Id::ZERO => Some("event id"),
+        Op::EnqueueJob(job) if job.job_id == Id::ZERO => Some("job id"),
+        Op::AckJob { job_id, .. }
+        | Op::FailJob { job_id, .. }
+        | Op::CancelJob { job_id, .. }
+        | Op::ResolveJob { job_id, .. }
+        | Op::LeaseJob { job_id, .. }
+            if *job_id == Id::ZERO =>
+        {
+            Some("job id")
+        }
+        _ => None,
+    }
+}
+
 fn build_receipt(
     records: &[Record],
     transaction_id: Id,
@@ -1581,7 +1602,7 @@ fn build_receipt(
     let mut last_event_sequence: Option<u64> = None;
     let mut stream_versions: Vec<StreamVersion> = Vec::new();
     let mut job_ids: Vec<Id> = Vec::new();
-    let mut final_stream_version: HashMap<String, u64> = HashMap::new();
+    let mut final_stream_version: BTreeMap<String, u64> = BTreeMap::new();
 
     for record in records {
         match record {
@@ -1638,4 +1659,53 @@ pub struct StoreStats {
     pub poisoned: bool,
     pub format_version_major: u16,
     pub format_version_minor: u16,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+    use crate::codec::frame::FileHeader;
+
+    #[test]
+    fn mismatched_frame_record_count_is_rejected() {
+        let tmp = std::env::temp_dir().join(format!(
+            "minisqlite_record_count_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&tmp);
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp)
+            .unwrap();
+        file.write_all(&FileHeader::new(0).encode()).unwrap();
+
+        let payload = encode_records(&[Record::TransactionMeta {
+            correlation_id: None,
+            metadata: Vec::new(),
+        }]);
+        let header = FrameHeader {
+            version: crate::codec::frame::FRAME_FORMAT_VERSION,
+            total_frame_length: 0,
+            transaction_sequence: 1,
+            transaction_id: Id::new(),
+            commit_timestamp_ms: 0,
+            record_count: 2,
+            payload_length: 0,
+        };
+        let frame = Frame::new(header, payload);
+        file.write_all(&frame.encode()).unwrap();
+        drop(file);
+
+        let result = StoreBuilder::new(&tmp).open();
+        assert!(
+            result.is_err(),
+            "expected corruption due to record count mismatch"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

@@ -1,80 +1,95 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
-
-#[cfg(unix)]
-use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+use std::path::{Path, PathBuf};
 
 use crate::codec::frame::{FileHeader, FILE_HEADER_SIZE};
 use crate::config::Durability;
 use crate::Error;
 
 /// Owns the primary data file and the normal append path.
+///
+/// The underlying `File` is locked exclusively with `try_lock` for the lifetime of this
+/// handle, so a second `Store` (or `DataFile` with `acquire_lock` enabled) cannot open the
+/// same primary path. This makes the single-owner invariant independent of any sidecar lock
+/// path and protects against hard-link aliases that refer to the same inode.
 #[derive(Debug)]
 pub struct DataFile {
     file: File,
     pub durability: Durability,
     pub len: u64,
     header: FileHeader,
+    #[allow(dead_code)]
+    path: PathBuf,
 }
 
 impl DataFile {
     /// Open or create the primary data file and validate its header.
-    pub fn open_or_create(path: impl AsRef<Path>, durability: Durability) -> Result<Self, Error> {
+    ///
+    /// When `acquire_lock` is `true`, the file is locked before any content is read or
+    /// written. Callers that only need a temporary working copy (e.g. deterministic tests or
+    /// fuzz targets) can pass `false` to avoid exclusive-ownership semantics.
+    pub fn open_or_create(
+        path: impl AsRef<Path>,
+        durability: Durability,
+        acquire_lock: bool,
+    ) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
 
         // Refuse to follow an existing symlink for the primary data path.
-        if let Ok(meta) = std::fs::symlink_metadata(&path) {
-            if meta.file_type().is_symlink() {
-                return Err(Error::Validation(
-                    "primary database path is a symlink".into(),
-                ));
-            }
+        if std::fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(Error::Validation(
+                "primary database path is a symlink".into(),
+            ));
         }
 
         if let Some(parent) = path.parent() {
-            let _parent_existed = parent.exists();
-            std::fs::create_dir_all(parent)?;
-            #[cfg(unix)]
-            {
-                if !_parent_existed {
-                    use std::fs::set_permissions;
-                    let _ = set_permissions(parent, Permissions::from_mode(0o700));
+            if !parent.as_os_str().is_empty() {
+                create_private_dirs(parent)?;
+            }
+        }
+
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&path)?;
+
+        if acquire_lock {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err(Error::AlreadyOpen);
+                }
+                Err(std::fs::TryLockError::Error(e)) => {
+                    return Err(Error::Io(e.to_string()));
                 }
             }
         }
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-
-        #[cfg(unix)]
-        {
-            use std::fs::set_permissions;
-            let _ = set_permissions(&path, Permissions::from_mode(0o600));
-        }
-
         let len = file.seek(SeekFrom::End(0))?;
 
-        let file_len = if len == 0 {
-            FILE_HEADER_SIZE as u64
-        } else {
-            len
-        };
-
-        let header = if len == 0 {
+        let (file_len, header) = if len == 0 {
+            #[cfg(unix)]
+            {
+                use std::fs::{set_permissions, Permissions};
+                use std::os::unix::fs::PermissionsExt;
+                set_permissions(&path, Permissions::from_mode(0o600))?;
+            }
             let now_ms = current_time_ms();
             let header = FileHeader::new(now_ms);
             let bytes = header.encode();
             file.write_all(&bytes)?;
             if durability.requires_sync() {
                 file.sync_all()?;
+                sync_ancestors(&path)?;
             }
-            file.seek(SeekFrom::Start(0))?;
-            header
+            (FILE_HEADER_SIZE as u64, header)
         } else {
             if len < FILE_HEADER_SIZE as u64 {
                 return Err(Error::Corruption {
@@ -85,10 +100,12 @@ impl DataFile {
             file.seek(SeekFrom::Start(0))?;
             let mut header_bytes = [0u8; FILE_HEADER_SIZE];
             file.read_exact(&mut header_bytes)?;
-            FileHeader::decode(&header_bytes)?
+            let header = FileHeader::decode(&header_bytes)?;
+            (len, header)
         };
 
         Ok(Self {
+            path,
             file,
             durability,
             len: file_len,
@@ -214,16 +231,15 @@ impl DataFile {
         Ok(())
     }
 
-    /// Best-effort fsync of the parent directory on Unix. This makes the atomic rename
-    /// of a backup or recovery file durable on typical POSIX file systems.
-    pub fn sync_parent_dir(_path: impl AsRef<Path>) -> std::io::Result<()> {
+    /// fsync the parent directory of `path` on Unix. This makes the directory entry for
+    /// an atomic rename or a newly created file durable on typical POSIX file systems.
+    pub fn sync_parent_dir(path: impl AsRef<Path>) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(parent) = _path.as_ref().parent() {
-            if parent.as_os_str().is_empty() {
-                return Ok(());
+        if let Some(parent) = path.as_ref().parent() {
+            if !parent.as_os_str().is_empty() {
+                let dir = File::open(parent)?;
+                dir.sync_all()?;
             }
-            let dir = File::open(parent)?;
-            dir.sync_all()?;
         }
         Ok(())
     }
@@ -247,6 +263,55 @@ impl DataFile {
     }
 }
 
+#[cfg(unix)]
+fn create_private_dirs(path: &Path) -> std::io::Result<()> {
+    use std::fs::{set_permissions, DirBuilder, Permissions};
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    if path.as_os_str().is_empty() || path == Path::new(".") {
+        return Ok(());
+    }
+
+    let mut components = Vec::new();
+    for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() || ancestor == Path::new(".") {
+            break;
+        }
+        components.push(ancestor);
+    }
+    components.reverse();
+
+    for dir in components {
+        if !dir.exists() {
+            DirBuilder::new().mode(0o700).create(dir)?;
+            set_permissions(dir, Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn create_private_dirs(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+#[cfg(unix)]
+fn sync_ancestors(path: &Path) -> std::io::Result<()> {
+    for dir in path.ancestors().skip(1) {
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        let f = File::open(dir)?;
+        f.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_ancestors(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn current_time_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -262,7 +327,7 @@ mod tests {
     fn creates_and_validates_header() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_data_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         assert_eq!(file.len, FILE_HEADER_SIZE as u64);
         let header = file.read_at(0, FILE_HEADER_SIZE).unwrap();
         let _ = FileHeader::decode(&header.try_into().unwrap()).unwrap();

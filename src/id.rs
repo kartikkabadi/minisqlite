@@ -1,13 +1,14 @@
 use std::fmt;
+use std::io::{self, Read};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
 
 /// A 128-bit opaque identifier used for transaction IDs, event IDs, job IDs, and lease tokens.
 ///
-/// `Id` is intentionally simple: sixteen bytes, ordered by lexicographic byte order, and
-/// printable as lower-case hexadecimal. New identifiers are generated from the process-wide
-/// monotonic counter and wall-clock nanoseconds, which is sufficient for a single-owner store.
+/// `Id` is sixteen bytes, ordered by lexicographic byte order, and printable as lower-case
+/// hexadecimal. New identifiers are 128 bits from the OS CSPRNG, so distinct processes and
+/// restarts collide only with negligible probability. The zero ID is reserved as a sentinel
+/// and is not valid as a transaction, event, or job ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Id(pub [u8; 16]);
@@ -16,20 +17,14 @@ impl Id {
     /// The zero ID. Not valid as a transaction, event, or job ID, but useful as a sentinel.
     pub const ZERO: Self = Self([0; 16]);
 
-    /// Generate a new identifier that is unique within this process and extremely unlikely to
-    /// collide across processes.
+    /// Generate a new 128-bit identifier from the OS CSPRNG.
     pub fn new() -> Self {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(counter);
-
         let mut bytes = [0u8; 16];
-        bytes[..8].copy_from_slice(&nanos.to_le_bytes());
-        bytes[8..].copy_from_slice(&counter.to_le_bytes());
+        secure_random(&mut bytes).expect("failed to read random bytes for Id");
+        if bytes == [0; 16] {
+            // The zero ID is reserved; this is astronomically unlikely.
+            bytes[15] = 1;
+        }
         Self(bytes)
     }
 
@@ -112,6 +107,66 @@ impl fmt::Display for InvalidId {
 
 impl std::error::Error for InvalidId {}
 
+fn secure_random(buf: &mut [u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        static URANDOM: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+        let mut file = URANDOM
+            .get_or_init(|| {
+                Mutex::new(
+                    std::fs::File::open("/dev/urandom")
+                        .expect("/dev/urandom must be available for secure ID generation"),
+                )
+            })
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        file.read_exact(buf)?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use std::ptr::null_mut;
+
+        const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x00000002;
+
+        #[link(name = "bcrypt")]
+        extern "system" {
+            fn BCryptGenRandom(
+                hAlgorithm: *mut c_void,
+                pbBuffer: *mut u8,
+                cbBuffer: u32,
+                dwFlags: u32,
+            ) -> i32;
+        }
+
+        let status = unsafe {
+            BCryptGenRandom(
+                null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("BCryptGenRandom failed with status {status}"),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no secure random source for this platform",
+        ))
+    }
+}
+
 fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -139,5 +194,16 @@ mod tests {
         let a = Id::from(1u128);
         let b = Id::from(2u128);
         assert!(a < b);
+    }
+
+    #[test]
+    fn new_is_non_zero() {
+        let mut saw_non_zero = false;
+        for _ in 0..32 {
+            if Id::new() != Id::ZERO {
+                saw_non_zero = true;
+            }
+        }
+        assert!(saw_non_zero);
     }
 }

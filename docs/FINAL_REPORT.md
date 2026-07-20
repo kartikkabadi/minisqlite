@@ -51,12 +51,18 @@ https://github.com/kartikkabadi/minisqlite/pull/9
 * Event and transaction IDs are unique; same logical content is idempotent, different content returns a typed conflict.
 * Frame-level checksum integrity is enforced; torn trailing frames are truncated; mid-file corruption fails closed.
 * Projection version conflicts fail fast and atomic put/delete/clear/replace is visible with its transaction.
-* At most one active lease per job; stale tokens cannot ack/fail a newer lease. Lease tokens are generated with `Id::new()` and are not reused across process restarts.
+* At most one active lease per job; stale tokens cannot ack/fail a newer lease. New IDs are 128 bits from the OS CSPRNG and are not reused across processes or restarts.
 * Partition-ordered job claiming survives concurrent callers.
 * Idempotent expired leases become reclaimable; non-idempotent expired leases become uncertain and are not silently retried.
 * Uncertain outcomes are reported and can be resolved durably.
 * Reopen reconstructs identical in-memory state from durable frames, even if the configured `Limits` have changed.
 * Transaction-level `correlation_id` and `metadata` survive commit and reopen.
+* `CommitReceipt.stream_versions` are deterministically sorted by stream name and stable across process restarts.
+* Terminal `JobFail` records are stably idempotent across reopen.
+* Expired idempotent job leases stop being reclaimed once `max_attempts` is reached.
+* CLI `export --format jsonl` emits valid JSON with hex keys/values, and projection scan JSON preserves arbitrary binary keys.
+* Strict creation fsyncs the directory entry on Unix, and the primary file is created with restrictive permissions before any data is written.
+* The single-owner lock is held on the primary data file itself; no separate lock file is used.
 * Parent directories created by the store are set to `0o700` on Unix; primary files are `0o600`; existing symlinks for the primary path are rejected.
 * Reads can run concurrently while writes remain serialized.
 
@@ -134,9 +140,9 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 * Production lines added / deleted in `src/`: approximately **+5,541 / -4,858**.
 * Public API items: approximately **70** exported types/methods.
 * Direct runtime dependencies: `crc32fast`, `serde` (optional, exact `1.0.229`, default), `serde_json` (optional, default).
-* Persistent file types: one primary `.mini` data file plus one `.mini.lock` advisory lock file.
+* Persistent file types: one primary `.mini` data file. The advisory lock is held on the data file itself, so no separate lock file is created.
 * Features removed: SQL, B+ tree, pager, WAL, catalog, query execution, DDL.
-* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, lease tokens are generated with `Id::new()` to avoid reuse across restarts, recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, Socket Security alerts for `cargo/libc` and `cargo/zerocopy` were resolved by removing those crates from the dependency tree (`fs2` replaced by `std::fs::File::lock`, `proptest`/`tempfile` replaced by `fastrand` and a custom `TempDir` helper, `libfuzzer-sys`/`fuzz/` removed and replaced with deterministic `#[test]` fuzz targets), the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the default lock-file path uses a `.mini.lock` suffix, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
+* Hardening pass: explicit `occurred_at_ms` in `Event::with_json_payload`, removed dead `JobInternalState::Uncertain` variant, `Store` now flushes on `Drop`, projection replace no longer clones the whole map to detect no-ops, `Store` uses `RwLock` for concurrent reads, IDs are generated from a 128-bit OS CSPRNG (no dependency on counter/clock), recovery no longer re-runs configured `Limits` validation, `DataFile::sync` respects `Memory` durability, `ops_to_records` simulates job-state transitions within a batch, `Store::jobs` returns a `JobInfo` snapshot, `fail_job` normalizes default retry times for clean round-trips, `max_attempts == 0` is rejected, transaction-level `correlation_id`/`metadata` are persisted as the first `TransactionMeta` record, all job transitions (lease/ack/fail/cancel/resolve) are centralized in `JobStateRecord`, projection operations (`put`/`delete`/`clear`/`replace`/scans) are centralized in `ProjectionState`, the CLI `projections get` subcommand was removed because the spec only requires `projections list/scan`, `PersistedEvent::frame_offset` is now `pub(crate)` and is no longer emitted in JSON CLI output so internal file offsets are not exposed as stable public identifiers, `README.md` install instructions now reference building from the feature branch because `v0.3.0-alpha.1` is not yet published, the last avoidable `unwrap` in the CLI JSON stats path was replaced with explicit error handling, Socket Security alerts for `cargo/libc` and `cargo/zerocopy` were resolved by keeping the dependency tree free of those crates (`fs2` replaced by `std::fs::File::lock`, `proptest`/`tempfile` replaced by `fastrand` and a custom `TempDir` helper, `libfuzzer-sys`/`fuzz/` removed and replaced with deterministic `#[test]` fuzz targets, and ID generation uses `/dev/urandom` on Unix and `BCryptGenRandom` on Windows instead of `getrandom`/`libc`), the uncertain-commit recovery test now asserts that reopen leaves the store un-poisoned, the sidecar `.mini.lock` file was deleted and the lock is now held on the primary data file, `tests/security.rs` verifies symlink rejection and owner-only file permissions on Unix, `tests/limits.rs` exercises configured bounds, `claim_jobs` now claims at most one ready job per partition per call so earlier nonterminal jobs block later jobs in the same partition, `Record::JobFail` stores and validates the attempt count, `apply_commit` applies the staged delta before inserting into the idempotency index so a failure cannot leave a receiptless batch, and `Store::backup` fsyncs the destination parent directory on Unix.
 
 ## Synara-shaped demonstration
 
@@ -198,6 +204,41 @@ Per PR comment IDs 4732347323 and 4732434245, the branch was audited against the
   * `tests/projection_ops.rs` adds `delete_on_missing_projection_materializes_empty_projection`.
   * `tests/invalid_job_transitions.rs` adds `claim_jobs_rejects_non_positive_lease` and `claim_jobs_rejects_lease_arithmetic_overflow`.
 * `Cargo.lock` contains no `libc` or `zerocopy`.
+
+## Review #3 P1 fix pass
+
+Per PR comment ID 4732599741, the 13 merge-blocking findings were addressed and focused regression tests were added for each.
+
+* Branch: `feat/control-plane-state-engine`
+* Merge conflict with `main`: none
+* Full verification suite (run on the Devin host at `2026-07-20 10:34 UTC`):
+  * `cargo fmt --all -- --check` — passed
+  * `cargo clippy --all-targets --all-features -- -D warnings` — passed
+  * `cargo test --all-targets --all-features` — passed
+  * `cargo test --doc --all-features` — passed
+  * `cargo package --allow-dirty` — passed
+  * `cargo run --example synara_control_plane --release` — passed
+  * `cargo run --example benchmark --release` — passed
+* P1 correctness fixes:
+  1. Removed caller-selectable lock paths; single-owner advisory locking is now performed directly on the primary data file inside `DataFile`.
+  2. `JobStateRecord::is_ready_at` returns `false` when `attempt >= max_attempts`, so expired idempotent leases stop being reclaimed.
+  3. `JobStateRecord::fail` materializes the effective `retry_after_ms` in the `JobFail` record and `op_from_record` normalizes it, making terminal `JobFail` idempotent across reopen.
+  4. `CommitReceipt.stream_versions` uses `BTreeMap` ordering, producing deterministic ordering across process restarts.
+  5. `Id::new()` now reads 128 bits from the OS CSPRNG (`/dev/urandom` on Unix, `BCryptGenRandom` on Windows) and rejects `Id::ZERO`, providing real cross-process/restart uniqueness without adding `libc` or `getrandom` to the dependency tree.
+  6. `FileHeader::decode` enforces `header_length` and `flags == 0`; `FrameHeader::decode` rejects unknown frame versions; `replay_frame` compares `records.len()` to `frame.header.record_count`.
+  7. CLI `export --format jsonl` builds the JSON document through `serde_json` with hex-encoded binary keys/values, so it is always valid JSON and contains a complete snapshot of events, projections, and jobs.
+  8. `DataFile` creates parent directories with `create_private_dirs`/`sync_ancestors`, fsyncing each directory level on `Strict` creation and backup so a newly opened store survives power loss.
+  9. Unix primary files are created `0o600` and parent directories `0o700` before any data is written; `chmod`/`chown` errors fail open and surface as I/O errors instead of being silently ignored.
+  10. `JobStateRecord::fail`/`cancel`/`resolve` clear `worker_id`, `lease_expires_at_ms`, and `retry_after_ms` for terminal/finalized states; `JobInfo` exposes `result_digest`/`error_summary`.
+  11. `tests/p1_regression.rs` adds adversarial before/after-reopen and multi-process regression tests for every P1; `tests/property.rs` continues the model-based comparison; `tests/fuzz_targets.rs` provides deterministic seeded decoder fuzz coverage.
+  12. CLI `projections scan` JSON and `export` use `hex(&key)` and `hex(&value)` instead of `String::from_utf8_lossy`, preserving arbitrary binary keys.
+  13. `examples/synara_control_plane.rs` only deletes the default `synara.mini` path when no explicit path argument is supplied.
+* Test evidence from this pass:
+  * `tests/p1_regression.rs` covers all 13 P1 findings, including `same_process_second_open_is_rejected` and `second_process_open_is_rejected` (using `src/bin/lock_holder.rs`).
+  * `src/store.rs` adds a unit test `mismatched_frame_record_count_is_rejected` that builds a corrupt `Frame` with `record_count = 2` and one record and proves the store refuses to open.
+  * `tests/security.rs` verifies primary-file owner-only permissions and symlink rejection on Unix.
+  * `tests/cli.rs` validates `export --format jsonl` and projection scan JSON output with hex payloads.
+* `Cargo.lock` contains no `libc`, `wasi`, or `zerocopy`.
 
 ## Verdict
 

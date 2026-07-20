@@ -112,6 +112,8 @@ pub struct JobInfo {
     pub worker_id: Option<String>,
     pub retry_after_ms: Option<i64>,
     pub terminal_at_ms: Option<i64>,
+    pub result_digest: Option<Vec<u8>>,
+    pub error_summary: Option<String>,
 }
 
 /// A job claimed by a worker.
@@ -217,6 +219,9 @@ impl JobStateRecord {
         if self.is_terminal() {
             return false;
         }
+        if self.attempt >= self.spec.max_attempts {
+            return false;
+        }
         match self.state {
             JobInternalState::Pending => now_ms >= self.not_before(),
             JobInternalState::RetryWait => now_ms >= self.retry_after_ms,
@@ -267,6 +272,9 @@ impl JobStateRecord {
         self.result_digest = result_digest;
         self.terminal_at_ms = Some(now_ms);
         self.lease_token = None;
+        self.worker_id = None;
+        self.lease_expires_at_ms = 0;
+        self.retry_after_ms = 0;
         Ok(())
     }
 
@@ -286,9 +294,12 @@ impl JobStateRecord {
         let terminal = self.attempt >= self.spec.max_attempts;
         self.error_summary = Some(error_summary.into());
         self.lease_token = None;
+        self.worker_id = None;
+        self.lease_expires_at_ms = 0;
         if terminal {
             self.state = JobInternalState::Dead;
             self.terminal_at_ms = Some(now_ms);
+            self.retry_after_ms = 0;
         } else {
             self.state = JobInternalState::RetryWait;
             self.retry_after_ms = match retry_after_ms {
@@ -323,6 +334,9 @@ impl JobStateRecord {
         self.state = JobInternalState::Cancelled;
         self.terminal_at_ms = Some(now_ms);
         self.lease_token = None;
+        self.worker_id = None;
+        self.lease_expires_at_ms = 0;
+        self.retry_after_ms = 0;
         Ok(())
     }
 
@@ -335,18 +349,24 @@ impl JobStateRecord {
             )));
         }
         self.lease_token = None;
+        self.worker_id = None;
+        self.lease_expires_at_ms = 0;
         match resolution {
             Resolution::Retry => {
                 self.state = JobInternalState::RetryWait;
-                self.retry_after_ms = now_ms;
+                self.retry_after_ms = now_ms
+                    .checked_add(1000)
+                    .ok_or_else(|| Error::Validation("resolve retry after time overflow".into()))?;
             }
             Resolution::MarkSucceeded => {
                 self.state = JobInternalState::Succeeded;
                 self.terminal_at_ms = Some(now_ms);
+                self.retry_after_ms = 0;
             }
             Resolution::MarkDead => {
                 self.state = JobInternalState::Dead;
                 self.terminal_at_ms = Some(now_ms);
+                self.retry_after_ms = 0;
             }
         }
         Ok(())

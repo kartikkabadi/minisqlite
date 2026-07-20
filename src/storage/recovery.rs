@@ -113,7 +113,7 @@ mod tests {
                 let mut f = std::fs::OpenOptions::new().append(true).open(&tmp).unwrap();
                 f.write_all(&suffix).unwrap();
             }
-            if let Ok(mut file) = DataFile::open_or_create(&tmp, Durability::Memory) {
+            if let Ok(mut file) = DataFile::open_or_create(&tmp, Durability::Memory, false) {
                 let _ = scan(&mut file);
             }
             let _ = std::fs::remove_file(&tmp);
@@ -124,7 +124,7 @@ mod tests {
     fn empty_file_has_no_frames() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         let result = scan(&mut file).unwrap();
         assert!(result.frames.is_empty());
         assert!(!result.tail_truncated);
@@ -172,7 +172,7 @@ mod tests {
     fn scans_multiple_valid_frames() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_multi_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         append_frame(&mut file, 2, Id::new());
         let result = scan(&mut file).unwrap();
@@ -185,7 +185,7 @@ mod tests {
     fn truncates_incomplete_header_tail() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_hdr_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         // Append a few bytes of a second header.
         let partial = &make_frame(2, Id::new()).encode()[..20];
@@ -200,7 +200,7 @@ mod tests {
     fn truncates_incomplete_payload_tail() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_pay_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         let frame = make_frame(2, Id::new()).encode();
         let partial = &frame[..FRAME_HEADER_SIZE + 5];
@@ -215,7 +215,7 @@ mod tests {
     fn truncates_incomplete_trailer_tail() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_trl_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         let frame = make_frame(2, Id::new()).encode();
         let payload_len = make_frame(2, Id::new()).header.payload_length as usize;
@@ -231,7 +231,7 @@ mod tests {
     fn corrupt_checksum_in_middle_fails_hard() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_mid_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         append_frame(&mut file, 2, Id::new());
 
@@ -246,7 +246,7 @@ mod tests {
         bytes[corrupt_offset] = bytes[corrupt_offset].wrapping_add(1);
         std::fs::write(&tmp, &bytes).unwrap();
 
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         assert!(scan(&mut file).is_err());
         let _ = std::fs::remove_file(&tmp);
     }
@@ -255,7 +255,7 @@ mod tests {
     fn sequence_regression_fails() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_seq_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         append_frame(&mut file, 1, Id::new());
         append_frame(&mut file, 1, Id::new());
         // Replay (not just scan) enforces monotonic transaction sequence.
@@ -267,7 +267,7 @@ mod tests {
     fn duplicate_event_id_in_committed_history_fails() {
         let tmp = std::env::temp_dir().join(format!("minisqlite_rec_dup_{}", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         let e = event_record(1, 1);
         let payload = encode_records(std::slice::from_ref(&e));
         let header = FrameHeader {
@@ -351,7 +351,7 @@ mod tests {
         std::io::Write::write_all(&mut file, &frame_bytes).unwrap();
         drop(file);
 
-        let mut file = DataFile::open_or_create(&tmp, Durability::Memory).unwrap();
+        let mut file = DataFile::open_or_create(&tmp, Durability::Memory, false).unwrap();
         assert!(scan(&mut file).is_err());
         let _ = std::fs::remove_file(&tmp);
     }

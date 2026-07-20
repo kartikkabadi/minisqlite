@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use minisqlite::{CommitBatch, Durability, Event, Id, JobSpec, StoreBuilder};
@@ -24,6 +24,11 @@ enum Op {
         key: Vec<u8>,
         value: Vec<u8>,
     },
+    ProjectionPutNext {
+        name: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
     EnqueueJob {
         queue: String,
         partition: String,
@@ -32,48 +37,76 @@ enum Op {
     Reopen,
 }
 
-fn rand_string(rng: &mut fastrand::Rng) -> String {
-    let len = rng.usize(1..=16);
-    let chars: Vec<char> = (0..len)
-        .map(|_| {
-            const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-            CHARSET[rng.usize(..CHARSET.len())] as char
-        })
-        .collect();
-    chars.into_iter().collect()
+fn rand_string(rng: &mut fastrand::Rng, max_len: usize) -> String {
+    let len = rng.usize(1..=max_len);
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    (0..len)
+        .map(|_| CHARSET[rng.usize(..CHARSET.len())] as char)
+        .collect()
 }
 
-fn rand_payload(rng: &mut fastrand::Rng, max: usize) -> Vec<u8> {
+fn rand_bytes(rng: &mut fastrand::Rng, max: usize) -> Vec<u8> {
     let len = rng.usize(0..max);
     (0..len).map(|_| rng.u8(..)).collect()
 }
 
 fn rand_op(rng: &mut fastrand::Rng) -> Op {
-    match rng.usize(0..4) {
+    match rng.usize(0..5) {
         0 => Op::AppendEvent {
-            stream: rand_string(rng),
-            payload: rand_payload(rng, 256),
+            stream: rand_string(rng, 12),
+            payload: rand_bytes(rng, 128),
         },
         1 => Op::ProjectionPut {
-            name: rand_string(rng),
-            version: rng.u64(..),
-            key: rand_payload(rng, 64),
-            value: rand_payload(rng, 64),
+            name: rand_string(rng, 12),
+            version: rng.u64(0..=5),
+            key: rand_bytes(rng, 32),
+            value: rand_bytes(rng, 128),
         },
-        2 => Op::EnqueueJob {
-            queue: rand_string(rng),
-            partition: rand_string(rng),
-            payload: rand_payload(rng, 64),
+        2 => Op::ProjectionPutNext {
+            name: rand_string(rng, 12),
+            key: rand_bytes(rng, 32),
+            value: rand_bytes(rng, 128),
+        },
+        3 => Op::EnqueueJob {
+            queue: rand_string(rng, 8),
+            partition: rand_string(rng, 8),
+            payload: rand_bytes(rng, 64),
         },
         _ => Op::Reopen,
     }
 }
 
+#[derive(Debug, Default)]
+struct Model {
+    streams: BTreeMap<String, u64>,
+    projections: BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>,
+    projection_versions: BTreeMap<String, u64>,
+    job_ids: HashSet<Id>,
+    committed_transaction_ids: HashSet<Id>,
+}
+
+fn append_event_model(model: &mut Model, stream: &str) {
+    *model.streams.entry(stream.to_string()).or_insert(0) += 1;
+}
+
+fn projection_put_model(model: &mut Model, name: &str, key: &[u8], value: &[u8]) {
+    *model
+        .projection_versions
+        .entry(name.to_string())
+        .or_insert(0) += 1;
+    model
+        .projections
+        .entry(name.to_string())
+        .or_default()
+        .insert(key.to_vec(), value.to_vec());
+}
+
 #[test]
-fn store_matches_reference_model() {
-    for seed in 0..32 {
+#[allow(clippy::explicit_counter_loop)]
+fn store_matches_reference_model_through_reopen() {
+    for seed in 0..128 {
         let mut rng = fastrand::Rng::with_seed(seed);
-        let op_count = rng.usize(1..30);
+        let op_count = rng.usize(5..80);
         let ops: Vec<Op> = (0..op_count).map(|_| rand_op(&mut rng)).collect();
 
         let tmp = common::TempDir::new();
@@ -84,20 +117,26 @@ fn store_matches_reference_model() {
             .open()
             .unwrap();
 
-        let mut model_streams: HashMap<String, u64> = HashMap::new();
-        let mut model_projection_versions: HashMap<String, u64> = HashMap::new();
-        let mut model_projections: HashMap<String, BTreeMap<Vec<u8>, Vec<u8>>> = HashMap::new();
-        let mut model_job_count: u64 = 0;
+        let mut model = Model::default();
+        let mut now = now_ms();
 
         for op in ops {
             match op {
                 Op::AppendEvent { stream, payload } => {
-                    let event =
-                        Event::with_json_payload(Id::new(), &stream, "e", now_ms(), &payload);
-                    store
-                        .commit(CommitBatch::new(Id::new(), now_ms()).append_event(event))
-                        .unwrap();
-                    *model_streams.entry(stream).or_insert(0) += 1;
+                    let tx = Id::new();
+                    let event = Event::with_json_payload(Id::new(), &stream, "e", now, &payload);
+                    let batch = CommitBatch::new(tx, now)
+                        .with_correlation_id(Id::new())
+                        .with_metadata(rand_bytes(&mut rng, 32))
+                        .append_event(event);
+                    if let Ok(receipt) = store.commit(batch) {
+                        model.committed_transaction_ids.insert(tx);
+                        append_event_model(&mut model, &stream);
+                        assert_eq!(receipt.transaction_id, tx);
+                        let roundtrip = store.get_transaction(tx).unwrap();
+                        assert_eq!(roundtrip.transaction_id, tx);
+                        assert_eq!(roundtrip.stream_versions, receipt.stream_versions);
+                    }
                 }
                 Op::ProjectionPut {
                     name,
@@ -105,45 +144,55 @@ fn store_matches_reference_model() {
                     key,
                     value,
                 } => {
-                    if version == 0 {
-                        continue;
+                    let tx = Id::new();
+                    let current = *model.projection_versions.get(&name).unwrap_or(&0);
+                    let batch = CommitBatch::new(tx, now).projection_put(
+                        &name,
+                        version,
+                        key.clone(),
+                        value.clone(),
+                    );
+                    if version == current + 1 {
+                        if let Ok(receipt) = store.commit(batch) {
+                            model.committed_transaction_ids.insert(tx);
+                            projection_put_model(&mut model, &name, &key, &value);
+                            assert_eq!(receipt.transaction_id, tx);
+                        }
+                    } else {
+                        // Version mismatch is a conflict; this branch also covers version zero.
+                        assert!(store.commit(batch).is_err());
                     }
-                    let current = *model_projection_versions.get(&name).unwrap_or(&0);
-                    if version != current + 1 {
-                        assert!(store
-                            .commit(CommitBatch::new(Id::new(), now_ms()).projection_put(
-                                &name,
-                                version,
-                                key.clone(),
-                                value.clone()
-                            ),)
-                            .is_err());
-                        continue;
+                }
+                Op::ProjectionPutNext { name, key, value } => {
+                    let tx = Id::new();
+                    let current = *model.projection_versions.get(&name).unwrap_or(&0);
+                    let batch = CommitBatch::new(tx, now).projection_put(
+                        &name,
+                        current + 1,
+                        key.clone(),
+                        value.clone(),
+                    );
+                    if let Ok(receipt) = store.commit(batch) {
+                        model.committed_transaction_ids.insert(tx);
+                        projection_put_model(&mut model, &name, &key, &value);
+                        assert_eq!(receipt.transaction_id, tx);
                     }
-                    store
-                        .commit(CommitBatch::new(Id::new(), now_ms()).projection_put(
-                            &name,
-                            version,
-                            key.clone(),
-                            value.clone(),
-                        ))
-                        .unwrap();
-                    model_projection_versions.insert(name.clone(), version);
-                    model_projections
-                        .entry(name)
-                        .or_default()
-                        .insert(key, value);
                 }
                 Op::EnqueueJob {
                     queue,
                     partition,
                     payload,
                 } => {
-                    let job = JobSpec::new(Id::new(), &queue, &partition, payload);
-                    store
-                        .commit(CommitBatch::new(Id::new(), now_ms()).enqueue_job(job))
-                        .unwrap();
-                    model_job_count += 1;
+                    let tx = Id::new();
+                    let job_id = Id::new();
+                    let job = JobSpec::new(job_id, &queue, &partition, payload);
+                    let batch = CommitBatch::new(tx, now).enqueue_job(job);
+                    if let Ok(receipt) = store.commit(batch) {
+                        model.committed_transaction_ids.insert(tx);
+                        model.job_ids.insert(job_id);
+                        assert_eq!(receipt.transaction_id, tx);
+                        assert!(store.get_transaction(tx).is_ok());
+                    }
                 }
                 Op::Reopen => {
                     drop(store);
@@ -154,28 +203,46 @@ fn store_matches_reference_model() {
                 }
             }
 
-            for (stream, expected) in &model_streams {
-                assert_eq!(
-                    store.stream_version(stream),
-                    Some(*expected),
-                    "stream version for {}",
-                    stream
-                );
-            }
-            for (name, entries) in &model_projections {
-                let expected_version = model_projection_versions[name];
-                assert_eq!(store.projection_version(name).ok(), Some(expected_version));
-                for (key, value) in entries {
-                    assert_eq!(
-                        store.get_projection(name, key).unwrap().as_deref(),
-                        Some(value.as_slice()),
-                        "projection {} key {:?}",
-                        name,
-                        key
-                    );
-                }
-            }
-            assert_eq!(store.stats().job_count, model_job_count);
+            now += 1;
+            assert_model(&store, &model, &path);
         }
+    }
+}
+
+fn assert_model(store: &minisqlite::Store, model: &Model, path: &std::path::Path) {
+    for (stream, expected) in &model.streams {
+        assert_eq!(
+            store.stream_version(stream),
+            Some(*expected),
+            "stream version mismatch for {stream}"
+        );
+    }
+
+    for (name, expected_version) in &model.projection_versions {
+        assert_eq!(
+            store.projection_version(name).ok(),
+            Some(*expected_version),
+            "projection version mismatch for {name}"
+        );
+    }
+
+    for (name, entries) in &model.projections {
+        for (key, expected_value) in entries {
+            assert_eq!(
+                store.get_projection(name, key).unwrap().as_deref(),
+                Some(expected_value.as_slice()),
+                "projection {name} key {key:?} mismatch"
+            );
+        }
+    }
+
+    assert_eq!(store.stats().job_count, model.job_ids.len() as u64);
+
+    for tx in &model.committed_transaction_ids {
+        assert!(
+            store.get_transaction(*tx).is_ok(),
+            "committed transaction {tx} not found after reopen in {}",
+            path.display()
+        );
     }
 }

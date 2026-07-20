@@ -44,13 +44,4 @@ fn primary_file_is_owner_only() {
         0o600,
         "primary data file should be owner read/write only"
     );
-
-    let lock = path.with_extension("mini.lock");
-    let lock_meta = std::fs::metadata(&lock).unwrap();
-    let lock_mode = lock_meta.permissions().mode();
-    assert_eq!(
-        lock_mode & 0o777,
-        0o600,
-        "lock file should be owner read/write only"
-    );
 }

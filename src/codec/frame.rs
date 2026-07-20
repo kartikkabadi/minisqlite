@@ -93,6 +93,21 @@ impl FileHeader {
         if major == FORMAT_MAJOR && minor > FORMAT_MINOR {
             return Err(Error::UnsupportedVersion { major, minor });
         }
+        if header_length != FILE_HEADER_SIZE as u16 {
+            return Err(Error::Corruption {
+                message: format!(
+                    "unsupported file header length {header_length}; expected {expected}",
+                    expected = FILE_HEADER_SIZE
+                ),
+                offset: 0,
+            });
+        }
+        if flags != 0 {
+            return Err(Error::Corruption {
+                message: format!("unsupported file header flags {flags}"),
+                offset: 0,
+            });
+        }
         Ok(Self {
             major,
             minor,
