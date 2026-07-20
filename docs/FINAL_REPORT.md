@@ -209,7 +209,7 @@ Per PR comment IDs 4732347323 and 4732434245, the branch was audited against the
 
 Per PR comment ID 4732599741, the 13 merge-blocking findings were addressed and focused regression tests were added for each.
 
-* Branch: `feat/control-plane-state-engine` (head `4cfd7650a2d19d78c6cdb4249cd777733a74fc81`)
+* Branch: `feat/control-plane-state-engine` (head `56796f116293dcee68ec9a0bf3c28f8a710e3e3a`)
 * Merge conflict with `main`: none
 * Full verification suite (run on the Devin host at `2026-07-20 10:34 UTC`):
   * `cargo fmt --all -- --check` — passed
