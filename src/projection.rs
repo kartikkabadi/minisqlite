@@ -97,6 +97,9 @@ impl ProjectionState {
     }
 
     pub fn scan_range(&self, start: &[u8], end: &[u8]) -> Vec<ProjectionEntry> {
+        if start >= end {
+            return Vec::new();
+        }
         self.data
             .range(start.to_vec()..end.to_vec())
             .map(|(k, v)| ProjectionEntry::new(k.clone(), v.clone()))

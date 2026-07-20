@@ -12,7 +12,6 @@ homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
 keywords = ["database", "embedded", "eventsourcing", "control-plane", "local-first"]
 categories = ["database-implementations"]
-exclude = ["fuzz"]
 
 [[bin]]
 name = "minisqlite"
@@ -44,5 +43,5 @@ default = ["json"]
 json = ["serde", "dep:serde_json"]
 serde = ["dep:serde"]
 failpoint = []
-# Internal feature used only by the cargo-fuzz harnesses in fuzz/.
+# Exposes internal codec/storage modules for the deterministic fuzz tests in tests/fuzz_targets.rs.
 fuzzing = []

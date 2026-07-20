@@ -85,7 +85,6 @@ struct StoreInner {
     transaction_batches: HashMap<Id, CommitBatch>,
     transaction_receipts: HashMap<Id, CommitReceipt>,
     stream_versions: HashMap<String, u64>,
-    stream_sequences: HashMap<String, Vec<u64>>,
     projections: HashMap<String, ProjectionState>,
     jobs: HashMap<Id, JobStateRecord>,
     queue_partitions: HashMap<(String, String), Vec<Id>>,
@@ -117,7 +116,6 @@ impl Store {
             transaction_batches: HashMap::new(),
             transaction_receipts: HashMap::new(),
             stream_versions: HashMap::new(),
-            stream_sequences: HashMap::new(),
             projections: HashMap::new(),
             jobs: HashMap::new(),
             queue_partitions: HashMap::new(),
@@ -573,10 +571,6 @@ impl StoreInner {
                     self.event_ids.insert(e.event_id, e.global_sequence);
                     let version = self.stream_versions.entry(e.stream_id.clone()).or_insert(0);
                     *version = (*version).max(e.stream_version);
-                    self.stream_sequences
-                        .entry(e.stream_id.clone())
-                        .or_default()
-                        .push(e.global_sequence);
                 }
                 Record::ProjectionPut {
                     projection,
@@ -837,8 +831,7 @@ impl StoreInner {
             record_count: records.len() as u32,
             payload_length: payload_bytes.len() as u32,
         };
-        let mut frame = Frame::new(frame_header, payload_bytes);
-        frame.header.record_count = records.len() as u32;
+        let frame = Frame::new(frame_header, payload_bytes);
         let frame_offset = self.data_file.file_len();
         let frame_bytes = frame.encode();
 

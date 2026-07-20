@@ -1,3 +1,5 @@
+#![cfg(feature = "fuzzing")]
+
 use std::path::PathBuf;
 
 use minisqlite::codec::frame::{FileHeader, Frame};

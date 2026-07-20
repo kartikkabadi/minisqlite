@@ -163,6 +163,33 @@ These replaced the `libfuzzer-sys`/`fuzz/` harness to remove `libc` from the bui
 * Bounded control-plane data workload; not a general-purpose blob store.
 * Not production-ready.
 
-## Next evidence-producing step
+## Final merge-readiness pass
 
-Run the `tests/fuzz_targets.rs` harness with more seeds and larger input sizes (e.g., one hour per target) and add a nightly CI job that exercises them, to catch decoder edge cases that the proptests and crash matrix do not cover.
+Per PR comment corrective follow-up, the branch was re-audited against the full spec and implementation.
+
+* Head SHA: `HEAD_SHA_PLACEHOLDER`
+* Branch: `feat/control-plane-state-engine`
+* Merge conflict with `main`: none
+* Full verification suite (run on the box at `2026-07-19 10:34 UTC`):
+  * `cargo fmt --all -- --check` — passed
+  * `cargo clippy --all-targets --all-features -- -D warnings` — passed
+  * `cargo test --all-targets --all-features` — passed
+  * `cargo test --all-targets` (default features) — passed
+  * `cargo test --doc --all-features` — passed
+  * `cargo package --allow-dirty` — passed
+  * `cargo run --example synara_control_plane --release` — passed
+  * `cargo run --example benchmark --release` — passed
+* Additional cleanup from this pass:
+  * Removed the dead `stream_sequences` in-memory index from `StoreInner`.
+  * Removed the redundant `frame.header.record_count` re-assignment in `commit`.
+  * Guarded `ProjectionState::scan_range` against `start >= end` to eliminate a potential panic.
+  * Gated `tests/fuzz_targets.rs` behind the `fuzzing` feature and removed the stale `exclude = ["fuzz"]` entry from `Cargo.toml`.
+  * Refreshed `docs/PERFORMANCE.md` with the latest benchmark numbers.
+* `Cargo.lock` contains no `libc` or `zerocopy`.
+* Socket Security comments on PR #9 were resolved by removing the dependency tree that brought in `libc` and `zerocopy`.
+
+## Verdict
+
+**MERGE-READY** — all required gates pass and no unresolved merge-blocking correctness blocker was found.
+
+The implementation is intentionally alpha (`v0.3.0-alpha.1`) and not production-ready; the above verdict means the PR is complete and coherent, not a claim of production maturity.
