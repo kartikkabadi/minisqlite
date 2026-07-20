@@ -99,6 +99,86 @@ mod constrained_projection {
     }
 }
 
+/// Verification takes a shared lock, so it can never scan a live writer's
+/// half-appended frame and misdiagnose it as repairable corruption.
+mod verify_stability {
+    use super::*;
+
+    #[test]
+    fn verify_refuses_store_owned_by_a_writer() {
+        let tmp = TempDir::new();
+        let path = tmp.path().join("verify_locked.mini");
+        let store = StoreBuilder::new(&path).open().unwrap();
+        store
+            .commit(
+                CommitBatch::new(Id::new().unwrap(), 0).append_event(Event::with_json_payload(
+                    Id::new().unwrap(),
+                    "s",
+                    "e",
+                    0,
+                    b"{}",
+                )),
+            )
+            .unwrap();
+
+        let result = StoreBuilder::new(&path).verify();
+        assert!(
+            matches!(result, Err(Error::AlreadyOpen)),
+            "verify must refuse a store owned by an exclusive writer, got {result:?}"
+        );
+
+        drop(store);
+        StoreBuilder::new(&path).verify().unwrap();
+    }
+
+    /// Process-level proof: pause a writer mid-append with a torn frame on disk,
+    /// then confirm verify reports the live writer instead of repairable corruption.
+    #[cfg(feature = "failpoint")]
+    #[test]
+    fn verify_never_labels_live_in_progress_commit_as_repairable() {
+        let _guard = FAILPOINT_LOCK.lock().unwrap();
+        let tmp = TempDir::new();
+        let path = tmp.path().join("verify_pause.mini");
+        let signal = tmp.path().join("paused.signal");
+        let release = tmp.path().join("paused.release");
+
+        let driver = std::env::var("CARGO_BIN_EXE_crash_driver")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("target/debug/crash_driver"));
+        let mut child = std::process::Command::new(driver)
+            .arg(&path)
+            .arg("pause-during-append")
+            .env("MINISQLITE_PAUSE_SIGNAL_FILE", &signal)
+            .env("MINISQLITE_PAUSE_RELEASE_FILE", &release)
+            .spawn()
+            .expect("failed to spawn crash driver");
+
+        // Wait until the writer is paused with a partial frame on disk.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !signal.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writer never reached the pause failpoint"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // The file now ends in a half-written frame, but the writer is alive and
+        // holds the exclusive lock: verify must refuse, not report StoreNeedsRepair.
+        let result = StoreBuilder::new(&path).verify();
+        assert!(
+            matches!(result, Err(Error::AlreadyOpen)),
+            "verify must not diagnose a live in-progress commit, got {result:?}"
+        );
+
+        // Release the writer, let it finish the append, and verify a clean store.
+        std::fs::write(&release, b"go").unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success(), "writer failed to complete after release");
+        StoreBuilder::new(&path).verify().unwrap();
+    }
+}
+
 #[cfg(feature = "failpoint")]
 #[test]
 fn store_poisoned_reports_original_poisoning_transaction_id() {

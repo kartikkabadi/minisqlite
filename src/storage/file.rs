@@ -10,6 +10,17 @@ use crate::Error;
 #[cfg(unix)]
 const O_NOFOLLOW: i32 = libc::O_NOFOLLOW;
 
+/// How the primary file is locked for the lifetime of a `DataFile` handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    /// No lock. Only for temporary working copies (deterministic tests, fuzz targets).
+    None,
+    /// Shared lock: coexists with other readers but refuses an exclusive writer.
+    Shared,
+    /// Exclusive lock: single-owner store handle.
+    Exclusive,
+}
+
 /// Owns the primary data file and the normal append path.
 ///
 /// The underlying `File` is locked exclusively with `try_lock` for the lifetime of this
@@ -66,7 +77,12 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
     ) -> Result<Self, Error> {
-        Self::open(path, durability, acquire_lock, true, true)
+        let lock = if acquire_lock {
+            LockMode::Exclusive
+        } else {
+            LockMode::None
+        };
+        Self::open(path, durability, lock, true, true)
     }
 
     /// Open an existing primary data file. Fails if the file does not exist.
@@ -78,22 +94,27 @@ impl DataFile {
         durability: Durability,
         acquire_lock: bool,
     ) -> Result<Self, Error> {
-        Self::open(path, durability, acquire_lock, false, true)
+        let lock = if acquire_lock {
+            LockMode::Exclusive
+        } else {
+            LockMode::None
+        };
+        Self::open(path, durability, lock, false, true)
     }
 
     /// Open an existing primary data file for read-only verification.
     ///
-    /// No lock is acquired and the file is never modified, so this can be used while another
-    /// process owns the store. The caller must ensure no concurrent writes are in flight if
-    /// an exact point-in-time result is required.
+    /// A shared lock is acquired so verification is stable: it coexists with other
+    /// readers but fails with [`Error::AlreadyOpen`] while an exclusive writer owns
+    /// the store, so a partially appended in-flight frame is never scanned.
     pub fn open_read_only(path: impl AsRef<Path>, durability: Durability) -> Result<Self, Error> {
-        Self::open(path, durability, false, false, false)
+        Self::open(path, durability, LockMode::Shared, false, false)
     }
 
     fn open(
         path: impl AsRef<Path>,
         durability: Durability,
-        acquire_lock: bool,
+        lock: LockMode,
         create: bool,
         writable: bool,
     ) -> Result<Self, Error> {
@@ -151,15 +172,18 @@ impl DataFile {
             )));
         }
 
-        if acquire_lock {
-            match file.try_lock() {
-                Ok(()) => {}
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err(Error::AlreadyOpen);
-                }
-                Err(std::fs::TryLockError::Error(e)) => {
-                    return Err(Error::Io(e.to_string()));
-                }
+        let lock_result = match lock {
+            LockMode::None => Ok(()),
+            LockMode::Shared => file.try_lock_shared(),
+            LockMode::Exclusive => file.try_lock(),
+        };
+        match lock_result {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::AlreadyOpen);
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(Error::Io(e.to_string()));
             }
         }
 
@@ -270,6 +294,33 @@ impl DataFile {
                             .write_all(&frame_bytes[..split.min(frame_bytes.len())])?;
                         let _ = self.file.flush();
                         std::process::abort();
+                    }
+                    "pause-during-append" => {
+                        // Write a partial frame, signal the pause via
+                        // MINISQLITE_PAUSE_SIGNAL_FILE, wait for MINISQLITE_PAUSE_RELEASE_FILE
+                        // to appear, then complete the append normally. Used to prove that
+                        // verification never scans a live in-progress commit.
+                        let split =
+                            ((header_len + payload_len / 2) as usize).min(frame_bytes.len());
+                        self.file.seek(SeekFrom::End(0))?;
+                        self.file.write_all(&frame_bytes[..split])?;
+                        let _ = self.file.flush();
+                        if let Some(signal) = std::env::var_os("MINISQLITE_PAUSE_SIGNAL_FILE") {
+                            let _ = std::fs::write(&signal, b"paused");
+                        }
+                        if let Some(release) = std::env::var_os("MINISQLITE_PAUSE_RELEASE_FILE") {
+                            while !std::path::Path::new(&release).exists() {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                        }
+                        self.file.write_all(&frame_bytes[split..])?;
+                        if self.durability.requires_sync() {
+                            self.file.sync_all()?;
+                        } else {
+                            self.file.flush()?;
+                        }
+                        self.len += frame_bytes.len() as u64;
+                        return Ok(());
                     }
                     "after-payload" => {
                         let split = (header_len + payload_len) as usize;
