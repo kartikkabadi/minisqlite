@@ -28,6 +28,23 @@ CREATE TABLE queue_cursors (queue TEXT PRIMARY KEY, last_partition_key TEXT);
 CREATE TABLE active_partitions (queue TEXT NOT NULL, partition_key TEXT NOT NULL, first_active_sequence INTEGER NOT NULL, PRIMARY KEY(queue, partition_key));
 CREATE TABLE claim_receipts (transaction_id BLOB NOT NULL REFERENCES transactions(transaction_id), job_id BLOB NOT NULL, lease_token BLOB NOT NULL, attempt INTEGER NOT NULL, worker_id TEXT NOT NULL, lease_expires_at_ms INTEGER NOT NULL, PRIMARY KEY(transaction_id, job_id));
 ",
+},
+// v2 rebuilds `jobs` with CHECK constraints enforcing the job state machine's
+// row invariants (states 0..=6 per JobState::encode): leased rows carry a full
+// lease, non-leased rows carry none, retry-wait rows carry a retry time, and
+// terminal rows carry a terminal timestamp.
+Migration {
+    version: 2,
+    sql: "\
+CREATE TABLE jobs_v2 (job_id BLOB PRIMARY KEY, enqueue_sequence INTEGER NOT NULL UNIQUE, enqueue_transaction_id BLOB NOT NULL REFERENCES transactions(transaction_id), queue TEXT NOT NULL, partition_key TEXT NOT NULL, payload BLOB NOT NULL, not_before_ms INTEGER NOT NULL, max_attempts INTEGER NOT NULL CHECK (max_attempts > 0), effect_mode INTEGER NOT NULL, idempotency_key TEXT, state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 6), attempt INTEGER NOT NULL CHECK (attempt >= 0), lease_token BLOB, worker_id TEXT, lease_expires_at_ms INTEGER, retry_after_ms INTEGER, terminal_at_ms INTEGER, result_digest BLOB, error_summary TEXT, updated_transaction_id BLOB NOT NULL, CHECK (state <> 1 OR (lease_token IS NOT NULL AND worker_id IS NOT NULL AND lease_expires_at_ms IS NOT NULL)), CHECK (state = 1 OR (lease_token IS NULL AND worker_id IS NULL AND lease_expires_at_ms IS NULL)), CHECK (state <> 2 OR retry_after_ms IS NOT NULL), CHECK ((state IN (4, 5, 6)) = (terminal_at_ms IS NOT NULL)));
+INSERT INTO jobs_v2 SELECT * FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v2 RENAME TO jobs;
+CREATE INDEX jobs_ready_idx ON jobs(queue, partition_key, state, not_before_ms, enqueue_sequence);
+CREATE INDEX jobs_expiry_idx ON jobs(state, lease_expires_at_ms);
+CREATE INDEX jobs_queue_state_idx ON jobs(queue, state);
+CREATE INDEX jobs_transaction_idx ON jobs(updated_transaction_id);
+",
 }];
 
 /// FNV-1a-128 checksum of the migration SQL text (same hash family as the request

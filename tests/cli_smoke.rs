@@ -44,7 +44,7 @@ fn doctor_reports_healthy_store() {
     let output = run_cli(&["doctor", "--db", db.to_str().unwrap()]);
     assert!(output.status.success());
     let out = stdout(&output);
-    assert!(out.contains("schema version: 1"));
+    assert!(out.contains("schema version: 2"));
     assert!(out.contains("verify: ok"));
 }
 
@@ -99,7 +99,7 @@ fn backup_writes_and_refuses_existing_destination() {
 
     let output = run_cli(&["backup", dest_str, "--db", db.to_str().unwrap()]);
     assert!(output.status.success());
-    assert!(stdout(&output).contains("schema version 1"));
+    assert!(stdout(&output).contains("schema version 2"));
     assert!(dest.exists());
 
     let refused = run_cli(&["backup", dest_str, "--db", db.to_str().unwrap()]);
