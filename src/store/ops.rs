@@ -9,7 +9,8 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{Error, StorageError, ValidationError};
 use crate::store::migrations;
 
-/// A single finding from [`verify`]: which check failed and a human-readable detail.
+/// A single finding from [`ControlPlaneStore::verify`](crate::ControlPlaneStore::verify):
+/// which check failed and a human-readable detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyFinding {
     pub check: String,
