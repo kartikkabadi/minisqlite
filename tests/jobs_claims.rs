@@ -358,3 +358,46 @@ fn claim_request_validation() {
         ));
     }
 }
+
+#[test]
+fn lease_at_exact_expiry_is_current_everywhere() {
+    // Expired iff lease_expires_at_ms < now_ms: at now == expiry the lease is
+    // NOT reclaimed by maintenance, IS extendable, and IS recoverable.
+    let (_dir, store) = store();
+    enqueue(&store, 1, "a");
+    let id = Id::from(1u128);
+    let outcome = store.claim_jobs(&request(2_000, 1)).unwrap();
+    let claims = match outcome {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    let claimed = claims.jobs()[0].clone();
+    let expiry = claimed.lease_expires_at_ms;
+
+    // Maintenance at now == expiry does not reclaim the lease.
+    assert_eq!(
+        store.claim_jobs(&request(expiry, 10)).unwrap(),
+        ClaimOutcome::Noop
+    );
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Leased);
+
+    // Recovery at now == expiry still returns the lease as current.
+    match store.recover_claim(claims.transaction_id(), expiry).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs().len(), 1);
+            assert!(recovered.stale_jobs().is_empty());
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // Extension at now == expiry succeeds.
+    let receipt = store
+        .extend_lease(id, claimed.lease_token, expiry + 1_000, expiry)
+        .unwrap();
+    assert_eq!(receipt.lease_expires_at_ms(), expiry + 1_000);
+
+    // One tick past expiry, maintenance reclaims the lease.
+    let outcome = store.claim_jobs(&request(expiry + 1_000 + 1, 0)).unwrap();
+    assert!(matches!(outcome, ClaimOutcome::MaintenanceCommitted(_)));
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Uncertain);
+}

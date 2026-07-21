@@ -670,7 +670,7 @@ fn plan_maintenance(
     let mut stmt = tx
         .prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND state = ?2 \
-         AND lease_expires_at_ms <= ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
+         AND lease_expires_at_ms < ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
         ))
         .map_err(StorageError::from_sqlite)?;
     let rows = stmt
