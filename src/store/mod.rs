@@ -372,8 +372,9 @@ impl ControlPlaneStore {
         after_sequence: u64,
         limit: usize,
     ) -> Result<(Vec<JobInfo>, u64), Error> {
-        let conn = self.writer();
-        jobs::list_jobs_page(&conn, queue, state, after_sequence, limit)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        jobs::list_jobs_page(conn, queue, state, after_sequence, limit)
     }
 
     // ----- ops -----
