@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.0-alpha.1
+## 0.3.0-alpha.1 - Unreleased
 
 Complete product rewrite: minisqlite is now a typed embedded control-plane
 state kernel on SQLite, not a from-scratch SQL engine.
@@ -47,14 +47,14 @@ state kernel on SQLite, not a from-scratch SQL engine.
   writers, replication, a workflow DSL, a cron engine, a remote server, or a
   public multi-backend storage abstraction
 
-## 0.2.1
+## 0.2.1 - 2026-07-19
 
 - Polished public API and library documentation
 - Fixed all `cargo clippy` warnings and applied `cargo fmt`
 - Added `hex_encode` helper for consistent blob rendering
 - Improved README with crates.io badges, install instructions, and product positioning
 
-## 0.2.0
+## 0.2.0 - 2026-07-19
 
 - Initial public release of `minisqlite`
 - Page-based storage with a custom `MiniSQL2` file format
