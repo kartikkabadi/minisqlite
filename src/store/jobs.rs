@@ -904,6 +904,16 @@ pub(crate) fn list_jobs_page(
     after_sequence: u64,
     limit: usize,
 ) -> Result<(Vec<JobInfo>, u64), Error> {
+    let after_sequence_i64 = i64::try_from(after_sequence).map_err(|_| {
+        crate::error::ValidationError(format!(
+            "jobs_page after_sequence {after_sequence} exceeds the supported range"
+        ))
+    })?;
+    let limit_i64 = i64::try_from(limit).map_err(|_| {
+        crate::error::ValidationError(format!(
+            "jobs_page limit {limit} exceeds the supported range"
+        ))
+    })?;
     let mut stmt = conn
         .prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE enqueue_sequence > ?1 \
@@ -914,10 +924,10 @@ pub(crate) fn list_jobs_page(
     let rows = stmt
         .query_map(
             rusqlite::params![
-                after_sequence as i64,
+                after_sequence_i64,
                 queue,
                 state.map(JobState::encode),
-                limit as i64
+                limit_i64
             ],
             |row| {
                 let sequence: i64 = row.get(1)?;
