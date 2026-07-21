@@ -126,6 +126,13 @@ pub(crate) fn commit(
                     resolution,
                 )?;
             }
+            Operation::ExtendLease(extension) => {
+                crate::store::jobs::apply_extend_lease(&tx, extension, batch.committed_at_ms)
+                    .map_err(|e| match e {
+                        crate::error::LeaseError::Storage(s) => CommitError::Storage(s),
+                        other => ValidationError(other.to_string()).into(),
+                    })?;
+            }
         }
     }
 
@@ -313,6 +320,11 @@ fn validate_batch(limits: &Limits, batch: &CommitBatch) -> Result<(), CommitErro
                 }
             }
             Operation::ResolveJob(_) => {}
+            Operation::ExtendLease(extension) => {
+                if extension.lease_token == Id::ZERO {
+                    return Err(ValidationError("lease token cannot be zero".into()).into());
+                }
+            }
         }
     }
     Ok(())

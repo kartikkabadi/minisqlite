@@ -455,6 +455,46 @@ fn lease_extension_rules() {
 }
 
 #[test]
+fn batched_lease_extension_commits_atomically() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", NOW);
+    let expiry = claimed.lease_expires_at_ms;
+
+    // A batch with a wrong token rejects atomically: no extension, no event.
+    let bad = CommitBatch::new(id(2), NOW)
+        .append_event(common::event(100, "s", "t"))
+        .extend_lease(id(10), id(999), expiry + 1_000);
+    assert!(store.commit(&bad).is_err());
+    assert_eq!(store.stream_version("s").unwrap(), 0);
+    let info = store.job(id(10)).unwrap().unwrap();
+    assert_eq!(info.lease_expires_at_ms, Some(expiry));
+
+    // A valid batched extension moves the expiry together with the event.
+    let good = CommitBatch::new(id(3), NOW)
+        .append_event(common::event(101, "s", "t"))
+        .extend_lease(id(10), claimed.lease_token, expiry + 1_000);
+    store.commit(&good).unwrap();
+    assert_eq!(store.stream_version("s").unwrap(), 1);
+    let info = store.job(id(10)).unwrap().unwrap();
+    assert_eq!(info.lease_expires_at_ms, Some(expiry + 1_000));
+    assert_eq!(info.attempt, claimed.attempt);
+
+    // Zero lease tokens are rejected at validation time.
+    let zero = CommitBatch::new(id(4), NOW).extend_lease(id(10), Id::ZERO, expiry + 2_000);
+    assert!(store.commit(&zero).is_err());
+
+    // Extensions past the batch's committed_at_ms "now" are rejected as expired.
+    let late = CommitBatch::new(id(5), expiry + 2_000 + 1).extend_lease(
+        id(10),
+        claimed.lease_token,
+        expiry + 3_000,
+    );
+    assert!(store.commit(&late).is_err());
+}
+
+#[test]
 fn extending_an_expired_lease_fails() {
     let dir = temp_dir();
     let store = open_in(&dir);
