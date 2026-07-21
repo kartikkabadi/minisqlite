@@ -16,8 +16,8 @@
 //! Run with: `cargo run --example synara_provider_turn`
 
 use minisqlite::{
-    ClaimError, ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch,
-    ControlPlaneStore, Event, Id, JobSpec, JobState, ProjectionPatch,
+    ClaimError, ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch, CommitError,
+    ControlPlaneStore, Event, Id, JobSpec, JobState, ProjectionPatch, TransactionRecovery,
 };
 
 const THREADS: &str = "threads";
@@ -138,15 +138,30 @@ fn complete_turn(
     job: &ClaimedJob,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = format!("thread:{thread_id}");
-    store.commit(
-        &CommitBatch::new(Id::new()?, now_ms())
-            .append_event(event(&stream, "thread.turn-completed", r#"{"turn":1}"#)?)
-            .apply_projection_patch(
-                ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
-                    .put(thread_id, r#"{"status":"idle"}"#),
-            )
-            .acknowledge_job(job.job_id, job.lease_token, None),
-    )?;
+    let batch = CommitBatch::new(Id::new()?, now_ms())
+        .append_event(event(&stream, "thread.turn-completed", r#"{"turn":1}"#)?)
+        .apply_projection_patch(
+            ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
+                .put(thread_id, r#"{"status":"idle"}"#),
+        )
+        .acknowledge_job(job.job_id, job.lease_token, None);
+    match store.commit(&batch) {
+        Ok(_) => {}
+        // The ack outcome is unknown; a blind retry could double-ack (or, in a
+        // template that retries the whole turn, re-run the provider effect).
+        // Resolve with recover_transaction: Committed means done, Absent means
+        // the commit never landed and the same batch is safe to resubmit.
+        Err(CommitError::Indeterminate(i)) => match store.recover_transaction(i.transaction_id())? {
+            TransactionRecovery::Committed(_) => {
+                println!("[commit] indeterminate ack resolved: committed; nothing to retry")
+            }
+            TransactionRecovery::Absent => {
+                println!("[commit] indeterminate ack resolved: absent; resubmitting");
+                store.commit(&batch)?;
+            }
+        },
+        Err(other) => return Err(other.into()),
+    }
     println!("[commit] thread.turn-completed     threads/{thread_id} -> idle, job acked");
     Ok(())
 }
