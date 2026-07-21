@@ -20,8 +20,9 @@ COMMANDS:
     projections list               list projections and versions
     jobs list [--queue Q] [--state S]
                                    list jobs, optionally filtered
-    backup <dest>                  copy the database to <dest>
-    diagnostic-export              print a redacted diagnostic export
+    backup <dest> [--overwrite]    copy the database to <dest>
+    diagnostic-export [--out FILE] [--include-payloads]
+                                   write a redacted diagnostic export
     migrations status              print migration versions and checksums
 ";
 
@@ -43,6 +44,9 @@ struct Parsed {
     limit: Option<usize>,
     queue: Option<String>,
     state: Option<String>,
+    out: Option<String>,
+    overwrite: bool,
+    include_payloads: bool,
 }
 
 fn parse(args: &[String]) -> Result<Parsed, String> {
@@ -51,6 +55,9 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
     let mut limit = None;
     let mut queue = None;
     let mut state = None;
+    let mut out = None;
+    let mut overwrite = false;
+    let mut include_payloads = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -61,6 +68,9 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
             }
             "--queue" => queue = Some(flag_value(&mut iter, "--queue")?),
             "--state" => state = Some(flag_value(&mut iter, "--state")?),
+            "--out" => out = Some(flag_value(&mut iter, "--out")?),
+            "--overwrite" => overwrite = true,
+            "--include-payloads" => include_payloads = true,
             other if other.starts_with("--") => return Err(format!("unknown flag: {other}")),
             other => positional.push(other.to_string()),
         }
@@ -71,6 +81,9 @@ fn parse(args: &[String]) -> Result<Parsed, String> {
         limit,
         queue,
         state,
+        out,
+        overwrite,
+        include_payloads,
     })
 }
 
@@ -106,15 +119,27 @@ fn run(args: &[String]) -> Result<(), String> {
         parsed.positional.first().map(String::as_str),
     ) {
         ("doctor", None) => {
-            let statuses = store.migrations_status().map_err(|e| e.to_string())?;
             println!("store opened: {}", parsed.db);
-            println!("migrations applied: {}", statuses.len());
-            let bad: Vec<_> = statuses.iter().filter(|s| !s.checksum_ok).collect();
-            if bad.is_empty() {
-                println!("migration checksums: ok");
+            let stats = store.stats().map_err(|e| e.to_string())?;
+            println!("schema version: {}", stats.migration_version);
+            println!(
+                "transactions: {}, events: {}, streams: {}",
+                stats.transactions, stats.events, stats.streams
+            );
+            println!(
+                "jobs by state: {:?}, active partitions: {}",
+                stats.jobs_by_state, stats.active_partitions
+            );
+            println!("file size: {} bytes", stats.file_size_bytes);
+            let report = store.verify().map_err(|e| e.to_string())?;
+            if report.is_ok() {
+                println!("verify: ok");
                 Ok(())
             } else {
-                Err(format!("{} migration checksum(s) mismatched", bad.len()))
+                for finding in &report.findings {
+                    println!("{}: {}", finding.check, finding.detail);
+                }
+                Err(format!("verify: {} finding(s)", report.findings.len()))
             }
         }
         ("verify", None) => {
@@ -174,13 +199,30 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         ("backup", Some(dest)) => {
-            store.backup(dest, false).map_err(|e| e.to_string())?;
-            println!("backup written to {dest}");
+            store
+                .backup(dest, parsed.overwrite)
+                .map_err(|e| e.to_string())?;
+            let version = store
+                .migrations_status()
+                .map_err(|e| e.to_string())?
+                .iter()
+                .map(|s| s.version)
+                .max()
+                .unwrap_or(0);
+            println!("backup written to {dest} (schema version {version})");
             Ok(())
         }
         ("diagnostic-export", None) => {
-            let export = store.diagnostic_export().map_err(|e| e.to_string())?;
-            println!("{export}");
+            let export = store
+                .diagnostic_export_with(parsed.include_payloads)
+                .map_err(|e| e.to_string())?;
+            match parsed.out {
+                Some(path) => {
+                    std::fs::write(&path, export).map_err(|e| e.to_string())?;
+                    println!("diagnostic export written to {path}");
+                }
+                None => print!("{export}"),
+            }
             Ok(())
         }
         ("migrations", Some("status")) => {
