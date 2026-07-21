@@ -84,13 +84,14 @@ impl FromStr for Id {
 
 impl From<u128> for Id {
     fn from(value: u128) -> Self {
-        Self(value.to_le_bytes())
+        // Big-endian so numeric order matches the lexicographic byte order of `Ord`.
+        Self(value.to_be_bytes())
     }
 }
 
 impl From<Id> for u128 {
     fn from(id: Id) -> Self {
-        u128::from_le_bytes(id.0)
+        u128::from_be_bytes(id.0)
     }
 }
 
@@ -137,6 +138,9 @@ mod tests {
         let a = Id::from(1u128);
         let b = Id::from(2u128);
         assert!(a < b);
+        // Multi-byte values order numerically, not by little-endian byte quirks.
+        assert!(Id::from(256u128) > Id::from(1u128));
+        assert_eq!(u128::from(Id::from(256u128)), 256u128);
     }
 
     #[test]
