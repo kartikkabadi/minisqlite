@@ -4,6 +4,8 @@
 pub(crate) mod commit;
 pub(crate) mod connection;
 pub(crate) mod events;
+#[cfg(feature = "failpoints")]
+pub mod failpoints;
 pub(crate) mod jobs;
 pub(crate) mod migrations;
 pub(crate) mod ops;
