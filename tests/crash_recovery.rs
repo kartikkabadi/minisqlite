@@ -276,7 +276,7 @@ fn crash_after_claim_recovers_original_lease_tokens() {
     assert_clean(&store);
     // B2.3: crash-after-commit claim recovers as Committed with the original
     // lease token.
-    match store.recover_claim(txn).unwrap() {
+    match store.recover_claim(txn, 2_000).unwrap() {
         ClaimRecovery::Committed(claims) => {
             assert_eq!(claims.jobs().len(), 1);
             assert_eq!(claims.jobs()[0].job_id, job_id);
@@ -286,7 +286,7 @@ fn crash_after_claim_recovers_original_lease_tokens() {
     }
     // B2.4: a claim that never committed recovers as Absent.
     assert_eq!(
-        store.recover_claim(Id::from(0xABADu128)).unwrap(),
+        store.recover_claim(Id::from(0xABADu128), 2_000).unwrap(),
         ClaimRecovery::Absent
     );
 }
@@ -376,9 +376,16 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
             let job_ids: Vec<Id> = parts.map(|p| Id::from_hex(p).unwrap()).collect();
             // Every logged claim must be recoverable with its exact job set and
             // usable lease tokens.
-            match store.recover_claim(txn).unwrap() {
+            match store.recover_claim(txn, 2_000).unwrap() {
                 ClaimRecovery::Committed(claims) => {
-                    let recovered: HashSet<Id> = claims.jobs().iter().map(|j| j.job_id).collect();
+                    // Every leased job is accounted for: still executable, or
+                    // reported stale (e.g. already acknowledged).
+                    let recovered: HashSet<Id> = claims
+                        .jobs()
+                        .iter()
+                        .map(|j| j.job_id)
+                        .chain(claims.stale_jobs().iter().copied())
+                        .collect();
                     assert_eq!(recovered, job_ids.iter().copied().collect::<HashSet<_>>());
                     for job in claims.jobs() {
                         assert_ne!(job.lease_token, Id::ZERO);
@@ -428,7 +435,9 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
 
     // Unknown transactions recover as Absent, never as a granted claim.
     assert_eq!(
-        store.recover_claim(Id::from(0xDEAD_BEEFu128)).unwrap(),
+        store
+            .recover_claim(Id::from(0xDEAD_BEEFu128), 2_000)
+            .unwrap(),
         ClaimRecovery::Absent
     );
     assert_eq!(

@@ -304,6 +304,7 @@ pub enum ClaimOutcome {
 pub struct CommittedClaims {
     pub(crate) transaction_id: Id,
     pub(crate) jobs: Vec<ClaimedJob>,
+    pub(crate) stale_jobs: Vec<Id>,
 }
 
 impl CommittedClaims {
@@ -312,9 +313,16 @@ impl CommittedClaims {
         self.transaction_id
     }
 
-    /// The claimed jobs.
+    /// The claimed jobs whose leases are still current and executable.
     pub fn jobs(&self) -> &[ClaimedJob] {
         &self.jobs
+    }
+
+    /// Jobs this transaction leased whose leases are no longer current (expired,
+    /// re-leased, or already resolved). They committed, but must not be executed
+    /// under the recovered tokens.
+    pub fn stale_jobs(&self) -> &[Id] {
+        &self.stale_jobs
     }
 
     /// Consume the receipt, returning the claimed jobs.

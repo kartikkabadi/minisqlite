@@ -331,12 +331,16 @@ impl ControlPlaneStore {
     /// tokens from durable claim receipts.
     /// Always reopens a fresh connection first when the writer was poisoned by the
     /// failed COMMIT.
-    pub fn recover_claim(&self, transaction_id: Id) -> Result<ClaimRecovery, RecoveryError> {
+    pub fn recover_claim(
+        &self,
+        transaction_id: Id,
+        now_ms: i64,
+    ) -> Result<ClaimRecovery, RecoveryError> {
         let mut guard = self.writer();
         let conn = self
             .connection(&mut guard)
             .map_err(RecoveryError::Storage)?;
-        jobs::recover_claim(conn, transaction_id)
+        jobs::recover_claim(conn, transaction_id, now_ms)
     }
 
     /// Look up one job by its ID.

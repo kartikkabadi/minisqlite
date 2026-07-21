@@ -486,7 +486,7 @@ fn recover_claim_returns_the_extended_expiry_after_extension() {
         .extend_lease(id(10), claimed.lease_token, extended, NOW)
         .unwrap();
 
-    match store.recover_claim(claims.transaction_id()).unwrap() {
+    match store.recover_claim(claims.transaction_id(), NOW).unwrap() {
         ClaimRecovery::Committed(recovered) => {
             assert_eq!(recovered.jobs()[0].lease_expires_at_ms, extended);
         }
@@ -512,7 +512,7 @@ fn recover_claim_reports_committed_with_original_tokens_and_absent() {
     // Recovery works from a fresh handle and reconstructs the original tokens.
     drop(store);
     let store = open(&path);
-    match store.recover_claim(transaction_id).unwrap() {
+    match store.recover_claim(transaction_id, NOW).unwrap() {
         ClaimRecovery::Committed(recovered) => {
             assert_eq!(recovered.transaction_id(), transaction_id);
             assert_eq!(recovered.jobs().len(), original.len());
@@ -522,7 +522,56 @@ fn recover_claim_reports_committed_with_original_tokens_and_absent() {
         other => panic!("expected committed recovery, got {other:?}"),
     }
 
-    assert_eq!(store.recover_claim(id(404)).unwrap(), ClaimRecovery::Absent);
+    assert_eq!(
+        store.recover_claim(id(404), NOW).unwrap(),
+        ClaimRecovery::Absent
+    );
+}
+
+#[test]
+fn recover_claim_reports_expired_or_resolved_leases_as_stale() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claims = match store.claim_jobs(&claim_request("q", NOW)).unwrap() {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    let txn = claims.transaction_id();
+
+    // Still current: recoverable as executable.
+    match store.recover_claim(txn, NOW).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs().len(), 1);
+            assert!(recovered.stale_jobs().is_empty());
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // After expiry: the lease must not be handed back as executable.
+    match store.recover_claim(txn, NOW + LEASE_MS + 1).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert!(recovered.jobs().is_empty());
+            assert_eq!(recovered.stale_jobs(), &[id(10)]);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // After acknowledgement the lease is resolved: also stale.
+    store
+        .commit(&CommitBatch::new(id(100), NOW).acknowledge_job(
+            id(10),
+            claims.jobs()[0].lease_token,
+            None,
+        ))
+        .unwrap();
+    match store.recover_claim(txn, NOW).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert!(recovered.jobs().is_empty());
+            assert_eq!(recovered.stale_jobs(), &[id(10)]);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
 }
 
 // ----- indeterminate claim API shape (compile-time) -----

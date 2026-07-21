@@ -634,6 +634,7 @@ pub(crate) fn claim_jobs(
         Ok(ClaimOutcome::Committed(CommittedClaims {
             transaction_id,
             jobs: claimed,
+            stale_jobs: Vec::new(),
         }))
     }
 }
@@ -853,11 +854,13 @@ pub(crate) fn extend_lease(
 pub(crate) fn recover_claim(
     conn: &Connection,
     transaction_id: Id,
+    now_ms: i64,
 ) -> Result<ClaimRecovery, RecoveryError> {
     let mut stmt = conn
         .prepare(
             "SELECT r.job_id, r.lease_token, r.attempt, r.worker_id, r.lease_expires_at_ms, \
-             j.queue, j.partition_key, j.payload, j.idempotency_key \
+             j.queue, j.partition_key, j.payload, j.idempotency_key, \
+             j.state, j.lease_token, j.lease_expires_at_ms \
              FROM claim_receipts r JOIN jobs j ON j.job_id = r.job_id \
              WHERE r.transaction_id = ?1 ORDER BY r.job_id",
         )
@@ -873,7 +876,31 @@ pub(crate) fn recover_claim(
             let partition_key: String = row.get(6)?;
             let payload: Vec<u8> = row.get(7)?;
             let idempotency_key: Option<String> = row.get(8)?;
+            let current_state: i64 = row.get(9)?;
+            let current_token: Option<Vec<u8>> = row.get(10)?;
+            let current_expiry: Option<i64> = row.get(11)?;
             Ok((
+                (
+                    job_id,
+                    lease_token,
+                    attempt,
+                    worker_id,
+                    lease_expires_at_ms,
+                    queue,
+                    partition_key,
+                    payload,
+                    idempotency_key,
+                ),
+                (current_state, current_token, current_expiry),
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
+    let mut jobs = Vec::new();
+    let mut stale_jobs = Vec::new();
+    let mut any_receipt = false;
+    for row in rows {
+        let (
+            (
                 job_id,
                 lease_token,
                 attempt,
@@ -883,38 +910,38 @@ pub(crate) fn recover_claim(
                 partition_key,
                 payload,
                 idempotency_key,
-            ))
-        })
-        .map_err(StorageError::from_sqlite)?;
-    let mut jobs = Vec::new();
-    for row in rows {
-        let (
-            job_id,
-            lease_token,
-            attempt,
-            worker_id,
-            lease_expires_at_ms,
-            queue,
-            partition_key,
-            payload,
-            idempotency_key,
+            ),
+            (current_state, current_token, current_expiry),
         ) = row.map_err(StorageError::from_sqlite)?;
+        any_receipt = true;
+        let job_id = id_from_blob(job_id)?;
+        let lease_token = id_from_blob(lease_token)?;
+        // A recovered lease is executable only while it is still the job's
+        // current, unexpired lease; anything else risks double execution.
+        let still_current = current_state == JobState::Leased.encode()
+            && opt_id_from_blob(current_token)? == Some(lease_token)
+            && current_expiry.is_some_and(|expiry| expiry >= now_ms);
+        if !still_current {
+            stale_jobs.push(job_id);
+            continue;
+        }
         jobs.push(ClaimedJob {
-            job_id: id_from_blob(job_id)?,
+            job_id,
             queue,
             partition_key,
             payload,
             worker_id,
-            lease_token: id_from_blob(lease_token)?,
+            lease_token,
             attempt: attempt as u32,
             lease_expires_at_ms,
             idempotency_key,
         });
     }
-    if !jobs.is_empty() {
+    if any_receipt {
         return Ok(ClaimRecovery::Committed(CommittedClaims {
             transaction_id,
             jobs,
+            stale_jobs,
         }));
     }
     // No receipts: the claim either never committed, or committed maintenance only.
