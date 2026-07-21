@@ -24,6 +24,9 @@ COMMANDS:
     diagnostic-export [--out FILE] [--include-payloads]
                                    write a redacted diagnostic export
     migrations status              print migration versions and checksums
+
+The CLI never creates or migrates databases; it opens existing files only.
+To create or migrate a store, open it with the library (StoreBuilder::open).
 ";
 
 fn main() -> ExitCode {
@@ -112,12 +115,31 @@ fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let parsed = parse(&args[1..])?;
-    let store = ControlPlaneStore::open(&parsed.db).map_err(|e| e.to_string())?;
-
-    match (
+    let command = (
         args[0].as_str(),
         parsed.positional.first().map(String::as_str),
-    ) {
+    );
+
+    // Validate the command before touching the database: an unknown command or a
+    // typo'd path must never create or migrate a database file.
+    match command {
+        ("doctor", None)
+        | ("verify", None)
+        | ("stats", None)
+        | ("events", Some("tail"))
+        | ("projections", Some("list"))
+        | ("jobs", Some("list"))
+        | ("backup", Some(_))
+        | ("diagnostic-export", None)
+        | ("migrations", Some("status")) => {}
+        _ => return Err(format!("unknown command: {}\n{USAGE}", args.join(" "))),
+    }
+
+    // All CLI commands are inspection commands: open the existing database without
+    // creating it and without migrating it.
+    let store = ControlPlaneStore::open_existing(&parsed.db).map_err(|e| e.to_string())?;
+
+    match command {
         ("doctor", None) => {
             println!("store opened: {}", parsed.db);
             let stats = store.stats().map_err(|e| e.to_string())?;
@@ -161,12 +183,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         ("events", Some("tail")) => {
             let limit = parsed.limit.unwrap_or(10);
-            // Tail = the last `limit` events in global order.
-            let mut events = store
-                .events_after(0, usize::MAX)
-                .map_err(|e| e.to_string())?;
-            let skip = events.len().saturating_sub(limit);
-            for event in events.drain(skip..) {
+            for event in store.last_events(limit).map_err(|e| e.to_string())? {
                 println!(
                     "{} {} {}@{} {}",
                     event.global_sequence,
@@ -193,7 +210,11 @@ fn run(args: &[String]) -> Result<(), String> {
             for job in jobs {
                 println!(
                     "{} {} {} {:?} attempt {}",
-                    job.job_id, job.spec.queue, job.spec.partition_key, job.state, job.attempt
+                    job.job_id,
+                    job.spec.queue(),
+                    job.spec.partition_key(),
+                    job.state,
+                    job.attempt
                 );
             }
             Ok(())
@@ -236,6 +257,6 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => Err(format!("unknown command: {}\n{USAGE}", args.join(" "))),
+        _ => unreachable!("command validated before dispatch"),
     }
 }

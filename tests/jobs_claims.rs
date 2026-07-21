@@ -258,8 +258,8 @@ fn extend_lease_rules() {
     let receipt = store
         .extend_lease(id, claimed.lease_token, 20_000, 3_000)
         .unwrap();
-    assert_eq!(receipt.attempt, 1);
-    assert_eq!(receipt.lease_expires_at_ms, 20_000);
+    assert_eq!(receipt.attempt(), 1);
+    assert_eq!(receipt.lease_expires_at_ms(), 20_000);
     let info = store.job(id).unwrap().unwrap();
     assert_eq!(info.lease_expires_at_ms, Some(20_000));
     assert_eq!(info.attempt, 1);
@@ -288,7 +288,7 @@ fn recover_claim_reconstructs_original_lease_tokens() {
         ClaimOutcome::Committed(claims) => claims,
         other => panic!("expected committed claims, got {other:?}"),
     };
-    let recovered = store.recover_claim(claims.transaction_id()).unwrap();
+    let recovered = store.recover_claim(claims.transaction_id(), 2_000).unwrap();
     match recovered {
         ClaimRecovery::Committed(recovered) => {
             let mut original = claims.jobs().to_vec();
@@ -299,7 +299,7 @@ fn recover_claim_reconstructs_original_lease_tokens() {
     }
     // Unknown transaction IDs are Absent.
     assert_eq!(
-        store.recover_claim(Id::from(77u128)).unwrap(),
+        store.recover_claim(Id::from(77u128), 2_000).unwrap(),
         ClaimRecovery::Absent
     );
 }

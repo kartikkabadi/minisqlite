@@ -99,7 +99,8 @@ fn heartbeat(
     let receipt = store.extend_lease(job.job_id, job.lease_token, now + 60_000, now)?;
     println!(
         "[lease]  heartbeat extended lease for {} to now+60s (attempt {})",
-        job.partition_key, receipt.attempt
+        job.partition_key,
+        receipt.attempt()
     );
     Ok(())
 }
@@ -180,13 +181,13 @@ fn claim_one(
                     "[claim]  indeterminate; recovering {}",
                     claim.transaction_id()
                 );
-                match store.recover_claim(claim.transaction_id())? {
+                match store.recover_claim(claim.transaction_id(), now_ms())? {
                     ClaimRecovery::Committed(claims) => {
                         let tx = claims.transaction_id();
                         return Ok((tx, claims.into_jobs().remove(0)));
                     }
-                    ClaimRecovery::Absent => continue, // never leased; claim again
-                    ClaimRecovery::StillIndeterminate => return Err("still indeterminate".into()),
+                    // Maintenance-only or never leased; claim again.
+                    ClaimRecovery::MaintenanceCommitted(_) | ClaimRecovery::Absent => continue,
                 }
             }
             Err(other) => return Err(other.into()),
@@ -231,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // transaction id (e.g. from its WAL/journal) — no payloads, no lease tokens.
     let store = ControlPlaneStore::open(&db)?;
     println!("[reopen] store reopened; recovering claim {claim_tx}");
-    match store.recover_claim(claim_tx)? {
+    match store.recover_claim(claim_tx, now_ms())? {
         ClaimRecovery::Committed(claims) => {
             println!(
                 "[recover] claim receipt found: {} job(s), original lease tokens restored",
@@ -244,8 +245,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 complete_turn(&store, "t-200", &job)?;
             }
         }
+        ClaimRecovery::MaintenanceCommitted(_) => {
+            println!("[recover] claim recorded maintenance only; job still claimable")
+        }
         ClaimRecovery::Absent => println!("[recover] claim never committed; job still claimable"),
-        ClaimRecovery::StillIndeterminate => println!("[recover] retry recovery later"),
     }
     println!(
         "[state]  threads/t-200 = {}",
