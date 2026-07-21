@@ -16,8 +16,8 @@
 //! Run with: `cargo run --example synara_provider_turn`
 
 use minisqlite::{
-    ClaimError, ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch,
-    ControlPlaneStore, Event, Id, JobSpec, JobState, ProjectionPatch,
+    ClaimError, ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch, CommitError,
+    ControlPlaneStore, Event, Id, JobSpec, JobState, ProjectionPatch, TransactionRecovery,
 };
 
 const THREADS: &str = "threads";
@@ -138,15 +138,32 @@ fn complete_turn(
     job: &ClaimedJob,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let stream = format!("thread:{thread_id}");
-    store.commit(
-        &CommitBatch::new(Id::new()?, now_ms())
-            .append_event(event(&stream, "thread.turn-completed", r#"{"turn":1}"#)?)
-            .apply_projection_patch(
-                ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
-                    .put(thread_id, r#"{"status":"idle"}"#),
-            )
-            .acknowledge_job(job.job_id, job.lease_token, None),
-    )?;
+    let batch = CommitBatch::new(Id::new()?, now_ms())
+        .append_event(event(&stream, "thread.turn-completed", r#"{"turn":1}"#)?)
+        .apply_projection_patch(
+            ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
+                .put(thread_id, r#"{"status":"idle"}"#),
+        )
+        .acknowledge_job(job.job_id, job.lease_token, None);
+    match store.commit(&batch) {
+        Ok(_) => {}
+        // The ack outcome is unknown; a blind retry could double-ack (or, in a
+        // template that retries the whole turn, re-run the provider effect).
+        // Resolve with recover_transaction: Committed means done, Absent means
+        // the commit never landed and the same batch is safe to resubmit.
+        Err(CommitError::Indeterminate(i)) => {
+            match store.recover_transaction(i.transaction_id())? {
+                TransactionRecovery::Committed(_) => {
+                    println!("[commit] indeterminate ack resolved: committed; nothing to retry")
+                }
+                TransactionRecovery::Absent => {
+                    println!("[commit] indeterminate ack resolved: absent; resubmitting");
+                    store.commit(&batch)?;
+                }
+            }
+        }
+        Err(other) => return Err(other.into()),
+    }
     println!("[commit] thread.turn-completed     threads/{thread_id} -> idle, job acked");
     Ok(())
 }
@@ -183,6 +200,19 @@ fn claim_one(
                 );
                 match store.recover_claim(claim.transaction_id(), now_ms())? {
                     ClaimRecovery::Committed(claims) => {
+                        // Stale jobs committed under this claim but must not be
+                        // executed with the recovered tokens; reconcilable jobs
+                        // surface as Uncertain (effect status unknown).
+                        for stale in claims.stale_jobs() {
+                            println!(
+                                "[claim]  stale job {stale}: do not execute; surfaces as Uncertain"
+                            );
+                        }
+                        if claims.is_empty() {
+                            // Every receipt job went stale: no lease held. Claim again.
+                            println!("[claim]  recovered claim holds no executable jobs");
+                            continue;
+                        }
                         let tx = claims.transaction_id();
                         return Ok((tx, claims.into_jobs().remove(0)));
                     }
@@ -234,15 +264,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[reopen] store reopened; recovering claim {claim_tx}");
     match store.recover_claim(claim_tx, now_ms())? {
         ClaimRecovery::Committed(claims) => {
-            println!(
-                "[recover] claim receipt found: {} job(s), original lease tokens restored",
-                claims.len()
-            );
-            for job in claims {
-                heartbeat(&store, &job)?;
-                start_turn(&store, "t-200")?;
-                call_provider(&job); // exactly once, under the recovered lease
-                complete_turn(&store, "t-200", &job)?;
+            // Jobs whose leases lapsed before recovery are stale: they must not
+            // be executed with the recovered tokens. Reconcilable stale jobs
+            // surface as Uncertain (effect status unknown) until reconciled.
+            for stale in claims.stale_jobs() {
+                println!("[recover] stale job {stale}: not executable; surfaces as Uncertain");
+            }
+            if claims.is_empty() {
+                println!("[recover] claim committed but no executable jobs remain; no lease held");
+            } else {
+                println!(
+                    "[recover] claim receipt found: {} job(s), original lease tokens restored",
+                    claims.len()
+                );
+                for job in claims.into_jobs() {
+                    heartbeat(&store, &job)?;
+                    start_turn(&store, "t-200")?;
+                    call_provider(&job); // exactly once, under the recovered lease
+                    complete_turn(&store, "t-200", &job)?;
+                }
             }
         }
         ClaimRecovery::MaintenanceCommitted(_) => {
