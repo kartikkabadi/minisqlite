@@ -389,21 +389,6 @@ impl ControlPlaneStore {
         self.with_reader(|conn| jobs::list_jobs_page(conn, queue, state, after_sequence, limit))
     }
 
-    /// List one page of jobs after a pagination cursor (an `enqueue_sequence`
-    /// value; start from 0), optionally filtered by queue and state. Returns
-    /// the page and the cursor to pass for the next page.
-    pub fn jobs_page(
-        &self,
-        queue: Option<&str>,
-        state: Option<JobState>,
-        after_sequence: u64,
-        limit: usize,
-    ) -> Result<(Vec<JobInfo>, u64), Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        jobs::list_jobs_page(conn, queue, state, after_sequence, limit)
-    }
-
     // ----- ops -----
 
     /// Copy the database to `dest_path` using the SQLite backup API. Refuses an
