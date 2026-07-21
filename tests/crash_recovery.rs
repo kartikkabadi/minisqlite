@@ -251,8 +251,12 @@ fn crash_after_claim_recovers_original_lease_tokens() {
     let store = common::open(&db);
     store
         .commit(
-            &CommitBatch::new(txid(), 1_000)
-                .enqueue_job(JobSpec::reconcilable(Id::from(1u128), "q", "p", vec![])),
+            &CommitBatch::new(txid(), 1_000).enqueue_job(JobSpec::reconcilable(
+                Id::from(1u128),
+                "q",
+                "p",
+                vec![],
+            )),
         )
         .unwrap();
     drop(store);
