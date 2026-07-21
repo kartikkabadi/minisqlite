@@ -113,11 +113,11 @@ pub(crate) fn projection_get(
 /// all bytes are 0xFF).
 fn prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut bound = prefix.to_vec();
-    while let Some(&last) = bound.last() {
-        if last == 0xFF {
+    while let Some(last) = bound.last_mut() {
+        if *last == 0xFF {
             bound.pop();
         } else {
-            *bound.last_mut().expect("nonempty") = last + 1;
+            *last += 1;
             return Some(bound);
         }
     }
