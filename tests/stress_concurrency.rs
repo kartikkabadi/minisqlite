@@ -137,8 +137,8 @@ fn rapid_sequential_commits_keep_sequences_monotonic() {
         let receipt = store
             .commit(&CommitBatch::new(txid(), 2_000).append_event(event(&stream, "rapid")))
             .unwrap();
-        assert_eq!(receipt.transaction_sequence, last_sequence + 1);
-        last_sequence = receipt.transaction_sequence;
+        assert_eq!(receipt.transaction_sequence(), last_sequence + 1);
+        last_sequence = receipt.transaction_sequence();
     }
     assert_event_invariants(&store, 2_000);
     assert_clean(&store);

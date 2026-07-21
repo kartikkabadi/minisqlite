@@ -7,6 +7,8 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{Error, StorageError, ValidationError};
+use crate::jobs::JobState;
+use crate::store::jobs::{ACTIVE_STATES_SQL, TERMINAL_STATES_SQL};
 use crate::store::migrations;
 
 /// A single finding from [`ControlPlaneStore::verify`](crate::ControlPlaneStore::verify):
@@ -59,16 +61,17 @@ pub(crate) fn backup(conn: &Connection, dest_path: &Path, overwrite: bool) -> Re
             dest_path.display()
         ))));
     }
-    let mut dest = Connection::open(dest_path).map_err(StorageError::from)?;
+    let mut dest = Connection::open(dest_path).map_err(StorageError::from_sqlite)?;
     {
-        let backup = rusqlite::backup::Backup::new(conn, &mut dest).map_err(StorageError::from)?;
+        let backup =
+            rusqlite::backup::Backup::new(conn, &mut dest).map_err(StorageError::from_sqlite)?;
         backup
             .run_to_completion(256, std::time::Duration::from_millis(10), None)
-            .map_err(StorageError::from)?;
+            .map_err(StorageError::from_sqlite)?;
     }
     let integrity: String = dest
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     if integrity != "ok" {
         return Err(Error::Storage(StorageError::Io(format!(
             "backup at {} failed integrity check: {integrity}",
@@ -82,10 +85,14 @@ pub(crate) fn backup(conn: &Connection, dest_path: &Path, overwrite: bool) -> Re
 pub(crate) fn verify(conn: &Connection) -> Result<VerifyReport, Error> {
     let mut findings = Vec::new();
 
-    let mut stmt = conn.prepare("PRAGMA integrity_check")?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn
+        .prepare("PRAGMA integrity_check")
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let detail = row.map_err(StorageError::from)?;
+        let detail = row.map_err(StorageError::from_sqlite)?;
         if detail != "ok" {
             findings.push(VerifyFinding {
                 check: "integrity_check".into(),
@@ -94,16 +101,20 @@ pub(crate) fn verify(conn: &Connection) -> Result<VerifyReport, Error> {
         }
     }
 
-    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<i64>>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })?;
+    let mut stmt = conn
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (table, rowid, parent) = row.map_err(StorageError::from)?;
+        let (table, rowid, parent) = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "foreign_key_check".into(),
             detail: format!(
@@ -135,20 +146,24 @@ pub(crate) fn verify(conn: &Connection) -> Result<VerifyReport, Error> {
 
 fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Result<(), Error> {
     // streams.current_version must equal the highest event version of the stream.
-    let mut stmt = conn.prepare(
-        "SELECT s.stream_id, s.current_version, COALESCE(MAX(e.stream_version), 0)
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.stream_id, s.current_version, COALESCE(MAX(e.stream_version), 0)
          FROM streams s LEFT JOIN events e ON e.stream_id = s.stream_id
          GROUP BY s.stream_id HAVING s.current_version != COALESCE(MAX(e.stream_version), 0)",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (stream_id, current, max) = row.map_err(StorageError::from)?;
+        let (stream_id, current, max) = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "stream_versions".into(),
             detail: format!(
@@ -156,13 +171,17 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
             ),
         });
     }
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT e.stream_id FROM events e
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT e.stream_id FROM events e
          LEFT JOIN streams s ON s.stream_id = e.stream_id WHERE s.stream_id IS NULL",
-    )?;
-    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let stream_id = row.map_err(StorageError::from)?;
+        let stream_id = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "stream_versions".into(),
             detail: format!("stream {stream_id} has events but no streams row"),
@@ -170,13 +189,18 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
     }
 
     // Terminal jobs must carry no lease fields.
-    let mut stmt = conn.prepare(
-        "SELECT job_id FROM jobs WHERE state IN (4, 5, 6)
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT job_id FROM jobs WHERE state IN ({})
          AND (lease_token IS NOT NULL OR worker_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
-    )?;
-    let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
+            TERMINAL_STATES_SQL.as_str(),
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let job_id = row.map_err(StorageError::from)?;
+        let job_id = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "terminal_jobs".into(),
             detail: format!("terminal job {} still has lease fields", hex(&job_id)),
@@ -184,33 +208,96 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
     }
 
     // Every active partition must contain nonterminal work.
-    let mut stmt = conn.prepare(
-        "SELECT ap.queue, ap.partition_key FROM active_partitions ap
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT ap.queue, ap.partition_key FROM active_partitions ap
          WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.queue = ap.queue
-             AND j.partition_key = ap.partition_key AND j.state IN (0, 1, 2, 3))",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+             AND j.partition_key = ap.partition_key AND j.state IN ({}))",
+            ACTIVE_STATES_SQL.as_str(),
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (queue, partition) = row.map_err(StorageError::from)?;
+        let (queue, partition) = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "active_partitions".into(),
             detail: format!("partition {queue}/{partition} is active but has no nonterminal jobs"),
         });
     }
 
+    // Applied migrations must match this build's migration SQL.
+    for status in migrations::status(conn)? {
+        if !status.checksum_ok {
+            findings.push(VerifyFinding {
+                check: "migration_checksums".into(),
+                detail: format!("migration {} checksum mismatch", status.version),
+            });
+        }
+    }
+
+    // Leased jobs must carry complete lease fields.
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT job_id FROM jobs WHERE state = {}
+         AND (lease_token IS NULL OR worker_id IS NULL OR lease_expires_at_ms IS NULL)",
+            JobState::Leased.encode(),
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(StorageError::from_sqlite)?;
+    for row in rows {
+        let job_id = row.map_err(StorageError::from_sqlite)?;
+        findings.push(VerifyFinding {
+            check: "leased_jobs".into(),
+            detail: format!("leased job {} is missing lease fields", hex(&job_id)),
+        });
+    }
+
+    // Claim receipts must reference existing jobs (no FK enforces this).
+    let mut stmt = conn
+        .prepare(
+            "SELECT cr.transaction_id, cr.job_id FROM claim_receipts cr
+         LEFT JOIN jobs j ON j.job_id = cr.job_id
+         WHERE j.job_id IS NULL",
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(StorageError::from_sqlite)?;
+    for row in rows {
+        let (transaction_id, job_id) = row.map_err(StorageError::from_sqlite)?;
+        findings.push(VerifyFinding {
+            check: "claim_receipts".into(),
+            detail: format!(
+                "claim receipt in transaction {} references missing job {}",
+                hex(&transaction_id),
+                hex(&job_id)
+            ),
+        });
+    }
+
     // Claim receipts must reference existing transactions.
-    let mut stmt = conn.prepare(
-        "SELECT cr.transaction_id, cr.job_id FROM claim_receipts cr
+    let mut stmt = conn
+        .prepare(
+            "SELECT cr.transaction_id, cr.job_id FROM claim_receipts cr
          LEFT JOIN transactions t ON t.transaction_id = cr.transaction_id
          WHERE t.transaction_id IS NULL",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-    })?;
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (transaction_id, job_id) = row.map_err(StorageError::from)?;
+        let (transaction_id, job_id) = row.map_err(StorageError::from_sqlite)?;
         findings.push(VerifyFinding {
             check: "claim_receipts".into(),
             detail: format!(
@@ -226,10 +313,14 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
 /// Collect store-wide statistics.
 pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Error> {
     let mut jobs_by_state = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT state, COUNT(*) FROM jobs GROUP BY state")?;
-    let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+    let mut stmt = conn
+        .prepare("SELECT state, COUNT(*) FROM jobs GROUP BY state")
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (state, count) = row.map_err(StorageError::from)?;
+        let (state, count) = row.map_err(StorageError::from_sqlite)?;
         jobs_by_state.insert(state_name(state), count as u64);
     }
 
@@ -250,26 +341,32 @@ pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Err
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(StorageError::from)? as u32,
+            .map_err(StorageError::from_sqlite)? as u32,
         oldest_active_lease_ms: conn
             .query_row(
-                "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = 1",
+                &format!(
+                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    JobState::Leased.encode()
+                ),
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(StorageError::from)?
+            .map_err(StorageError::from_sqlite)?
             .flatten(),
         // For uncertain jobs the interesting age is when their lease expired into
         // uncertainty, which is the lease expiry they carried at that moment.
         oldest_uncertain_job_ms: conn
             .query_row(
-                "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = 3",
+                &format!(
+                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    JobState::Uncertain.encode()
+                ),
                 [],
                 |row| row.get(0),
             )
             .optional()
-            .map_err(StorageError::from)?
+            .map_err(StorageError::from_sqlite)?
             .flatten(),
     })
 }
@@ -279,20 +376,14 @@ fn count(conn: &Connection, table: &str) -> Result<u64, Error> {
         .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
             row.get(0)
         })
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     Ok(n as u64)
 }
 
 fn state_name(code: i64) -> String {
-    match code {
-        0 => "pending".into(),
-        1 => "leased".into(),
-        2 => "retry_wait".into(),
-        3 => "uncertain".into(),
-        4 => "succeeded".into(),
-        5 => "dead".into(),
-        6 => "cancelled".into(),
-        other => format!("unknown({other})"),
+    match JobState::decode(code) {
+        Some(state) => state.name().into(),
+        None => format!("unknown({code})"),
     }
 }
 
@@ -349,22 +440,27 @@ pub(crate) fn diagnostic_export(
 fn export_transactions(conn: &Connection, out: &mut String) -> Result<(), Error> {
     let mut last: i64 = 0;
     loop {
-        let mut stmt = conn.prepare(
-            "SELECT transaction_sequence, transaction_id, committed_at_ms, operation_count
+        let mut stmt = conn
+            .prepare(
+                "SELECT transaction_sequence, transaction_id, committed_at_ms, operation_count
              FROM transactions WHERE transaction_sequence > ?1
              ORDER BY transaction_sequence LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
-        })?;
+            )
+            .map_err(StorageError::from_sqlite)?;
+        let rows = stmt
+            .query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(StorageError::from_sqlite)?;
         let mut n = 0;
         for row in rows {
-            let (seq, id, committed_at_ms, operation_count) = row.map_err(StorageError::from)?;
+            let (seq, id, committed_at_ms, operation_count) =
+                row.map_err(StorageError::from_sqlite)?;
             let _ = writeln!(
                 out,
                 "{{\"kind\":\"transaction\",\"transaction_sequence\":{seq},\
@@ -384,28 +480,32 @@ fn export_transactions(conn: &Connection, out: &mut String) -> Result<(), Error>
 fn export_events(conn: &Connection, out: &mut String, include_payloads: bool) -> Result<(), Error> {
     let mut last: i64 = 0;
     loop {
-        let mut stmt = conn.prepare(
-            "SELECT global_sequence, event_id, transaction_id, stream_id, stream_version,
+        let mut stmt = conn
+            .prepare(
+                "SELECT global_sequence, event_id, transaction_id, stream_id, stream_version,
                     event_type, schema_version, occurred_at_ms, payload
              FROM events WHERE global_sequence > ?1 ORDER BY global_sequence LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, Vec<u8>>(8)?,
-            ))
-        })?;
+            )
+            .map_err(StorageError::from_sqlite)?;
+        let rows = stmt
+            .query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Vec<u8>>(8)?,
+                ))
+            })
+            .map_err(StorageError::from_sqlite)?;
         let mut n = 0;
         for row in rows {
             let (seq, event_id, txn_id, stream_id, version, event_type, schema, occurred, payload) =
-                row.map_err(StorageError::from)?;
+                row.map_err(StorageError::from_sqlite)?;
             let _ = writeln!(
                 out,
                 "{{\"kind\":\"event\",\"global_sequence\":{seq},\"event_id\":\"{}\",\
@@ -429,16 +529,20 @@ fn export_events(conn: &Connection, out: &mut String, include_payloads: bool) ->
 fn export_streams(conn: &Connection, out: &mut String) -> Result<(), Error> {
     let mut last = String::new();
     loop {
-        let mut stmt = conn.prepare(
-            "SELECT stream_id, current_version FROM streams WHERE stream_id > ?1
+        let mut stmt = conn
+            .prepare(
+                "SELECT stream_id, current_version FROM streams WHERE stream_id > ?1
              ORDER BY stream_id LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
+            )
+            .map_err(StorageError::from_sqlite)?;
+        let rows = stmt
+            .query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(StorageError::from_sqlite)?;
         let mut n = 0;
         for row in rows {
-            let (stream_id, version) = row.map_err(StorageError::from)?;
+            let (stream_id, version) = row.map_err(StorageError::from_sqlite)?;
             let _ = writeln!(
                 out,
                 "{{\"kind\":\"stream\",\"stream_id\":\"{}\",\"current_version\":{version}}}",
@@ -458,13 +562,16 @@ fn export_projections(
     out: &mut String,
     include_payloads: bool,
 ) -> Result<(), Error> {
-    let mut stmt =
-        conn.prepare("SELECT projection, version FROM projection_meta ORDER BY projection")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    })?;
+    let mut stmt = conn
+        .prepare("SELECT projection, version FROM projection_meta ORDER BY projection")
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (projection, version) = row.map_err(StorageError::from)?;
+        let (projection, version) = row.map_err(StorageError::from_sqlite)?;
         let _ = writeln!(
             out,
             "{{\"kind\":\"projection\",\"projection\":\"{}\",\"version\":{version}}}",
@@ -474,21 +581,25 @@ fn export_projections(
 
     let mut last: i64 = 0;
     loop {
-        let mut stmt = conn.prepare(
-            "SELECT rowid, projection, key, value FROM projection_entries WHERE rowid > ?1
+        let mut stmt = conn
+            .prepare(
+                "SELECT rowid, projection, key, value FROM projection_entries WHERE rowid > ?1
              ORDER BY rowid LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
-            ))
-        })?;
+            )
+            .map_err(StorageError::from_sqlite)?;
+        let rows = stmt
+            .query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .map_err(StorageError::from_sqlite)?;
         let mut n = 0;
         for row in rows {
-            let (rowid, projection, key, value) = row.map_err(StorageError::from)?;
+            let (rowid, projection, key, value) = row.map_err(StorageError::from_sqlite)?;
             let value_fields = if include_payloads {
                 format!(
                     "\"value_len\":{},\"value_hex\":\"{}\"",
@@ -517,31 +628,35 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
     let mut last: i64 = 0;
     loop {
         // lease_token is deliberately never selected: exports must not leak leases.
-        let mut stmt = conn.prepare(
-            "SELECT enqueue_sequence, job_id, queue, partition_key, state, attempt,
+        let mut stmt = conn
+            .prepare(
+                "SELECT enqueue_sequence, job_id, queue, partition_key, state, attempt,
                     max_attempts, effect_mode, not_before_ms, worker_id, lease_expires_at_ms,
                     retry_after_ms, terminal_at_ms, error_summary, payload
              FROM jobs WHERE enqueue_sequence > ?1 ORDER BY enqueue_sequence LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, Option<i64>>(10)?,
-                row.get::<_, Option<i64>>(11)?,
-                row.get::<_, Option<i64>>(12)?,
-                row.get::<_, Option<String>>(13)?,
-                row.get::<_, Vec<u8>>(14)?,
-            ))
-        })?;
+            )
+            .map_err(StorageError::from_sqlite)?;
+        let rows = stmt
+            .query_map(rusqlite::params![last, EXPORT_PAGE_SIZE as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Vec<u8>>(14)?,
+                ))
+            })
+            .map_err(StorageError::from_sqlite)?;
         let mut n = 0;
         for row in rows {
             let (
@@ -560,7 +675,7 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
                 terminal_at_ms,
                 error_summary,
                 payload,
-            ) = row.map_err(StorageError::from)?;
+            ) = row.map_err(StorageError::from_sqlite)?;
             let _ = writeln!(
                 out,
                 "{{\"kind\":\"job\",\"enqueue_sequence\":{seq},\"job_id\":\"{}\",\
@@ -590,19 +705,24 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
 }
 
 fn export_partitions(conn: &Connection, out: &mut String) -> Result<(), Error> {
-    let mut stmt = conn.prepare(
-        "SELECT queue, partition_key, first_active_sequence FROM active_partitions
+    let mut stmt = conn
+        .prepare(
+            "SELECT queue, partition_key, first_active_sequence FROM active_partitions
          ORDER BY queue, partition_key",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, i64>(2)?,
-        ))
-    })?;
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
-        let (queue, partition_key, first_active_sequence) = row.map_err(StorageError::from)?;
+        let (queue, partition_key, first_active_sequence) =
+            row.map_err(StorageError::from_sqlite)?;
         let _ = writeln!(
             out,
             "{{\"kind\":\"active_partition\",\"queue\":\"{}\",\"partition_key\":\"{}\",\
@@ -616,22 +736,26 @@ fn export_partitions(conn: &Connection, out: &mut String) -> Result<(), Error> {
 
 fn export_claim_receipts(conn: &Connection, out: &mut String) -> Result<(), Error> {
     // lease_token is deliberately never selected: exports must not leak leases.
-    let mut stmt = conn.prepare(
-        "SELECT transaction_id, job_id, attempt, worker_id, lease_expires_at_ms
+    let mut stmt = conn
+        .prepare(
+            "SELECT transaction_id, job_id, attempt, worker_id, lease_expires_at_ms
          FROM claim_receipts ORDER BY rowid",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, Vec<u8>>(0)?,
-            row.get::<_, Vec<u8>>(1)?,
-            row.get::<_, i64>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, i64>(4)?,
-        ))
-    })?;
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
     for row in rows {
         let (transaction_id, job_id, attempt, worker_id, lease_expires_at_ms) =
-            row.map_err(StorageError::from)?;
+            row.map_err(StorageError::from_sqlite)?;
         let _ = writeln!(
             out,
             "{{\"kind\":\"claim_receipt\",\"transaction_id\":\"{}\",\"job_id\":\"{}\",\

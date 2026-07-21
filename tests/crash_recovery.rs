@@ -35,7 +35,16 @@ fn log_line(log: &mut File, line: &str) {
     log.sync_data().unwrap();
 }
 
-fn spawn_killed_child(test_name: &str, db: &Path, log: &Path, run_ms: u64) {
+/// Spawn the env-gated child and kill it only after its log shows at least
+/// `min_progress` completed operations (lines starting with `progress_prefix`),
+/// so slow machines cannot fail the minimum-progress assertions.
+fn spawn_killed_child(
+    test_name: &str,
+    db: &Path,
+    log: &Path,
+    progress_prefix: &str,
+    min_progress: usize,
+) {
     let exe = std::env::current_exe().unwrap();
     let mut child = std::process::Command::new(exe)
         .args([test_name, "--exact", "--test-threads=1"])
@@ -43,7 +52,16 @@ fn spawn_killed_child(test_name: &str, db: &Path, log: &Path, run_ms: u64) {
         .env("MINISQLITE_CRASH_LOG", log)
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(run_ms));
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let progress = std::fs::read_to_string(log)
+            .map(|s| s.lines().filter(|l| l.starts_with(progress_prefix)).count())
+            .unwrap_or(0);
+        if progress >= min_progress || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     child.kill().unwrap();
     child.wait().unwrap();
 }
@@ -78,7 +96,7 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
     let log_path = dir.path().join("commit.log");
     drop(common::open(&db)); // run migrations before the child races on first open
 
-    spawn_killed_child("child_crash_commit_worker", &db, &log_path, 400);
+    spawn_killed_child("child_crash_commit_worker", &db, &log_path, "done ", 11);
 
     let store = common::open(&db);
     assert_clean(&store);
@@ -107,7 +125,7 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
         {
             TransactionRecovery::Committed(receipt) => {
                 assert!(!absent_seen, "commit {i} durable after an earlier gap");
-                assert_eq!(receipt.transaction_id, Id::from(CRASH_TXN_BASE + i));
+                assert_eq!(receipt.transaction_id(), Id::from(CRASH_TXN_BASE + i));
                 committed += 1;
             }
             TransactionRecovery::Absent => {
@@ -116,9 +134,6 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
                     "commit {i} completed in the child but is not durable"
                 );
                 absent_seen = true;
-            }
-            TransactionRecovery::StillIndeterminate => {
-                panic!("commit {i} still indeterminate after clean reopen")
             }
         }
     }
@@ -146,6 +161,152 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
         )
         .unwrap();
     assert_clean(&store);
+}
+
+// ----- deterministic crash immediately after COMMIT (contract B2.1-B2.4) -----
+
+fn run_child_to_abort(test_name: &str, db: &Path, log: &Path) {
+    let exe = std::env::current_exe().unwrap();
+    let status = std::process::Command::new(exe)
+        .args([test_name, "--exact", "--test-threads=1"])
+        .env("MINISQLITE_CRASH_DB", db)
+        .env("MINISQLITE_CRASH_LOG", log)
+        .status()
+        .unwrap();
+    assert!(!status.success(), "child was expected to abort");
+}
+
+/// Env-gated child body: commits one transaction with a known ID, logs the
+/// receipt, then aborts before the commit result can reach any caller.
+#[test]
+fn child_abort_after_commit() {
+    let Ok(db) = std::env::var("MINISQLITE_CRASH_DB") else {
+        return;
+    };
+    let log_path = std::env::var("MINISQLITE_CRASH_LOG").unwrap();
+    let store = ControlPlaneStore::open(&db).unwrap();
+    let mut log = File::create(&log_path).unwrap();
+    let batch = CommitBatch::new(Id::from(CRASH_TXN_BASE + 1), 2_000).append_event(
+        Event::with_json_payload(txid(), "s1", "crash", 1_000, b"{}"),
+    );
+    let receipt = store.commit(&batch).unwrap();
+    log_line(&mut log, &format!("committed {}", receipt.transaction_id()));
+    std::process::abort();
+}
+
+#[test]
+fn crash_after_commit_recovers_as_committed_and_absent_when_never_committed() {
+    let dir = common::temp_dir();
+    let db = common::db_path(&dir);
+    let log_path = dir.path().join("abort-commit.log");
+    drop(common::open(&db));
+
+    run_child_to_abort("child_abort_after_commit", &db, &log_path);
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("committed"), "child never committed: {log}");
+
+    let store = common::open(&db);
+    assert_clean(&store);
+    // B2.1: a commit that became durable before the crash recovers as Committed.
+    match store
+        .recover_transaction(Id::from(CRASH_TXN_BASE + 1))
+        .unwrap()
+    {
+        TransactionRecovery::Committed(receipt) => {
+            assert_eq!(receipt.transaction_id(), Id::from(CRASH_TXN_BASE + 1));
+        }
+        other => panic!("durable commit recovered as {other:?}"),
+    }
+    // B2.2: a transaction that never committed recovers as Absent.
+    assert_eq!(
+        store
+            .recover_transaction(Id::from(CRASH_TXN_BASE + 2))
+            .unwrap(),
+        TransactionRecovery::Absent
+    );
+}
+
+/// Env-gated child body: claims one job, logs the transaction and lease token,
+/// then aborts before the claim result can reach any caller.
+#[test]
+fn child_abort_after_claim() {
+    let Ok(db) = std::env::var("MINISQLITE_CRASH_DB") else {
+        return;
+    };
+    let log_path = std::env::var("MINISQLITE_CRASH_LOG").unwrap();
+    let store = ControlPlaneStore::open(&db).unwrap();
+    let mut log = File::create(&log_path).unwrap();
+    let outcome = store
+        .claim_jobs(&ClaimRequest {
+            queue: "q".into(),
+            worker_id: "abort-worker".into(),
+            now_ms: 2_000,
+            lease_ms: 600_000,
+            limit: 1,
+        })
+        .unwrap();
+    let ClaimOutcome::Committed(claims) = outcome else {
+        panic!("expected a committed claim, got {outcome:?}");
+    };
+    let job = &claims.jobs()[0];
+    log_line(
+        &mut log,
+        &format!(
+            "claim {} {} {}",
+            claims.transaction_id().to_hex(),
+            job.job_id.to_hex(),
+            job.lease_token.to_hex()
+        ),
+    );
+    std::process::abort();
+}
+
+#[test]
+fn crash_after_claim_recovers_original_lease_tokens() {
+    let dir = common::temp_dir();
+    let db = common::db_path(&dir);
+    let log_path = dir.path().join("abort-claim.log");
+    let store = common::open(&db);
+    store
+        .commit(
+            &CommitBatch::new(txid(), 1_000).enqueue_job(JobSpec::reconcilable(
+                Id::from(1u128),
+                "q",
+                "p",
+                vec![],
+            )),
+        )
+        .unwrap();
+    drop(store);
+
+    run_child_to_abort("child_abort_after_claim", &db, &log_path);
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    let line = log
+        .lines()
+        .find_map(|l| l.strip_prefix("claim "))
+        .unwrap_or_else(|| panic!("child never claimed: {log}"));
+    let mut parts = line.split(' ');
+    let txn = Id::from_hex(parts.next().unwrap()).unwrap();
+    let job_id = Id::from_hex(parts.next().unwrap()).unwrap();
+    let lease_token = Id::from_hex(parts.next().unwrap()).unwrap();
+
+    let store = common::open(&db);
+    assert_clean(&store);
+    // B2.3: crash-after-commit claim recovers as Committed with the original
+    // lease token.
+    match store.recover_claim(txn, 2_000).unwrap() {
+        ClaimRecovery::Committed(claims) => {
+            assert_eq!(claims.jobs().len(), 1);
+            assert_eq!(claims.jobs()[0].job_id, job_id);
+            assert_eq!(claims.jobs()[0].lease_token, lease_token);
+        }
+        other => panic!("durable claim recovered as {other:?}"),
+    }
+    // B2.4: a claim that never committed recovers as Absent.
+    assert_eq!(
+        store.recover_claim(Id::from(0xABADu128), 2_000).unwrap(),
+        ClaimRecovery::Absent
+    );
 }
 
 // ----- crash during claim -----
@@ -217,7 +378,7 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
     }
     drop(store);
 
-    spawn_killed_child("child_crash_claim_worker", &db, &log_path, 400);
+    spawn_killed_child("child_crash_claim_worker", &db, &log_path, "claim ", 6);
 
     let store = common::open(&db);
     assert_clean(&store);
@@ -233,9 +394,16 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
             let job_ids: Vec<Id> = parts.map(|p| Id::from_hex(p).unwrap()).collect();
             // Every logged claim must be recoverable with its exact job set and
             // usable lease tokens.
-            match store.recover_claim(txn).unwrap() {
+            match store.recover_claim(txn, 2_000).unwrap() {
                 ClaimRecovery::Committed(claims) => {
-                    let recovered: HashSet<Id> = claims.jobs().iter().map(|j| j.job_id).collect();
+                    // Every leased job is accounted for: still executable, or
+                    // reported stale (e.g. already acknowledged).
+                    let recovered: HashSet<Id> = claims
+                        .jobs()
+                        .iter()
+                        .map(|j| j.job_id)
+                        .chain(claims.stale_jobs().iter().copied())
+                        .collect();
                     assert_eq!(recovered, job_ids.iter().copied().collect::<HashSet<_>>());
                     for job in claims.jobs() {
                         assert_ne!(job.lease_token, Id::ZERO);
@@ -285,7 +453,9 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
 
     // Unknown transactions recover as Absent, never as a granted claim.
     assert_eq!(
-        store.recover_claim(Id::from(0xDEAD_BEEFu128)).unwrap(),
+        store
+            .recover_claim(Id::from(0xDEAD_BEEFu128), 2_000)
+            .unwrap(),
         ClaimRecovery::Absent
     );
     assert_eq!(

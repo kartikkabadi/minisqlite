@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::StorageError;
 
@@ -57,12 +57,14 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL, checksum BLOB NOT NULL)",
         [],
-    )?;
-    let current: u32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    )?;
+    ).map_err(StorageError::from_sqlite)?;
+    let current: u32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
     let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
     if current > supported {
         return Err(StorageError::SchemaTooNew {
@@ -77,7 +79,8 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
                 [migration.version],
                 |row| row.get(0),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::from_sqlite)?;
         let expected = checksum(migration.sql);
         match applied {
             Some(stored) => {
@@ -88,15 +91,53 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
                 }
             }
             None => {
-                let tx = conn.transaction()?;
-                tx.execute_batch(migration.sql)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(StorageError::from_sqlite)?;
+                tx.execute_batch(migration.sql)
+                    .map_err(StorageError::from_sqlite)?;
                 tx.execute(
                     "INSERT INTO schema_migrations (version, applied_at_ms, checksum) VALUES (?1, ?2, ?3)",
                     rusqlite::params![migration.version, now_ms(), expected.as_slice()],
-                )?;
-                tx.commit()?;
+                ).map_err(StorageError::from_sqlite)?;
+                tx.commit().map_err(StorageError::from_sqlite)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Verify the schema is exactly at this build's supported version without applying
+/// anything. An older schema is an error: inspection tooling must never migrate.
+pub(crate) fn require_current(conn: &Connection) -> Result<(), StorageError> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let current: u32 = if has_table == 0 {
+        0
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?
+    };
+    let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
+    if current > supported {
+        return Err(StorageError::SchemaTooNew {
+            version: current,
+            supported,
+        });
+    }
+    if current < supported {
+        return Err(StorageError::Sqlite(format!(
+            "schema version {current} is older than supported {supported}; open the store with a writer to migrate"
+        )));
     }
     Ok(())
 }
@@ -111,7 +152,8 @@ pub(crate) fn status(conn: &Connection) -> Result<Vec<MigrationStatus>, StorageE
                 [migration.version],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::from_sqlite)?;
         if let Some((applied_at_ms, stored)) = row {
             out.push(MigrationStatus {
                 version: migration.version,
