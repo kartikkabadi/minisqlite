@@ -6,6 +6,10 @@
 
 A minimal, from-scratch SQLite-like relational database engine written in Rust.
 
+> **Direction:** the project is pivoting to a SQLite-backed control-plane
+> state kernel. See [ADR-001](docs/ADR-001.md) for the storage substrate
+> decision, plus the [roadmap](docs/ROADMAP.md) and [scope](docs/SCOPE.md).
+
 `minisqlite` is intentionally tiny: **zero external dependencies**, **pure safe Rust**, and a page-based storage engine with a custom file format. It is built for situations where linking to C SQLite is overkill or impossible:
 
 - **WASM / browser targets** – no `libsqlite3-sys` to emscripten.
