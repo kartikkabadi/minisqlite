@@ -391,7 +391,8 @@ fn state_name(code: i64) -> String {
 ///
 /// The export is explicitly non-restorable: it exists for debugging, not backup.
 /// Event and job payloads (and projection entry values) are redacted to their byte
-/// length unless `include_payloads` is set. Lease tokens are never included.
+/// length unless `include_payloads` is set, and job error summaries are likewise
+/// redacted to their length by default. Lease tokens are never included.
 /// Rows are read in pages of [`EXPORT_PAGE_SIZE`] to bound memory usage.
 pub(crate) fn diagnostic_export(
     conn: &Connection,
@@ -683,7 +684,7 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
                  \"attempt\":{attempt},\"max_attempts\":{max_attempts},\
                  \"effect_mode\":{effect_mode},\"not_before_ms\":{not_before_ms},\
                  \"worker_id\":{},\"lease_expires_at_ms\":{},\"retry_after_ms\":{},\
-                 \"terminal_at_ms\":{},\"error_summary\":{},{}}}",
+                 \"terminal_at_ms\":{},{},{}}}",
                 hex(&job_id),
                 json_escape(&queue),
                 json_escape(&partition_key),
@@ -692,7 +693,7 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
                 opt_i64(lease_expires_at_ms),
                 opt_i64(retry_after_ms),
                 opt_i64(terminal_at_ms),
-                opt_string(error_summary.as_deref()),
+                error_summary_fields(error_summary.as_deref(), include_payloads),
                 payload_fields(&payload, include_payloads),
             );
             last = seq;
@@ -767,6 +768,19 @@ fn export_claim_receipts(conn: &Connection, out: &mut String) -> Result<(), Erro
         );
     }
     Ok(())
+}
+
+fn error_summary_fields(error_summary: Option<&str>, include_payloads: bool) -> String {
+    if include_payloads {
+        format!("\"error_summary\":{}", opt_string(error_summary))
+    } else {
+        // Error summaries can carry sensitive details; export only their length
+        // unless payloads were explicitly requested.
+        format!(
+            "\"error_summary_len\":{}",
+            opt_i64(error_summary.map(|s| s.len() as i64))
+        )
+    }
 }
 
 fn payload_fields(payload: &[u8], include_payloads: bool) -> String {

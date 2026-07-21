@@ -133,6 +133,46 @@ fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
 }
 
 #[test]
+fn diagnostic_export_redacts_error_summary_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ControlPlaneStore::open(dir.path().join("db")).unwrap();
+    store
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    let outcome = store
+        .claim_jobs(&minisqlite::ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: 2_000,
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    let claims = match outcome {
+        minisqlite::ClaimOutcome::Committed(claims) => claims.into_jobs(),
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    store
+        .commit(&CommitBatch::new(Id::from(2u128), 3_000).fail_job(
+            claims[0].job_id,
+            claims[0].lease_token,
+            "secret token leaked: hunter2",
+            None,
+        ))
+        .unwrap();
+
+    let export = store.diagnostic_export().unwrap();
+    assert!(!export.contains("hunter2"));
+    assert!(!export.contains("\"error_summary\""));
+    assert!(export.contains("\"error_summary_len\":28"));
+
+    let full = store.diagnostic_export_with(true).unwrap();
+    assert!(full.contains("hunter2"));
+}
+
+#[test]
 fn stats_counts_are_correct() {
     let dir = tempfile::tempdir().unwrap();
     let store = seeded_store(&dir.path().join("db"));
