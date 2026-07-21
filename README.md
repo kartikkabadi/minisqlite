@@ -4,81 +4,101 @@
 [![Docs.rs](https://img.shields.io/docsrs/minisqlite?logo=rust&label=docs.rs)](https://docs.rs/minisqlite)
 [![CI](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml)
 
-A minimal, from-scratch SQLite-like relational database engine written in Rust.
+A typed embedded control-plane state kernel that atomically coordinates domain events, materialized state, durable work, and uncertain external effects.
 
-`minisqlite` is intentionally tiny: **zero external dependencies**, **pure safe Rust**, and a page-based storage engine with a custom file format. It is built for situations where linking to C SQLite is overkill or impossible:
+One SQLite-backed transaction coordinates four concerns that control planes otherwise stitch together by hand:
 
-- **WASM / browser targets** – no `libsqlite3-sys` to emscripten.
-- **Embedded / IoT** – easy to audit, easy to cross-compile.
-- **Education and prototyping** – the whole engine fits in a few thousand lines and a single crate.
-- **Serverless edge functions** – self-contained file storage with no native shared library.
+- **Domain events** appended to versioned streams with optimistic concurrency.
+- **Materialized projections** patched with strict version increments.
+- **Durable jobs** with partition-ordered claiming, leases, retries, and cancellation.
+- **Honest uncertainty**: outcomes that may or may not have persisted are reported as indeterminate and recovered explicitly, never guessed.
+
+It is built for local-first, single-node control planes — agent harnesses, desktop AI clients, workflow orchestrators — where domain history, current state, and asynchronous side effects must commit together.
 
 ## Install
 
-```bash
-cargo install minisqlite
-```
-
-Or add it as a library dependency:
-
 ```toml
 [dependencies]
-minisqlite = "0.2.1"
+minisqlite = "0.3.0-alpha.1"
 ```
 
-## Features
+## Usage
 
-- 4096-byte page-based storage with a custom file format (`MiniSQL2`)
-- In-memory B+tree-like tables serialized to linked pages
-- Custom recursive-descent SQL tokenizer and parser
-- DDL: `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, `DROP TABLE`, `DROP INDEX`
-- DML: `INSERT`, `UPDATE`, `DELETE` with `OR REPLACE`
-- Queries: `SELECT` with joins, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT`/`OFFSET`, `DISTINCT`, aggregates, `CASE`, `CAST`, `BETWEEN`, `LIKE`, `IN`
-- Transactions: `BEGIN`, `COMMIT`, `ROLLBACK`
-- Dot commands: `.tables`, `.schema`, `.indexes`, `.dump`, `.stats`, `.help`, `.quit`
-- `PRAGMA table_info(name)` and `VACUUM`
-- No external dependencies (Rust standard library only)
-
-## CLI
-
-```bash
-minisqlite mydb.db
-```
-
-Or from source:
-
-```bash
-cargo run -- mydb.db
-```
-
-## Library
+Open a store, commit an event, a projection patch, and a job in one atomic batch, then claim the job:
 
 ```rust
-use minisqlite::{Database, ExecuteResult};
+use minisqlite::{
+    ClaimOutcome, ClaimRequest, CommitBatch, ControlPlaneStore, Event, Id, JobSpec,
+    ProjectionPatch,
+};
 
-let mut db = Database::open("mydb.db").unwrap();
-db.execute_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)")
-    .unwrap();
-db.execute_sql("INSERT INTO users (name) VALUES ('Alice')")
-    .unwrap();
+let store = ControlPlaneStore::open("control-plane.db")?;
 
-if let ExecuteResult::Rows { header, rows } =
-    db.execute_sql("SELECT * FROM users").unwrap()
-{
-    println!("{:?}", header);
-    for row in rows {
-        println!("{:?}", row);
+let batch = CommitBatch::new(Id::from(1u128), 1_000)
+    .append_event(Event::with_json_payload(
+        Id::from(2u128),
+        "thread-42",
+        "thread.turn-requested",
+        1_000,
+        br#"{"prompt":"hello"}"#,
+    ))
+    .apply_projection_patch(
+        ProjectionPatch::new("threads", 0).put(b"thread-42".to_vec(), b"queued".to_vec()),
+    )
+    .enqueue_job(JobSpec::reconcilable(
+        Id::from(3u128),
+        "provider-turns",
+        "thread-42",
+        b"call provider".to_vec(),
+    ));
+let receipt = store.commit(&batch)?;
+
+match store.claim_jobs(&ClaimRequest {
+    queue: "provider-turns".into(),
+    worker_id: "worker-1".into(),
+    now_ms: 2_000,
+    lease_ms: 30_000,
+    limit: 1,
+})? {
+    ClaimOutcome::Committed(claims) => {
+        for job in claims.jobs() {
+            // perform the external effect, then acknowledge with job.lease_token
+        }
     }
+    ClaimOutcome::MaintenanceCommitted(_) => { /* expired-lease maintenance only; poll again */ }
+    ClaimOutcome::Noop => { /* queue empty */ }
 }
 ```
 
-See [`examples/embed.rs`](examples/embed.rs) for a runnable example.
+Indeterminate commits and claims are surfaced as typed errors (`CommitError::Indeterminate`, `ClaimError::Indeterminate`) that carry only a transaction ID — never executable work. Recover them explicitly with `recover_transaction` and `recover_claim`.
+
+## CLI
+
+An operational CLI ships with the crate:
+
+```bash
+minisqlite doctor --db control-plane.db
+minisqlite verify --db control-plane.db
+minisqlite stats --db control-plane.db
+minisqlite events tail --db control-plane.db --limit 10
+minisqlite jobs list --db control-plane.db --queue provider-turns
+minisqlite backup backup.db --db control-plane.db
+```
+
+## Design
+
+- [docs/ADR-001.md](docs/ADR-001.md) — why SQLite is the production storage substrate
+- [docs/ROADMAP.md](docs/ROADMAP.md) — delivery phases and exit criteria
+- [docs/SCOPE.md](docs/SCOPE.md) — what is included and explicitly excluded
+
+Explicit non-goals: SQL exposed through the public API, distributed consensus, multi-process writers, replication, a workflow DSL, and a public multi-backend storage abstraction.
+
+The pre-0.3 custom SQL engine and append-only journal are preserved for reference on the [`archive/append-only-journal-v1`](https://github.com/kartikkabadi/minisqlite/tree/archive/append-only-journal-v1) branch.
 
 ## Test
 
 ```bash
-cargo test
-cargo run -- test.db < test.sql
+cargo test --all-targets --all-features
 ```
 
 ## Changelog
