@@ -748,7 +748,7 @@ pub(crate) fn extend_lease(
     job_id: Id,
     lease_token: Id,
     new_expiry_ms: i64,
-    _now_ms: i64,
+    now_ms: i64,
 ) -> Result<LeaseExtensionReceipt, LeaseError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -764,6 +764,13 @@ pub(crate) fn extend_lease(
         return Err(LeaseError::InvalidToken { job_id });
     }
     let current_ms = job.lease_expires_at_ms.unwrap_or(i64::MIN);
+    if now_ms > current_ms {
+        return Err(LeaseError::Expired {
+            job_id,
+            lease_expires_at_ms: current_ms,
+            now_ms,
+        });
+    }
     if new_expiry_ms <= current_ms {
         return Err(LeaseError::ExpiryNotLater {
             job_id,
@@ -774,6 +781,17 @@ pub(crate) fn extend_lease(
     tx.execute(
         "UPDATE jobs SET lease_expires_at_ms = ?2 WHERE job_id = ?1",
         rusqlite::params![job_id.as_bytes().as_slice(), new_expiry_ms],
+    )
+    .map_err(StorageError::from_sqlite)?;
+    // Keep the claim receipt truthful so `recover_claim` reconstructs the
+    // extended expiry, not the one granted at claim time.
+    tx.execute(
+        "UPDATE claim_receipts SET lease_expires_at_ms = ?3 WHERE job_id = ?1 AND lease_token = ?2",
+        rusqlite::params![
+            job_id.as_bytes().as_slice(),
+            lease_token.as_bytes().as_slice(),
+            new_expiry_ms,
+        ],
     )
     .map_err(StorageError::from_sqlite)?;
     tx.commit().map_err(StorageError::from_sqlite)?;

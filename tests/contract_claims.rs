@@ -433,6 +433,46 @@ fn lease_extension_rules() {
     ));
 }
 
+#[test]
+fn extending_an_expired_lease_fails() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", NOW);
+    let expiry = claimed.lease_expires_at_ms;
+
+    // Past the expiry, the lease is dead; extension must not revive it.
+    assert!(matches!(
+        store
+            .extend_lease(id(10), claimed.lease_token, expiry + 10_000, expiry + 1)
+            .unwrap_err(),
+        LeaseError::Expired { .. }
+    ));
+}
+
+#[test]
+fn recover_claim_returns_the_extended_expiry_after_extension() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claims = match store.claim_jobs(&claim_request("q", NOW)).unwrap() {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed, got {other:?}"),
+    };
+    let claimed = claims.jobs()[0].clone();
+    let extended = claimed.lease_expires_at_ms + 5_000;
+    store
+        .extend_lease(id(10), claimed.lease_token, extended, NOW)
+        .unwrap();
+
+    match store.recover_claim(claims.transaction_id()).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs()[0].lease_expires_at_ms, extended);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+}
+
 // ----- claim recovery -----
 
 #[test]

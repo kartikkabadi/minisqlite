@@ -303,6 +303,12 @@ pub enum LeaseError {
         current_ms: i64,
         requested_ms: i64,
     },
+    /// The lease already expired; an expired lease cannot be revived by extension.
+    Expired {
+        job_id: Id,
+        lease_expires_at_ms: i64,
+        now_ms: i64,
+    },
     /// A storage failure occurred; the extension may not have persisted.
     Storage(StorageError),
 }
@@ -324,6 +330,14 @@ impl fmt::Display for LeaseError {
             } => write!(
                 f,
                 "job {job_id} lease expiry {requested_ms} is not later than current {current_ms}"
+            ),
+            LeaseError::Expired {
+                job_id,
+                lease_expires_at_ms,
+                now_ms,
+            } => write!(
+                f,
+                "job {job_id} lease expired at {lease_expires_at_ms} (now {now_ms}); an expired lease cannot be extended"
             ),
             LeaseError::Storage(e) => write!(f, "{e}"),
         }
