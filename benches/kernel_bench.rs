@@ -1309,7 +1309,7 @@ fn operational_projections(root: &Path, profile: &Profile) {
 // ---------------------------------------------------------------------------
 
 fn live_backup(root: &Path, profile: &Profile) {
-    println!("\n== §2.3 O7 live backup (writer stall while commits continue) ==");
+    println!("\n== §2.3 O7 live backup (writer mutex serialization while commits continue) ==");
     let dir = root.join("backup");
     std::fs::create_dir_all(&dir).expect("mkdir");
     let path = dir.join("source.db");
@@ -1372,7 +1372,7 @@ fn live_backup(root: &Path, profile: &Profile) {
         &format!("O7 live backup of {} MiB DB", size >> 20),
         backup_time,
         &format!(
-            "max writer stall (worst commit latency)={}",
+            "writer mutex serialization: worst commit latency behind backup={}",
             fmt_dur(max_stall)
         ),
     );
