@@ -218,6 +218,22 @@ fn device_class(device: &str) -> String {
     format!("unknown class, device {device}")
 }
 
+/// Measure the page size the store actually uses: open a probe store in the
+/// bench root and read `PRAGMA page_size` from its database.
+fn measured_page_size(root: &Path) -> String {
+    let path = root.join("page-size-probe.db");
+    let page_size = ControlPlaneStore::open(&path).ok().and_then(|_store| {
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| conn.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0)))
+            .ok()
+    });
+    let _ = std::fs::remove_file(&path);
+    match page_size {
+        Some(n) => format!("{n} (measured via PRAGMA page_size)"),
+        None => "unavailable (page-size probe failed)".to_string(),
+    }
+}
+
 fn vmhwm_kb() -> Option<f64> {
     read_first_match("/proc/self/status", "VmHWM")
         .and_then(|kb| kb.trim_end_matches(" kB").trim().parse().ok())
@@ -253,10 +269,7 @@ fn print_environment(root: &Path, profile: &Profile) {
     env_field("SQLite version", rusqlite::version());
     env_field("Filesystem", &format!("{fstype}, {opts}"));
     env_field("Storage device", &device_class(&device));
-    env_field(
-        "Page size",
-        "4096 (SQLite default; store does not override)",
-    );
+    env_field("Page size", &measured_page_size(root));
     env_field(
         "WAL state",
         "WAL on (set at open), fresh DB per fixture; per-group sizes on 'db state' lines",
