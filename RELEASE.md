@@ -16,8 +16,8 @@
 3. Create and push a tag:
 
    ```bash
-   git tag v0.2.0
-   git push origin v0.2.0
+   git tag v0.3.0-alpha.1
+   git push origin v0.3.0-alpha.1
    ```
 
 4. The `release.yml` workflow will:
