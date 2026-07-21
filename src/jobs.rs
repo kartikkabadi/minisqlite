@@ -235,8 +235,14 @@ pub struct ClaimRequest {
 /// Receipt for a claim transaction that performed only expired-lease maintenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaintenanceReceipt {
+    pub(crate) transaction_id: Id,
+}
+
+impl MaintenanceReceipt {
     /// The transaction that recorded the maintenance transitions.
-    pub transaction_id: Id,
+    pub fn transaction_id(&self) -> Id {
+        self.transaction_id
+    }
 }
 
 /// Successful outcome of a `claim_jobs` call.
@@ -403,9 +409,26 @@ pub struct LeaseExtension {
 /// Receipt for a durably committed lease extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseExtensionReceipt {
-    pub job_id: Id,
-    pub attempt: u32,
-    pub lease_expires_at_ms: i64,
+    pub(crate) job_id: Id,
+    pub(crate) attempt: u32,
+    pub(crate) lease_expires_at_ms: i64,
+}
+
+impl LeaseExtensionReceipt {
+    /// The extended job's ID.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The job's attempt number, unchanged by extension.
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// The new durable lease expiry.
+    pub fn lease_expires_at_ms(&self) -> i64 {
+        self.lease_expires_at_ms
+    }
 }
 
 #[cfg(test)]

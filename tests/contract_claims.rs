@@ -435,9 +435,9 @@ fn lease_extension_rules() {
     let receipt = store
         .extend_lease(id(10), claimed.lease_token, expiry + 1_000, NOW)
         .unwrap();
-    assert_eq!(receipt.job_id, id(10));
-    assert_eq!(receipt.attempt, claimed.attempt);
-    assert_eq!(receipt.lease_expires_at_ms, expiry + 1_000);
+    assert_eq!(receipt.job_id(), id(10));
+    assert_eq!(receipt.attempt(), claimed.attempt);
+    assert_eq!(receipt.lease_expires_at_ms(), expiry + 1_000);
     let info = store.job(id(10)).unwrap().unwrap();
     assert_eq!(info.attempt, claimed.attempt);
     assert_eq!(info.lease_expires_at_ms, Some(expiry + 1_000));

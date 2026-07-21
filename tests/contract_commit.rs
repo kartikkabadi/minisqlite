@@ -77,7 +77,7 @@ fn expected_stream_version_success() {
         .expect_stream_version("s1", 1)
         .append_event(event(11, "s1", "next"));
     let receipt = store.commit(&batch).unwrap();
-    assert_eq!(receipt.transaction_sequence, 2);
+    assert_eq!(receipt.transaction_sequence(), 2);
     assert_eq!(store.stream_version("s1").unwrap(), 2);
 }
 

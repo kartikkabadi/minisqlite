@@ -107,7 +107,7 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
         {
             TransactionRecovery::Committed(receipt) => {
                 assert!(!absent_seen, "commit {i} durable after an earlier gap");
-                assert_eq!(receipt.transaction_id, Id::from(CRASH_TXN_BASE + i));
+                assert_eq!(receipt.transaction_id(), Id::from(CRASH_TXN_BASE + i));
                 committed += 1;
             }
             TransactionRecovery::Absent => {
