@@ -121,6 +121,8 @@ pub enum Conflict {
         from: JobState,
         to: JobState,
     },
+    /// A lease extension conflicted with the job's durable lease state.
+    Lease(LeaseConflict),
 }
 
 impl fmt::Display for Conflict {
@@ -145,6 +147,7 @@ impl fmt::Display for Conflict {
             Conflict::JobTransition { job_id, from, to } => {
                 write!(f, "invalid job transition for {job_id}: {from:?} -> {to:?}")
             }
+            Conflict::Lease(e) => write!(f, "{e}"),
         }
     }
 }
@@ -243,6 +246,8 @@ pub enum ClaimError {
     Indeterminate(crate::jobs::IndeterminateClaim),
     /// The claim request failed static validation; nothing was persisted.
     Validation(ValidationError),
+    /// A concurrency or state conflict; nothing was persisted.
+    Conflict(Conflict),
     /// A storage failure occurred before the commit step; nothing was persisted.
     Storage(StorageError),
 }
@@ -256,6 +261,7 @@ impl fmt::Display for ClaimError {
                 i.transaction_id()
             ),
             ClaimError::Validation(e) => write!(f, "{e}"),
+            ClaimError::Conflict(e) => write!(f, "{e}"),
             ClaimError::Storage(e) => write!(f, "{e}"),
         }
     }
@@ -287,10 +293,11 @@ impl From<StorageError> for RecoveryError {
     }
 }
 
-/// Errors returned by [`ControlPlaneStore::extend_lease`](crate::ControlPlaneStore::extend_lease).
+/// A lease extension conflicted with the job's durable lease state; nothing was
+/// persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum LeaseError {
+pub enum LeaseConflict {
     /// The requested job does not exist.
     JobNotFound(Id),
     /// The supplied lease token is not the job's current lease token.
@@ -309,21 +316,19 @@ pub enum LeaseError {
         lease_expires_at_ms: i64,
         now_ms: i64,
     },
-    /// A storage failure occurred; the extension may not have persisted.
-    Storage(StorageError),
 }
 
-impl fmt::Display for LeaseError {
+impl fmt::Display for LeaseConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LeaseError::JobNotFound(id) => write!(f, "job {id} not found"),
-            LeaseError::InvalidToken { job_id } => {
+            LeaseConflict::JobNotFound(id) => write!(f, "job {id} not found"),
+            LeaseConflict::InvalidToken { job_id } => {
                 write!(f, "invalid lease token for job {job_id}")
             }
-            LeaseError::NotLeased { job_id, state } => {
+            LeaseConflict::NotLeased { job_id, state } => {
                 write!(f, "job {job_id} is not leased (state {state:?})")
             }
-            LeaseError::ExpiryNotLater {
+            LeaseConflict::ExpiryNotLater {
                 job_id,
                 current_ms,
                 requested_ms,
@@ -331,13 +336,62 @@ impl fmt::Display for LeaseError {
                 f,
                 "job {job_id} lease expiry {requested_ms} is not later than current {current_ms}"
             ),
-            LeaseError::Expired {
+            LeaseConflict::Expired {
                 job_id,
                 lease_expires_at_ms,
                 now_ms,
             } => write!(
                 f,
                 "job {job_id} lease expired at {lease_expires_at_ms} (now {now_ms}); an expired lease cannot be extended"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LeaseConflict {}
+
+/// A lease extension may or may not have become durable. Recover by reading the
+/// job's current lease state via [`ControlPlaneStore::job`](crate::ControlPlaneStore::job).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndeterminateLease {
+    pub(crate) job_id: Id,
+    pub(crate) storage_error: String,
+}
+
+impl IndeterminateLease {
+    /// The job whose lease extension durability is unknown.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
+    }
+}
+
+/// Errors returned by [`ControlPlaneStore::extend_lease`](crate::ControlPlaneStore::extend_lease).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LeaseError {
+    /// The extension conflicted with the job's durable lease state; nothing was
+    /// persisted.
+    Conflict(LeaseConflict),
+    /// The extension outcome is unknown; verify the job's lease state with
+    /// [`ControlPlaneStore::job`](crate::ControlPlaneStore::job).
+    Indeterminate(IndeterminateLease),
+    /// A storage failure occurred before the commit step; nothing was persisted.
+    Storage(StorageError),
+}
+
+impl fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LeaseError::Conflict(e) => write!(f, "{e}"),
+            LeaseError::Indeterminate(i) => write!(
+                f,
+                "lease extension for job {} outcome indeterminate; read the job to verify",
+                i.job_id
             ),
             LeaseError::Storage(e) => write!(f, "{e}"),
         }
@@ -349,5 +403,11 @@ impl std::error::Error for LeaseError {}
 impl From<StorageError> for LeaseError {
     fn from(e: StorageError) -> Self {
         LeaseError::Storage(e)
+    }
+}
+
+impl From<LeaseConflict> for LeaseError {
+    fn from(e: LeaseConflict) -> Self {
+        LeaseError::Conflict(e)
     }
 }

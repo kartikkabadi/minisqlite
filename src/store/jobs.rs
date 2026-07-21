@@ -18,13 +18,14 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::config::EffectMode;
 use crate::error::{
-    ClaimError, Conflict, Error, LeaseError, RecoveryError, StorageError, ValidationError,
+    ClaimError, Conflict, Error, IndeterminateLease, LeaseConflict, LeaseError, RecoveryError,
+    StorageError, ValidationError,
 };
 use crate::id::Id;
 use crate::jobs::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommittedClaims, IndeterminateClaim,
-    JobAck, JobCancellation, JobInfo, JobResolution, JobSpec, JobState, LeaseExtensionReceipt,
-    MaintenanceReceipt, Resolution,
+    JobAck, JobCancellation, JobInfo, JobResolution, JobSpec, JobState, LeaseExtension,
+    LeaseExtensionReceipt, MaintenanceReceipt, Resolution,
 };
 
 /// Default retry delay applied when a `JobFailure` does not specify `retry_after_ms`.
@@ -364,9 +365,15 @@ pub(crate) fn apply_fail(
             Some(&failure.error_summary),
         )?;
     } else {
-        let retry_after = failure
-            .retry_after_ms
-            .unwrap_or(now_ms + DEFAULT_RETRY_DELAY_MS);
+        let retry_after = match failure.retry_after_ms {
+            Some(ms) => ms,
+            None => now_ms.checked_add(DEFAULT_RETRY_DELAY_MS).ok_or_else(|| {
+                Error::Validation(ValidationError(
+                    "default retry timestamp overflows i64; supply retry_after_ms explicitly"
+                        .into(),
+                ))
+            })?,
+        };
         set_nonterminal(
             tx,
             job.job_id,
@@ -493,7 +500,7 @@ fn error_to_claim(e: Error) -> ClaimError {
     match e {
         Error::Storage(s) => ClaimError::Storage(s),
         Error::Validation(v) => ClaimError::Validation(v),
-        Error::Conflict(c) => ClaimError::Validation(ValidationError(c.to_string())),
+        Error::Conflict(c) => ClaimError::Conflict(c),
     }
 }
 
@@ -519,6 +526,14 @@ pub(crate) fn claim_jobs(
             "claim lease_ms must be positive".into(),
         )));
     }
+    let lease_expires_at_ms = request
+        .now_ms
+        .checked_add(request.lease_ms)
+        .ok_or_else(|| {
+            ClaimError::Validation(ValidationError(
+                "lease expiry timestamp overflows i64".into(),
+            ))
+        })?;
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -564,7 +579,6 @@ pub(crate) fn claim_jobs(
     }
 
     let mut claimed = Vec::with_capacity(leases.len());
-    let lease_expires_at_ms = request.now_ms + request.lease_ms;
     for lease in &leases {
         let attempt = lease.job.attempt + 1;
         tx.execute(
@@ -656,7 +670,7 @@ fn plan_maintenance(
     let mut stmt = tx
         .prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND state = ?2 \
-         AND lease_expires_at_ms <= ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
+         AND lease_expires_at_ms < ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
         ))
         .map_err(StorageError::from_sqlite)?;
     let rows = stmt
@@ -800,6 +814,11 @@ fn insert_claim_transaction(
 }
 
 /// Durably extend an active lease.
+///
+/// Pre-commit failures are typed conflicts or storage errors and persist nothing;
+/// a failed COMMIT step is [`LeaseError::Indeterminate`] because the extension may
+/// or may not be durable. Callers recover by reading the job's lease state via
+/// `store.job(job_id)`.
 pub(crate) fn extend_lease(
     conn: &mut Connection,
     job_id: Id,
@@ -810,30 +829,73 @@ pub(crate) fn extend_lease(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StorageError::from_sqlite)?;
-    let job = load_job(&tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
+    let receipt = apply_extend_lease(
+        &tx,
+        &LeaseExtension {
+            job_id,
+            lease_token,
+            new_expiry_ms,
+        },
+        now_ms,
+    )?;
+    // Only the COMMIT step is indeterminate: it may or may not have persisted.
+    if let Err(e) = tx.commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: StorageError::from_sqlite(e).to_string(),
+        }));
+    }
+
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
+
+    Ok(receipt)
+}
+
+/// Apply a lease extension inside an open transaction (also used by
+/// `Operation::ExtendLease` in the commit pipeline; plan §6.1).
+pub(crate) fn apply_extend_lease(
+    tx: &Transaction<'_>,
+    extension: &LeaseExtension,
+    now_ms: i64,
+) -> Result<LeaseExtensionReceipt, LeaseError> {
+    let LeaseExtension {
+        job_id,
+        lease_token,
+        new_expiry_ms,
+    } = *extension;
+    let job = load_job(tx, job_id)?.ok_or(LeaseConflict::JobNotFound(job_id))?;
     if job.state != JobState::Leased {
-        return Err(LeaseError::NotLeased {
+        return Err(LeaseConflict::NotLeased {
             job_id,
             state: job.state,
-        });
+        }
+        .into());
     }
     if job.lease_token != Some(lease_token) {
-        return Err(LeaseError::InvalidToken { job_id });
+        return Err(LeaseConflict::InvalidToken { job_id }.into());
     }
     let current_ms = job.lease_expires_at_ms.unwrap_or(i64::MIN);
     if now_ms > current_ms {
-        return Err(LeaseError::Expired {
+        return Err(LeaseConflict::Expired {
             job_id,
             lease_expires_at_ms: current_ms,
             now_ms,
-        });
+        }
+        .into());
     }
     if new_expiry_ms <= current_ms {
-        return Err(LeaseError::ExpiryNotLater {
+        return Err(LeaseConflict::ExpiryNotLater {
             job_id,
             current_ms,
             requested_ms: new_expiry_ms,
-        });
+        }
+        .into());
     }
     tx.execute(
         "UPDATE jobs SET lease_expires_at_ms = ?2 WHERE job_id = ?1",
@@ -851,7 +913,6 @@ pub(crate) fn extend_lease(
         ],
     )
     .map_err(StorageError::from_sqlite)?;
-    tx.commit().map_err(StorageError::from_sqlite)?;
     Ok(LeaseExtensionReceipt {
         job_id,
         attempt: job.attempt,

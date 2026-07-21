@@ -55,11 +55,17 @@ const EXPORT_PAGE_SIZE: usize = 512;
 /// destination unless `overwrite` is set. The resulting file's integrity is verified
 /// before returning.
 pub(crate) fn backup(conn: &Connection, dest_path: &Path, overwrite: bool) -> Result<(), Error> {
-    if dest_path.exists() && !overwrite {
-        return Err(Error::Validation(ValidationError(format!(
-            "backup destination {} already exists (pass overwrite to replace it)",
-            dest_path.display()
-        ))));
+    if dest_path.exists() {
+        if !overwrite {
+            return Err(Error::Validation(ValidationError(format!(
+                "backup destination {} already exists (pass overwrite to replace it)",
+                dest_path.display()
+            ))));
+        }
+        // Remove the old file so overwrite works even when the destination is
+        // not a SQLite database.
+        std::fs::remove_file(dest_path)
+            .map_err(|e| StorageError::Io(format!("remove {}: {e}", dest_path.display())))?;
     }
     let mut dest = Connection::open(dest_path).map_err(StorageError::from_sqlite)?;
     {
@@ -354,12 +360,15 @@ pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Err
             .optional()
             .map_err(StorageError::from_sqlite)?
             .flatten(),
-        // For uncertain jobs the interesting age is when their lease expired into
-        // uncertainty, which is the lease expiry they carried at that moment.
+        // Uncertain rows carry no lease (it is cleared on the transition), so the
+        // age of an uncertain job is the commit time of the transaction that made
+        // it uncertain.
         oldest_uncertain_job_ms: conn
             .query_row(
                 &format!(
-                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    "SELECT MIN(t.committed_at_ms) FROM jobs j \
+                     JOIN transactions t ON t.transaction_id = j.updated_transaction_id \
+                     WHERE j.state = {}",
                     JobState::Uncertain.encode()
                 ),
                 [],
@@ -391,7 +400,8 @@ fn state_name(code: i64) -> String {
 ///
 /// The export is explicitly non-restorable: it exists for debugging, not backup.
 /// Event and job payloads (and projection entry values) are redacted to their byte
-/// length unless `include_payloads` is set. Lease tokens are never included.
+/// length unless `include_payloads` is set, and job error summaries are likewise
+/// redacted to their length by default. Lease tokens are never included.
 /// Rows are read in pages of [`EXPORT_PAGE_SIZE`] to bound memory usage.
 pub(crate) fn diagnostic_export(
     conn: &Connection,
@@ -683,7 +693,7 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
                  \"attempt\":{attempt},\"max_attempts\":{max_attempts},\
                  \"effect_mode\":{effect_mode},\"not_before_ms\":{not_before_ms},\
                  \"worker_id\":{},\"lease_expires_at_ms\":{},\"retry_after_ms\":{},\
-                 \"terminal_at_ms\":{},\"error_summary\":{},{}}}",
+                 \"terminal_at_ms\":{},{},{}}}",
                 hex(&job_id),
                 json_escape(&queue),
                 json_escape(&partition_key),
@@ -692,7 +702,7 @@ fn export_jobs(conn: &Connection, out: &mut String, include_payloads: bool) -> R
                 opt_i64(lease_expires_at_ms),
                 opt_i64(retry_after_ms),
                 opt_i64(terminal_at_ms),
-                opt_string(error_summary.as_deref()),
+                error_summary_fields(error_summary.as_deref(), include_payloads),
                 payload_fields(&payload, include_payloads),
             );
             last = seq;
@@ -767,6 +777,19 @@ fn export_claim_receipts(conn: &Connection, out: &mut String) -> Result<(), Erro
         );
     }
     Ok(())
+}
+
+fn error_summary_fields(error_summary: Option<&str>, include_payloads: bool) -> String {
+    if include_payloads {
+        format!("\"error_summary\":{}", opt_string(error_summary))
+    } else {
+        // Error summaries can carry sensitive details; export only their length
+        // unless payloads were explicitly requested.
+        format!(
+            "\"error_summary_len\":{}",
+            opt_i64(error_summary.map(|s| s.len() as i64))
+        )
+    }
 }
 
 fn payload_fields(payload: &[u8], include_payloads: bool) -> String {

@@ -85,6 +85,9 @@ fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
         .unwrap();
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
+    // Simulate corruption that the v2 CHECK constraints would normally reject.
+    conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
     conn.execute("UPDATE jobs SET lease_token = NULL", [])
         .unwrap();
     conn.execute("DELETE FROM jobs", []).unwrap();
@@ -118,12 +121,55 @@ fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
     drop(store2);
     let conn2 = rusqlite::Connection::open(&path2).unwrap();
     conn2
+        .execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    conn2
         .execute("UPDATE jobs SET lease_token = NULL", [])
         .unwrap();
     drop(conn2);
     let store2 = ControlPlaneStore::open_existing(&path2).unwrap();
     let report2 = store2.verify().unwrap();
     assert!(report2.findings.iter().any(|f| f.check == "leased_jobs"));
+}
+
+#[test]
+fn diagnostic_export_redacts_error_summary_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ControlPlaneStore::open(dir.path().join("db")).unwrap();
+    store
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    let outcome = store
+        .claim_jobs(&minisqlite::ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: 2_000,
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    let claims = match outcome {
+        minisqlite::ClaimOutcome::Committed(claims) => claims.into_jobs(),
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    store
+        .commit(&CommitBatch::new(Id::from(2u128), 3_000).fail_job(
+            claims[0].job_id,
+            claims[0].lease_token,
+            "secret token leaked: hunter2",
+            None,
+        ))
+        .unwrap();
+
+    let export = store.diagnostic_export().unwrap();
+    assert!(!export.contains("hunter2"));
+    assert!(!export.contains("\"error_summary\""));
+    assert!(export.contains("\"error_summary_len\":28"));
+
+    let full = store.diagnostic_export_with(true).unwrap();
+    assert!(full.contains("hunter2"));
 }
 
 #[test]
@@ -138,10 +184,33 @@ fn stats_counts_are_correct() {
     assert_eq!(stats.projection_entries, 0);
     assert!(stats.jobs_by_state.is_empty());
     assert_eq!(stats.active_partitions, 0);
-    assert_eq!(stats.migration_version, 1);
+    assert_eq!(stats.migration_version, 2);
     assert!(stats.file_size_bytes > 0);
     assert_eq!(stats.oldest_active_lease_ms, None);
     assert_eq!(stats.oldest_uncertain_job_ms, None);
+}
+
+#[test]
+fn stats_report_oldest_uncertain_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ControlPlaneStore::open(dir.path().join("db")).unwrap();
+    store
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    let request = |now_ms| minisqlite::ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms,
+        lease_ms: 60_000,
+        limit: 1,
+    };
+    store.claim_jobs(&request(2_000)).unwrap();
+    // Expiry maintenance moves the reconcilable job to Uncertain at 70_000.
+    store.claim_jobs(&request(70_000)).unwrap();
+    let stats = store.stats().unwrap();
+    assert_eq!(stats.oldest_uncertain_job_ms, Some(70_000));
 }
 
 #[test]
@@ -152,7 +221,7 @@ fn diagnostic_export_redacts_payloads_by_default() {
     let first = export.lines().next().unwrap();
     assert!(first.contains("\"kind\":\"header\""));
     assert!(first.contains("\"restorable\":false"));
-    assert!(first.contains("\"schema_version\":1"));
+    assert!(first.contains("\"schema_version\":2"));
     assert!(first.contains("\"payloads_included\":false"));
     assert!(export.contains("\"payload_len\":7"));
     assert!(!export.contains("payload_hex"));

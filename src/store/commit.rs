@@ -63,7 +63,7 @@ pub(crate) fn commit(
             batch.transaction_id.as_bytes().as_slice(),
             sequence as i64,
             batch.committed_at_ms,
-            batch.correlation_id.map(|id| id.0.to_vec()),
+            batch.correlation_id.map(|id| id.as_bytes().to_vec()),
             batch.metadata,
             digest.as_slice(),
             batch.operations.len() as i64,
@@ -125,6 +125,19 @@ pub(crate) fn commit(
                     batch.committed_at_ms,
                     resolution,
                 )?;
+            }
+            Operation::ExtendLease(extension) => {
+                crate::store::jobs::apply_extend_lease(&tx, extension, batch.committed_at_ms)
+                    .map_err(|e| match e {
+                        crate::error::LeaseError::Conflict(c) => {
+                            CommitError::Conflict(Conflict::Lease(c))
+                        }
+                        crate::error::LeaseError::Storage(s) => CommitError::Storage(s),
+                        // apply_extend_lease never commits, so it cannot be indeterminate.
+                        crate::error::LeaseError::Indeterminate(i) => CommitError::Storage(
+                            StorageError::Sqlite(i.storage_error().to_string()),
+                        ),
+                    })?;
             }
         }
     }
@@ -188,7 +201,7 @@ pub(crate) fn recover_transaction(
 fn lookup_transaction(
     tx: &Transaction<'_>,
     transaction_id: Id,
-) -> Result<Option<(u64, i64, [u8; 16])>, StorageError> {
+) -> Result<Option<(u64, i64, Vec<u8>)>, StorageError> {
     let row = tx
         .query_row(
             "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
@@ -202,13 +215,9 @@ fn lookup_transaction(
         )
         .optional()
         .map_err(StorageError::from_sqlite)?;
-    row.map(|(sequence, committed_at_ms, digest)| {
-        let fixed: [u8; 16] = digest
-            .try_into()
-            .map_err(|_| StorageError::Sqlite("corrupt 16-byte request digest column".into()))?;
-        Ok((sequence as u64, committed_at_ms, fixed))
-    })
-    .transpose()
+    // The digest is compared as an opaque blob: a row written by an older build
+    // with a different digest algorithm simply fails the resubmission match.
+    Ok(row.map(|(sequence, committed_at_ms, digest)| (sequence as u64, committed_at_ms, digest)))
 }
 
 fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, CommitError> {
@@ -313,6 +322,11 @@ fn validate_batch(limits: &Limits, batch: &CommitBatch) -> Result<(), CommitErro
                 }
             }
             Operation::ResolveJob(_) => {}
+            Operation::ExtendLease(extension) => {
+                if extension.lease_token == Id::ZERO {
+                    return Err(ValidationError("lease token cannot be zero".into()).into());
+                }
+            }
         }
     }
     Ok(())
