@@ -103,6 +103,24 @@ fn heartbeat(
     Ok(())
 }
 
+/// Worker protocol step 4: turn-started event + projection "running", one CommitBatch.
+fn start_turn(
+    store: &ControlPlaneStore,
+    thread_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stream = format!("thread:{thread_id}");
+    store.commit(
+        &CommitBatch::new(Id::new()?, now_ms())
+            .append_event(event(&stream, "thread.turn-started", r#"{"turn":1}"#)?)
+            .apply_projection_patch(
+                ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
+                    .put(thread_id, r#"{"status":"running"}"#),
+            ),
+    )?;
+    println!("[commit] thread.turn-started       threads/{thread_id} -> running");
+    Ok(())
+}
+
 /// Step 6: the external provider effect, simulated.
 fn call_provider(job: &ClaimedJob) {
     println!(
@@ -185,6 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         request_turn(&store, "t-100")?;
         let (_tx, job) = claim_one(&store, "worker-1")?;
         heartbeat(&store, &job)?;
+        start_turn(&store, "t-100")?;
         call_provider(&job);
         complete_turn(&store, "t-100", &job)?;
         println!(
@@ -219,6 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             for job in claims {
                 heartbeat(&store, &job)?;
+                start_turn(&store, "t-200")?;
                 call_provider(&job); // exactly once, under the recovered lease
                 complete_turn(&store, "t-200", &job)?;
             }
