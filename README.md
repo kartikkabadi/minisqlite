@@ -70,7 +70,7 @@ match store.claim_jobs(&ClaimRequest {
 }
 ```
 
-Indeterminate commits and claims are surfaced as typed errors (`CommitError::Indeterminate`, `ClaimError::Indeterminate`) that carry only a transaction ID — never executable work. Recover them explicitly with `recover_transaction` and `recover_claim`.
+Indeterminate commits and claims are surfaced as typed errors (`CommitError::Indeterminate`, `ClaimError::Indeterminate`) that carry no executable work (no payloads or lease tokens). Recover them explicitly with `recover_transaction` and `recover_claim`.
 
 ## CLI
 
@@ -87,13 +87,15 @@ minisqlite backup backup.db --db control-plane.db
 
 ## Design
 
-- [docs/ADR-001.md](docs/ADR-001.md) — why SQLite is the production storage substrate
-- [docs/ROADMAP.md](docs/ROADMAP.md) — delivery phases and exit criteria
-- [docs/SCOPE.md](docs/SCOPE.md) — what is included and explicitly excluded
+- [docs/ADR-001.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/ADR-001.md) — why SQLite is the production storage substrate
+- [docs/ROADMAP.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/ROADMAP.md) — delivery phases and exit criteria
+- [docs/SCOPE.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/SCOPE.md) — what is included and explicitly excluded
+
+These documents currently live on the `phase/control-plane-kernel-docs` branch and land on `main` via [PR #11](https://github.com/kartikkabadi/minisqlite/pull/11).
 
 Explicit non-goals: SQL exposed through the public API, distributed consensus, multi-process writers, replication, a workflow DSL, and a public multi-backend storage abstraction.
 
-The pre-0.3 custom SQL engine and append-only journal are preserved for reference on the [`archive/append-only-journal-v1`](https://github.com/kartikkabadi/minisqlite/tree/archive/append-only-journal-v1) branch.
+The pre-0.3 custom SQL engine is preserved for reference at the [`v0.2.1`](https://github.com/kartikkabadi/minisqlite/tree/v0.2.1) tag, and the append-only journal engine on the [`archive/append-only-journal-v1`](https://github.com/kartikkabadi/minisqlite/tree/archive/append-only-journal-v1) branch.
 
 ## Test
 
