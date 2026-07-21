@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use minisqlite::{
@@ -26,17 +27,29 @@ const POPULATE_BATCH: usize = 1000;
 const PAGE: usize = 256;
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // Fresh-process helper for O1: open the store, perform one read, and
+    // report open time plus this process's own peak RSS (uncontaminated by
+    // the rest of the suite).
+    if let Some(i) = args.iter().position(|a| a == "--o1-child") {
+        o1_child(&args[i + 1]);
+        return;
+    }
+    if let Some(i) = args.iter().position(|a| a == "--o9-child") {
+        o9_child(&args[i + 1]);
+        return;
+    }
     // Cargo passes `--bench` when invoked via `cargo bench`; under
     // `cargo test --all-targets` the binary runs without it, so only verify
     // that the harness links and exit (mirrors criterion's behavior).
-    if !std::env::args().any(|a| a == "--bench") {
+    if !args.iter().any(|a| a == "--bench") {
         println!("kernel_bench: pass --bench (cargo bench) to run the suite");
         return;
     }
 
     let profile = Profile::from_env();
     let root = bench_root();
-    print_environment(&root, &profile);
+    let environment = print_environment(&root, &profile);
 
     transaction_workloads(&root);
     scale_event_history(&root, &profile);
@@ -45,8 +58,59 @@ fn main() {
     operational_projections(&root);
     live_backup(&root, &profile);
 
+    print_json_report(&environment);
     let _ = std::fs::remove_dir_all(&root);
     println!("\nkernel_bench: done");
+}
+
+fn o1_child(path: &str) {
+    let t = Instant::now();
+    let store = ControlPlaneStore::open(path).expect("o1 child open");
+    store.stream_version("s0").expect("o1 child first read");
+    let elapsed_us = t.elapsed().as_secs_f64() * 1e6;
+    println!(
+        "time_us={elapsed_us:.1} peak_rss={}",
+        peak_rss_mib().replace(' ', "")
+    );
+}
+
+fn o9_child(path: &str) {
+    let store = ControlPlaneStore::open(path).expect("o9 child open");
+    let t = Instant::now();
+    let export = store.diagnostic_export().expect("o9 child export");
+    let elapsed_us = t.elapsed().as_secs_f64() * 1e6;
+    println!(
+        "time_us={elapsed_us:.1} peak_rss={} bytes={}",
+        peak_rss_mib().replace(' ', ""),
+        export.len()
+    );
+}
+
+/// Run this benchmark binary as a fresh child process (`--o1-child` /
+/// `--o9-child`) so the reported peak RSS covers only that workload, and
+/// parse its `key=value` output line.
+fn run_child(flag: &str, path: &Path) -> (Duration, String, String) {
+    let exe = std::env::current_exe().expect("current exe");
+    let output = std::process::Command::new(exe)
+        .arg(flag)
+        .arg(path)
+        .output()
+        .expect("spawn bench child");
+    assert!(output.status.success(), "bench child failed: {flag}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut time = Duration::ZERO;
+    let mut rss = String::from("unavailable");
+    let mut extra = String::new();
+    for token in stdout.split_whitespace() {
+        if let Some(v) = token.strip_prefix("time_us=") {
+            time = Duration::from_secs_f64(v.parse::<f64>().unwrap_or(0.0) / 1e6);
+        } else if let Some(v) = token.strip_prefix("peak_rss=") {
+            rss = v.to_string();
+        } else if let Some(v) = token.strip_prefix("bytes=") {
+            extra = format!("bytes={v}");
+        }
+    }
+    (time, rss, extra)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,41 +236,70 @@ fn peak_rss_mib() -> String {
         .unwrap_or_else(|| "unavailable".into())
 }
 
-fn print_environment(root: &Path, profile: &Profile) {
+fn print_environment(root: &Path, profile: &Profile) -> Vec<(String, String)> {
     let (fstype, opts, device) = filesystem_for(root);
+    let environment =
+        vec![
+        (
+            "cpu".to_string(),
+            format!(
+                "{} ({} logical cores)",
+                read_first_match("/proc/cpuinfo", "model name")
+                    .unwrap_or_else(|| "unknown".into()),
+                std::thread::available_parallelism().map_or(0, std::num::NonZero::get)
+            ),
+        ),
+        (
+            "ram".to_string(),
+            read_first_match("/proc/meminfo", "MemTotal").unwrap_or_else(|| "unknown".into()),
+        ),
+        (
+            "os".to_string(),
+            format!("{}, kernel {}", os_pretty_name(), kernel_release()),
+        ),
+        ("sqlite_version".to_string(), rusqlite::version().to_string()),
+        ("filesystem".to_string(), format!("{fstype}, {opts}")),
+        ("storage_device".to_string(), device_class(&device)),
+        (
+            "page_size".to_string(),
+            "4096 (SQLite default; store does not override)".to_string(),
+        ),
+        (
+            "wal_state".to_string(),
+            "WAL on (set at open), fresh DB per fixture; per-fixture WAL sizes on fixture lines"
+                .to_string(),
+        ),
+        (
+            "cache_state".to_string(),
+            "warm (in-process, no cache drop between iterations)".to_string(),
+        ),
+        ("bench_db_root".to_string(), root.display().to_string()),
+        (
+            "profile".to_string(),
+            format!(
+                "{} (KERNEL_BENCH_FULL={})",
+                if profile.full {
+                    "full §2.2 populations"
+                } else {
+                    "reduced populations"
+                },
+                u8::from(profile.full)
+            ),
+        ),
+        (
+            "warmup_iterations".to_string(),
+            format!("{WARMUP} (excluded from measurements)"),
+        ),
+        (
+            "durability".to_string(),
+            "per-workload, printed on each line (strict=FULL, relaxed=NORMAL)".to_string(),
+        ),
+    ];
     println!("== kernel_bench environment report (docs/BENCHMARKS.md §1) ==");
-    println!(
-        "CPU:             {} ({} logical cores)",
-        read_first_match("/proc/cpuinfo", "model name").unwrap_or_else(|| "unknown".into()),
-        std::thread::available_parallelism().map_or(0, std::num::NonZero::get)
-    );
-    println!(
-        "RAM:             {}",
-        read_first_match("/proc/meminfo", "MemTotal").unwrap_or_else(|| "unknown".into())
-    );
-    println!(
-        "OS:              {}, kernel {}",
-        os_pretty_name(),
-        kernel_release()
-    );
-    println!("SQLite version:  {}", rusqlite::version());
-    println!("Filesystem:      {fstype}, {opts}");
-    println!("Storage device:  {}", device_class(&device));
-    println!("Page size:       4096 (SQLite default; store does not override)");
-    println!("WAL state:       WAL on (set at open), fresh DB per fixture");
-    println!("Cache state:     warm (in-process, no cache drop between iterations)");
-    println!("Bench DB root:   {}", root.display());
-    println!(
-        "Profile:         {} (KERNEL_BENCH_FULL={})",
-        if profile.full {
-            "full §2.2 populations"
-        } else {
-            "reduced populations"
-        },
-        u8::from(profile.full)
-    );
-    println!("Warm-up iters:   {WARMUP} (excluded from measurements)");
-    println!("Durability:      per-workload, printed on each line (strict=FULL, relaxed=NORMAL)");
+    for (key, value) in &environment {
+        println!("{key:<18} {value}");
+    }
+    environment
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +348,36 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
     sorted[idx]
 }
 
+/// Machine-readable result entries (JSON objects), printed as one blob at the
+/// end of the run (docs/BENCHMARKS.md §5 report format).
+static RESULTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn push_result(json: String) {
+    RESULTS.lock().expect("results lock").push(json);
+}
+
+fn print_json_report(environment: &[(String, String)]) {
+    let env_fields: Vec<String> = environment
+        .iter()
+        .map(|(k, v)| format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)))
+        .collect();
+    let results = RESULTS.lock().expect("results lock");
+    println!("\n== machine-readable report (one JSON blob) ==");
+    println!(
+        "{{\"environment\":{{{}}},\"results\":[{}]}}",
+        env_fields.join(","),
+        results.join(",")
+    );
+}
+
+fn us(d: Duration) -> f64 {
+    d.as_secs_f64() * 1e6
+}
+
 fn report(name: &str, samples: &mut [Duration]) {
     samples.sort_unstable();
     println!(
@@ -266,15 +389,53 @@ fn report(name: &str, samples: &mut [Duration]) {
         fmt_dur(samples[0]),
         fmt_dur(samples[samples.len() - 1]),
     );
+    push_result(format!(
+        "{{\"workload\":\"{}\",\"n\":{},\"p50_us\":{:.1},\"p95_us\":{:.1},\"p99_us\":{:.1},\"min_us\":{:.1},\"max_us\":{:.1}}}",
+        json_escape(name),
+        samples.len(),
+        us(percentile(samples, 0.50)),
+        us(percentile(samples, 0.95)),
+        us(percentile(samples, 0.99)),
+        us(samples[0]),
+        us(samples[samples.len() - 1]),
+    ));
+}
+
+/// Print the on-disk main-DB and WAL file sizes for a measured fixture
+/// (docs/BENCHMARKS.md §1 "DB size" / "WAL state" fields).
+fn print_fixture(context: &str, path: &Path) {
+    let db = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let wal = std::fs::metadata(path.with_extension("db-wal"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    println!("    fixture [{context}]: db={db} bytes, wal={wal} bytes");
+    push_result(format!(
+        "{{\"fixture\":\"{}\",\"db_bytes\":{db},\"wal_bytes\":{wal}}}",
+        json_escape(context)
+    ));
 }
 
 /// Run `warmup` unmeasured then `iters` measured iterations and report.
 fn run_workload(name: &str, warmup: usize, iters: usize, mut f: impl FnMut()) {
+    run_workload_prepped(name, warmup, iters, || {}, &mut f);
+}
+
+/// Like [`run_workload`], but runs `prep` before every iteration *outside*
+/// the timed interval (fixture rotation, acking previous claims, ...).
+fn run_workload_prepped(
+    name: &str,
+    warmup: usize,
+    iters: usize,
+    mut prep: impl FnMut(),
+    f: &mut impl FnMut(),
+) {
     for _ in 0..warmup {
+        prep();
         f();
     }
     let mut samples = Vec::with_capacity(iters);
     for _ in 0..iters {
+        prep();
         let t = Instant::now();
         f();
         samples.push(t.elapsed());
@@ -284,6 +445,12 @@ fn run_workload(name: &str, warmup: usize, iters: usize, mut f: impl FnMut()) {
 
 fn report_single(name: &str, d: Duration, extra: &str) {
     println!("{name:<44} n=1       time={:<9} {extra}", fmt_dur(d));
+    push_result(format!(
+        "{{\"workload\":\"{}\",\"n\":1,\"time_us\":{:.1},\"note\":\"{}\"}}",
+        json_escape(name),
+        us(d),
+        json_escape(extra)
+    ));
 }
 
 fn open_store(path: &Path, durability: Durability) -> ControlPlaneStore {
@@ -492,8 +659,9 @@ fn claim_workloads(root: &Path, durability: Durability, label: &str) {
         },
     );
 
-    // T5: 100 partitions with enough depth for every iteration; jobs are acked
-    // (untimed) between iterations so each partition head is pending again.
+    // T5: 100 partitions with enough depth for every iteration; the previous
+    // batch is acked in the untimed prep step so each partition head is
+    // pending again and the timed interval contains only `claim_jobs`.
     let path = dir.join("t5.db");
     {
         let setup = open_store(&path, Durability::Relaxed);
@@ -501,15 +669,24 @@ fn claim_workloads(root: &Path, durability: Durability, label: &str) {
         populate_jobs(&setup, &mut ids, &mut clock, "q", "p", total, 100);
     }
     let store = open_store(&path, durability);
-    let mut leased: Vec<ClaimedJob> = Vec::new();
-    run_workload(
+    print_fixture(&format!("T5 [{label}]"), &path);
+    let leased: Mutex<Vec<ClaimedJob>> = Mutex::new(Vec::new());
+    let mut ack_ids = IdGen::new(12);
+    let mut ack_clock = Clock(clock.0);
+    let now = Mutex::new(Clock(clock.0));
+    run_workload_prepped(
         &format!("T5 claim 100 jobs / 100 partitions [{label}]"),
         WARMUP,
         CLAIM_BATCH_ITERS,
         || {
-            ack_all(&store, &mut ids, &mut clock, &leased);
-            leased = claim(&store, "q", clock.tick(), 100);
-            assert_eq!(leased.len(), 100, "T5 expected 100 claimed jobs");
+            let previous = std::mem::take(&mut *leased.lock().expect("T5 leased"));
+            ack_all(&store, &mut ack_ids, &mut ack_clock, &previous);
+        },
+        &mut || {
+            let now_ms = now.lock().expect("T5 clock").tick();
+            let jobs = claim(&store, "q", now_ms, 100);
+            assert_eq!(jobs.len(), 100, "T5 expected 100 claimed jobs");
+            *leased.lock().expect("T5 leased") = jobs;
         },
     );
 }
@@ -697,23 +874,22 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             population += (WARMUP + TXN_ITERS) as u64;
         }
 
-        // O1: open time (store dropped and reopened per measurement).
-        let rss_before = peak_rss_mib();
+        print_fixture(&format!("{population} events"), &path);
+
+        // O1: open time + first read, each in a fresh child process so the
+        // duration and peak RSS cover only the open (no suite contamination).
         let mut samples = Vec::new();
+        let mut rss = String::new();
         for _ in 0..5 {
-            let t = Instant::now();
-            let store = ControlPlaneStore::open(&path).expect("O1 open");
-            store.stream_version("s0").expect("O1 first read");
-            samples.push(t.elapsed());
+            let (time, child_rss, _) = run_child("--o1-child", &path);
+            samples.push(time);
+            rss = child_rss;
         }
         report(
             &format!("O1 open + first read @ {population} events"),
             &mut samples,
         );
-        println!(
-            "    peak RSS before/after O1 opens: {rss_before} / {} (VmHWM, process-wide)",
-            peak_rss_mib()
-        );
+        println!("    O1 fresh-process peak RSS: {rss} (VmHWM of the child)");
 
         let store = open_store(&path, Durability::Relaxed);
 
@@ -760,13 +936,14 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             &format!("ok={}", verify.is_ok()),
         );
 
-        // O9: paged diagnostic export of the full history.
-        let t = Instant::now();
-        let export = store.diagnostic_export().expect("O9 export");
+        // O9: diagnostic export of the full history, in a fresh child process
+        // so the reported peak RSS covers only the export.
+        drop(store);
+        let (time, rss, extra) = run_child("--o9-child", &path);
         report_single(
             &format!("O9 diagnostic export @ {population} events"),
-            t.elapsed(),
-            &format!("bytes={} peak_rss={}", export.len(), peak_rss_mib()),
+            time,
+            &format!("{extra} fresh-process peak_rss={rss}"),
         );
     }
 }
@@ -816,15 +993,45 @@ fn scale_terminal_jobs(root: &Path, profile: &Profile) {
             },
         );
 
-        // O6: job pagination (public API paginates by state filter + limit).
-        run_workload(
-            &format!("O6 jobs page (limit {PAGE}) @ {population} terminal jobs"),
-            WARMUP,
-            TXN_ITERS,
-            || {
-                let jobs = store.jobs(Some("histq"), None, PAGE).expect("O6 jobs page");
-                assert_eq!(jobs.len(), PAGE, "O6 expected a full page");
-            },
+        print_fixture(&format!("{population} terminal jobs"), &path);
+
+        // O6: paginate through the terminal-job history. The public `jobs`
+        // API has no cursor, so a page at depth d requires listing d+PAGE
+        // rows in enqueue order; pages are sampled at growing depths through
+        // the last page to expose deep-page cost.
+        let mut depths = vec![0u64];
+        let mut d = PAGE as u64;
+        while d + (PAGE as u64) < population {
+            depths.push(d);
+            d *= 4;
+        }
+        depths.push(population - PAGE as u64);
+        let mut pages = Vec::new();
+        for &depth in &depths {
+            let t = Instant::now();
+            let jobs = store
+                .jobs(Some("histq"), None, depth as usize + PAGE)
+                .expect("O6 jobs page");
+            pages.push(t.elapsed());
+            assert_eq!(
+                jobs.len(),
+                depth as usize + PAGE,
+                "O6 expected a full page at depth {depth}"
+            );
+        }
+        let (first, last) = (pages[0], pages[pages.len() - 1]);
+        report(
+            &format!(
+                "O6 jobs page @ depths 0..{} ({population} terminal jobs)",
+                depths[depths.len() - 1]
+            ),
+            &mut pages,
+        );
+        println!(
+            "    O6 depth check: page@0 {} vs page@{} {} (no-cursor API: depth-d page lists d+{PAGE} rows)",
+            fmt_dur(first),
+            depths[depths.len() - 1],
+            fmt_dur(last)
         );
     }
 }
@@ -860,16 +1067,25 @@ fn scale_partitions(root: &Path, profile: &Profile) {
             );
         }
         let store = open_store(&path, Durability::Relaxed);
+        print_fixture(&format!("{active} active / {historical} historical"), &path);
         let limit = 100.min(active as usize);
-        let mut leased: Vec<ClaimedJob> = Vec::new();
-        run_workload(
+        let leased: Mutex<Vec<ClaimedJob>> = Mutex::new(Vec::new());
+        let mut ack_ids = IdGen::new(13);
+        let mut ack_clock = Clock(clock.0);
+        let now = Mutex::new(Clock(clock.0));
+        run_workload_prepped(
             &format!("T5 claim {limit} @ {active} active / {historical} historical"),
             WARMUP,
             CLAIM_BATCH_ITERS,
             || {
-                ack_all(&store, &mut ids, &mut clock, &leased);
-                leased = claim(&store, "q", clock.tick(), limit);
-                assert_eq!(leased.len(), limit, "partition-mix claim shortfall");
+                let previous = std::mem::take(&mut *leased.lock().expect("mix leased"));
+                ack_all(&store, &mut ack_ids, &mut ack_clock, &previous);
+            },
+            &mut || {
+                let now_ms = now.lock().expect("mix clock").tick();
+                let jobs = claim(&store, "q", now_ms, limit);
+                assert_eq!(jobs.len(), limit, "partition-mix claim shortfall");
+                *leased.lock().expect("mix leased") = jobs;
             },
         );
     }
