@@ -18,7 +18,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::config::EffectMode;
 use crate::error::{
-    ClaimError, Conflict, Error, LeaseError, RecoveryError, StorageError, ValidationError,
+    ClaimError, Conflict, Error, IndeterminateLease, LeaseConflict, LeaseError, RecoveryError,
+    StorageError, ValidationError,
 };
 use crate::id::Id;
 use crate::jobs::{
@@ -499,7 +500,7 @@ fn error_to_claim(e: Error) -> ClaimError {
     match e {
         Error::Storage(s) => ClaimError::Storage(s),
         Error::Validation(v) => ClaimError::Validation(v),
-        Error::Conflict(c) => ClaimError::Validation(ValidationError(c.to_string())),
+        Error::Conflict(c) => ClaimError::Conflict(c),
     }
 }
 
@@ -669,7 +670,7 @@ fn plan_maintenance(
     let mut stmt = tx
         .prepare(&format!(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND state = ?2 \
-         AND lease_expires_at_ms <= ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
+         AND lease_expires_at_ms < ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
         ))
         .map_err(StorageError::from_sqlite)?;
     let rows = stmt
@@ -813,6 +814,11 @@ fn insert_claim_transaction(
 }
 
 /// Durably extend an active lease.
+///
+/// Pre-commit failures are typed conflicts or storage errors and persist nothing;
+/// a failed COMMIT step is [`LeaseError::Indeterminate`] because the extension may
+/// or may not be durable. Callers recover by reading the job's lease state via
+/// `store.job(job_id)`.
 pub(crate) fn extend_lease(
     conn: &mut Connection,
     job_id: Id,
@@ -832,7 +838,22 @@ pub(crate) fn extend_lease(
         },
         now_ms,
     )?;
-    tx.commit().map_err(StorageError::from_sqlite)?;
+    // Only the COMMIT step is indeterminate: it may or may not have persisted.
+    if let Err(e) = tx.commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: StorageError::from_sqlite(e).to_string(),
+        }));
+    }
+
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
+
     Ok(receipt)
 }
 
@@ -848,30 +869,33 @@ pub(crate) fn apply_extend_lease(
         lease_token,
         new_expiry_ms,
     } = *extension;
-    let job = load_job(tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
+    let job = load_job(tx, job_id)?.ok_or(LeaseConflict::JobNotFound(job_id))?;
     if job.state != JobState::Leased {
-        return Err(LeaseError::NotLeased {
+        return Err(LeaseConflict::NotLeased {
             job_id,
             state: job.state,
-        });
+        }
+        .into());
     }
     if job.lease_token != Some(lease_token) {
-        return Err(LeaseError::InvalidToken { job_id });
+        return Err(LeaseConflict::InvalidToken { job_id }.into());
     }
     let current_ms = job.lease_expires_at_ms.unwrap_or(i64::MIN);
     if now_ms > current_ms {
-        return Err(LeaseError::Expired {
+        return Err(LeaseConflict::Expired {
             job_id,
             lease_expires_at_ms: current_ms,
             now_ms,
-        });
+        }
+        .into());
     }
     if new_expiry_ms <= current_ms {
-        return Err(LeaseError::ExpiryNotLater {
+        return Err(LeaseConflict::ExpiryNotLater {
             job_id,
             current_ms,
             requested_ms: new_expiry_ms,
-        });
+        }
+        .into());
     }
     tx.execute(
         "UPDATE jobs SET lease_expires_at_ms = ?2 WHERE job_id = ?1",
@@ -1043,4 +1067,54 @@ pub(crate) fn list_jobs(
         jobs.push(job.into_info());
     }
     Ok(jobs)
+}
+
+/// List one page of jobs after a pagination cursor (`enqueue_sequence`),
+/// returning the page and the cursor for the next page.
+pub(crate) fn list_jobs_page(
+    conn: &Connection,
+    queue: Option<&str>,
+    state: Option<JobState>,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<(Vec<JobInfo>, u64), Error> {
+    let after_sequence_i64 = i64::try_from(after_sequence).map_err(|_| {
+        crate::error::ValidationError(format!(
+            "jobs_page after_sequence {after_sequence} exceeds the supported range"
+        ))
+    })?;
+    let limit_i64 = i64::try_from(limit).map_err(|_| {
+        crate::error::ValidationError(format!(
+            "jobs_page limit {limit} exceeds the supported range"
+        ))
+    })?;
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE enqueue_sequence > ?1 \
+             AND (?2 IS NULL OR queue = ?2) AND (?3 IS NULL OR state = ?3) \
+             ORDER BY enqueue_sequence LIMIT ?4"
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                after_sequence_i64,
+                queue,
+                state.map(JobState::encode),
+                limit_i64
+            ],
+            |row| {
+                let sequence: i64 = row.get(1)?;
+                Ok((sequence, row_to_job(row)?))
+            },
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let mut jobs = Vec::new();
+    let mut cursor = after_sequence;
+    for row in rows {
+        let (sequence, job) = row.map_err(StorageError::from_sqlite)?;
+        cursor = sequence as u64;
+        jobs.push(job?.into_info());
+    }
+    Ok((jobs, cursor))
 }

@@ -63,7 +63,7 @@ pub(crate) fn commit(
             batch.transaction_id.as_bytes().as_slice(),
             sequence as i64,
             batch.committed_at_ms,
-            batch.correlation_id.map(|id| id.0.to_vec()),
+            batch.correlation_id.map(|id| id.as_bytes().to_vec()),
             batch.metadata,
             digest.as_slice(),
             batch.operations.len() as i64,
@@ -129,8 +129,14 @@ pub(crate) fn commit(
             Operation::ExtendLease(extension) => {
                 crate::store::jobs::apply_extend_lease(&tx, extension, batch.committed_at_ms)
                     .map_err(|e| match e {
+                        crate::error::LeaseError::Conflict(c) => {
+                            CommitError::Conflict(Conflict::Lease(c))
+                        }
                         crate::error::LeaseError::Storage(s) => CommitError::Storage(s),
-                        other => ValidationError(other.to_string()).into(),
+                        // apply_extend_lease never commits, so it cannot be indeterminate.
+                        crate::error::LeaseError::Indeterminate(i) => CommitError::Storage(
+                            StorageError::Sqlite(i.storage_error().to_string()),
+                        ),
                     })?;
             }
         }

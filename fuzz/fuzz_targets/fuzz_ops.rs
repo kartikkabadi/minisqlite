@@ -51,9 +51,10 @@ fuzz_target!(|data: &[u8]| {
                 next_id += 1;
                 let event_id = Id::from(next_id);
                 let stream = format!("s{}", input.u8() % 4);
-                let _ = store.commit(&CommitBatch::new(txn, now).append_event(
-                    Event::with_json_payload(event_id, &stream, "t", now, b"{}"),
-                ));
+                let _ = store.commit(
+                    &CommitBatch::new(txn, now)
+                        .append_event(Event::with_json_payload(event_id, &stream, "t", now, b"{}")),
+                );
             }
             1 => {
                 next_id += 1;
@@ -117,8 +118,9 @@ fuzz_target!(|data: &[u8]| {
                         1 => Resolution::MarkSucceeded,
                         _ => Resolution::MarkDead,
                     };
-                    let _ = store
-                        .commit(&CommitBatch::new(txn, now).resolve_uncertain_job(job_id, resolution));
+                    let _ = store.commit(
+                        &CommitBatch::new(txn, now).resolve_uncertain_job(job_id, resolution),
+                    );
                 }
             }
             _ => {

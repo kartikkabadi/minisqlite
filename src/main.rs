@@ -27,8 +27,9 @@ COMMANDS:
                                    scan a projection's entries in key order
     projections get <projection> <key-hex>
                                    print one projection entry
-    jobs list [--queue Q] [--state S]
-                                   list jobs, optionally filtered
+    jobs list [--queue Q] [--state S] [--after N]
+                                   list jobs, optionally filtered; --after
+                                   pages by the printed cursor
     jobs show <job-id>             print one job's full status
     jobs uncertain [--limit N]     list jobs with uncertain outcomes
     jobs resolve <job-id> <retry|succeeded|dead>
@@ -100,6 +101,7 @@ struct Parsed {
     positional: Vec<String>,
     limit: Option<usize>,
     from: Option<u64>,
+    after: Option<u64>,
     prefix: Option<String>,
     queue: Option<String>,
     state: Option<String>,
@@ -113,6 +115,7 @@ fn parse(args: &[String]) -> Result<Parsed, CliError> {
     let mut positional = Vec::new();
     let mut limit = None;
     let mut from = None;
+    let mut after = None;
     let mut prefix = None;
     let mut queue = None;
     let mut state = None;
@@ -137,6 +140,13 @@ fn parse(args: &[String]) -> Result<Parsed, CliError> {
                         .map_err(|_| CliError::Usage(format!("invalid --from: {raw}")))?,
                 );
             }
+            "--after" => {
+                let raw = flag_value(&mut iter, "--after")?;
+                after = Some(
+                    raw.parse()
+                        .map_err(|_| CliError::Usage(format!("invalid --after: {raw}")))?,
+                );
+            }
             "--prefix" => prefix = Some(flag_value(&mut iter, "--prefix")?),
             "--queue" => queue = Some(flag_value(&mut iter, "--queue")?),
             "--state" => state = Some(flag_value(&mut iter, "--state")?),
@@ -154,6 +164,7 @@ fn parse(args: &[String]) -> Result<Parsed, CliError> {
         positional,
         limit,
         from,
+        after,
         prefix,
         queue,
         state,
@@ -411,9 +422,11 @@ fn run(args: &[String]) -> Result<(), CliError> {
         ("jobs", Some("list")) => {
             let state = parsed.state.as_deref().map(parse_state).transpose()?;
             let limit = parsed.limit.unwrap_or(100);
-            let jobs = store
-                .jobs(parsed.queue.as_deref(), state, limit)
+            let after = parsed.after.unwrap_or(0);
+            let (jobs, cursor) = store
+                .jobs_page(parsed.queue.as_deref(), state, after, limit)
                 .map_err(op_err)?;
+            let page_full = jobs.len() == limit;
             for job in jobs {
                 println!(
                     "{} {} {} {:?} attempt {}",
@@ -423,6 +436,9 @@ fn run(args: &[String]) -> Result<(), CliError> {
                     job.state,
                     job.attempt
                 );
+            }
+            if page_full {
+                println!("next: --after {cursor}");
             }
             Ok(())
         }
@@ -492,7 +508,10 @@ fn run(args: &[String]) -> Result<(), CliError> {
             }
             Ok(())
         }
-        _ => unreachable!("command validated before dispatch"),
+        _ => Err(CliError::Usage(format!(
+            "unknown command: {}\n{USAGE}",
+            args.join(" ")
+        ))),
     }
 }
 

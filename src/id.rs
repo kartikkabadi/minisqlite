@@ -8,7 +8,7 @@ use std::str::FromStr;
 /// restarts collide only with negligible probability. The zero ID is reserved as a sentinel
 /// and is not valid as a transaction, event, or job ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Id(pub [u8; 16]);
+pub struct Id([u8; 16]);
 
 impl Id {
     /// The zero ID. Not valid as a transaction, event, or job ID, but useful as a sentinel.
