@@ -55,11 +55,17 @@ const EXPORT_PAGE_SIZE: usize = 512;
 /// destination unless `overwrite` is set. The resulting file's integrity is verified
 /// before returning.
 pub(crate) fn backup(conn: &Connection, dest_path: &Path, overwrite: bool) -> Result<(), Error> {
-    if dest_path.exists() && !overwrite {
-        return Err(Error::Validation(ValidationError(format!(
-            "backup destination {} already exists (pass overwrite to replace it)",
-            dest_path.display()
-        ))));
+    if dest_path.exists() {
+        if !overwrite {
+            return Err(Error::Validation(ValidationError(format!(
+                "backup destination {} already exists (pass overwrite to replace it)",
+                dest_path.display()
+            ))));
+        }
+        // Remove the old file so overwrite works even when the destination is
+        // not a SQLite database.
+        std::fs::remove_file(dest_path)
+            .map_err(|e| StorageError::Io(format!("remove {}: {e}", dest_path.display())))?;
     }
     let mut dest = Connection::open(dest_path).map_err(StorageError::from_sqlite)?;
     {
