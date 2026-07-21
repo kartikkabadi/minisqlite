@@ -161,3 +161,45 @@ fn missing_db_flag_and_unknown_command_fail() {
     let output = run_cli(&["bogus", "--db", db.to_str().unwrap()]);
     assert!(!output.status.success());
 }
+
+#[test]
+fn nonexistent_db_path_errors_without_creating_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("typo.db");
+    let output = run_cli(&["stats", "--db", db.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
+    assert!(!db.exists(), "inspection command created a database file");
+}
+
+#[test]
+fn verify_and_backup_error_on_nonexistent_db_without_creating_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("typo.db");
+    let dest = dir.path().join("backup.db");
+
+    let output = run_cli(&["verify", "--db", db.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
+    assert!(!db.exists(), "verify created a database file");
+
+    let output = run_cli(&[
+        "backup",
+        dest.to_str().unwrap(),
+        "--db",
+        db.to_str().unwrap(),
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not exist"));
+    assert!(!db.exists(), "backup created a database file");
+    assert!(!dest.exists(), "backup of a missing database wrote a file");
+}
+
+#[test]
+fn unknown_command_creates_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let output = run_cli(&["frobnicate", "--db", db.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(!db.exists(), "unknown command created a database file");
+}

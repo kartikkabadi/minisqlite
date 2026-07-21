@@ -110,10 +110,11 @@ impl ProjectionPatch {
                 }
                 ProjectionMutation::Clear => seen.clear(),
                 ProjectionMutation::Replace { entries } => {
+                    // The replaced keys become the new baseline: a later Put or
+                    // Delete of one of them within the same patch is contradictory.
                     seen.clear();
-                    let mut replace_keys: BTreeSet<&[u8]> = BTreeSet::new();
                     for entry in entries {
-                        if !replace_keys.insert(entry.key.as_slice()) {
+                        if !seen.insert(entry.key.as_slice()) {
                             return Err(ValidationError(format!(
                                 "projection {} replace has contradictory duplicate key",
                                 self.projection
@@ -153,6 +154,18 @@ mod tests {
             .clear()
             .put("k", "v2");
         assert!(patch.validate().is_ok());
+    }
+
+    #[test]
+    fn put_or_delete_of_a_replaced_key_is_rejected() {
+        let put_after = ProjectionPatch::new("p", 0)
+            .replace(vec![ProjectionEntry::new("k", "v1")])
+            .put("k", "v2");
+        assert!(put_after.validate().is_err());
+        let delete_after = ProjectionPatch::new("p", 0)
+            .replace(vec![ProjectionEntry::new("k", "v1")])
+            .delete("k");
+        assert!(delete_after.validate().is_err());
     }
 
     #[test]
