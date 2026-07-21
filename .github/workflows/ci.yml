@@ -39,3 +39,19 @@ jobs:
         run: cargo test --doc --all-features
       - name: package
         run: cargo package
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+          cache: false
+      - name: fuzz fmt
+        run: cargo fmt --all -- --check
+        working-directory: fuzz
+      - name: fuzz check
+        run: cargo check
+        working-directory: fuzz
