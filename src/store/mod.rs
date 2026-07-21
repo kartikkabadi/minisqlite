@@ -172,6 +172,15 @@ impl ControlPlaneStore {
             .ok_or_else(|| StorageError::Io("writer connection unavailable".into()))
     }
 
+    /// Run a read on a pooled read-only connection, returning the connection to
+    /// the pool afterwards.
+    fn with_reader<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+        let conn = self.readers.take()?;
+        let result = f(&conn);
+        self.readers.put(conn);
+        result
+    }
+
     // ----- transactions -----
 
     /// Atomically commit a batch of events, projection patches, and job operations.
@@ -205,14 +214,12 @@ impl ControlPlaneStore {
 
     /// Events with a global sequence strictly greater than `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
-        let conn = self.readers.get()?;
-        events::events_after(&conn, after, limit).map_err(Error::from)
+        self.with_reader(|conn| events::events_after(conn, after, limit).map_err(Error::from))
     }
 
     /// The most recent `limit` events, oldest first.
     pub fn last_events(&self, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
-        let conn = self.readers.get()?;
-        events::last_events(&conn, limit).map_err(Error::from)
+        self.with_reader(|conn| events::last_events(conn, limit).map_err(Error::from))
     }
 
     /// Events for one stream with a stream version of at least `from_version`, oldest
@@ -223,34 +230,31 @@ impl ControlPlaneStore {
         from_version: u64,
         limit: usize,
     ) -> Result<Vec<PersistedEvent>, Error> {
-        let conn = self.readers.get()?;
-        events::stream_events(&conn, stream_id, from_version, limit).map_err(Error::from)
+        self.with_reader(|conn| {
+            events::stream_events(conn, stream_id, from_version, limit).map_err(Error::from)
+        })
     }
 
     /// Look up one event by its ID.
     pub fn get_event(&self, event_id: Id) -> Result<Option<PersistedEvent>, Error> {
-        let conn = self.readers.get()?;
-        events::get_event(&conn, event_id).map_err(Error::from)
+        self.with_reader(|conn| events::get_event(conn, event_id).map_err(Error::from))
     }
 
     /// The current durable version of a stream (0 when the stream does not exist).
     pub fn stream_version(&self, stream_id: &str) -> Result<u64, Error> {
-        let conn = self.readers.get()?;
-        events::stream_version(&conn, stream_id).map_err(Error::from)
+        self.with_reader(|conn| events::stream_version(conn, stream_id).map_err(Error::from))
     }
 
     // ----- projections -----
 
     /// The current version of a projection (0 when it does not exist).
     pub fn projection_version(&self, projection: &str) -> Result<u64, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_version(&conn, projection)
+        self.with_reader(|conn| projections::projection_version(conn, projection))
     }
 
     /// Get one projection entry by key.
     pub fn projection_get(&self, projection: &str, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_get(&conn, projection, key)
+        self.with_reader(|conn| projections::projection_get(conn, projection, key))
     }
 
     /// Scan entries with keys starting with `prefix`, in key order.
@@ -260,8 +264,9 @@ impl ControlPlaneStore {
         prefix: &[u8],
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_scan_prefix(&conn, projection, prefix, limit)
+        self.with_reader(|conn| {
+            projections::projection_scan_prefix(conn, projection, prefix, limit)
+        })
     }
 
     /// Paginated prefix scan: entries with keys starting with `prefix` and, when
@@ -273,8 +278,9 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_scan_prefix_page(&conn, projection, prefix, after, limit)
+        self.with_reader(|conn| {
+            projections::projection_scan_prefix_page(conn, projection, prefix, after, limit)
+        })
     }
 
     /// Range scan: entries with `start <= key < end` (either bound optional) and,
@@ -287,20 +293,19 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_scan_range(&conn, projection, start, end, after, limit)
+        self.with_reader(|conn| {
+            projections::projection_scan_range(conn, projection, start, end, after, limit)
+        })
     }
 
     /// List all projections and their versions.
     pub fn projections_list(&self) -> Result<Vec<(String, u64)>, Error> {
-        let conn = self.readers.get()?;
-        projections::projections_list(&conn)
+        self.with_reader(projections::projections_list)
     }
 
     /// The number of entries in a projection (0 when it does not exist).
     pub fn projection_entry_count(&self, projection: &str) -> Result<u64, Error> {
-        let conn = self.readers.get()?;
-        projections::projection_entry_count(&conn, projection)
+        self.with_reader(|conn| projections::projection_entry_count(conn, projection))
     }
 
     // ----- jobs -----
@@ -358,8 +363,7 @@ impl ControlPlaneStore {
 
     /// Look up one job by its ID.
     pub fn job(&self, job_id: Id) -> Result<Option<JobInfo>, Error> {
-        let conn = self.readers.get()?;
-        jobs::get_job(&conn, job_id)
+        self.with_reader(|conn| jobs::get_job(conn, job_id))
     }
 
     /// List jobs, optionally filtered by queue and state, in enqueue order.
@@ -369,8 +373,7 @@ impl ControlPlaneStore {
         state: Option<JobState>,
         limit: usize,
     ) -> Result<Vec<JobInfo>, Error> {
-        let conn = self.readers.get()?;
-        jobs::list_jobs(&conn, queue, state, limit)
+        self.with_reader(|conn| jobs::list_jobs(conn, queue, state, limit))
     }
 
     /// List one page of jobs after a pagination cursor (an `enqueue_sequence`
@@ -383,8 +386,7 @@ impl ControlPlaneStore {
         after_sequence: u64,
         limit: usize,
     ) -> Result<(Vec<JobInfo>, u64), Error> {
-        let conn = self.readers.get()?;
-        jobs::list_jobs_page(&conn, queue, state, after_sequence, limit)
+        self.with_reader(|conn| jobs::list_jobs_page(conn, queue, state, after_sequence, limit))
     }
 
     // ----- ops -----
@@ -403,14 +405,12 @@ impl ControlPlaneStore {
 
     /// Run integrity, foreign-key, migration-checksum, and semantic checks.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
-        let conn = self.readers.get()?;
-        ops::verify(&conn)
+        self.with_reader(ops::verify)
     }
 
     /// Collect store-wide statistics.
     pub fn stats(&self) -> Result<StoreStats, Error> {
-        let conn = self.readers.get()?;
-        ops::stats(&conn, &self.path)
+        self.with_reader(|conn| ops::stats(conn, &self.path))
     }
 
     /// Produce a redacted diagnostic export as JSON Lines text.
@@ -421,14 +421,12 @@ impl ControlPlaneStore {
     /// Produce a diagnostic export, optionally including payload bytes. Lease
     /// tokens are never included.
     pub fn diagnostic_export_with(&self, include_payloads: bool) -> Result<String, Error> {
-        let conn = self.readers.get()?;
-        ops::diagnostic_export(&conn, &self.path, include_payloads)
+        self.with_reader(|conn| ops::diagnostic_export(conn, &self.path, include_payloads))
     }
 
     /// Report the status of every known migration against the database.
     pub fn migrations_status(&self) -> Result<Vec<MigrationStatus>, Error> {
-        let conn = self.readers.get()?;
-        migrations::status(&conn).map_err(Error::from)
+        self.with_reader(|conn| migrations::status(conn).map_err(Error::from))
     }
 }
 

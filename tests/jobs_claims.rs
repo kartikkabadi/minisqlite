@@ -382,7 +382,10 @@ fn lease_at_exact_expiry_is_current_everywhere() {
     assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Leased);
 
     // Recovery at now == expiry still returns the lease as current.
-    match store.recover_claim(claims.transaction_id(), expiry).unwrap() {
+    match store
+        .recover_claim(claims.transaction_id(), expiry)
+        .unwrap()
+    {
         ClaimRecovery::Committed(recovered) => {
             assert_eq!(recovered.jobs().len(), 1);
             assert!(recovered.stale_jobs().is_empty());

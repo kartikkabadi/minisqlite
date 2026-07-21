@@ -3,7 +3,6 @@
 //! Reads run on pooled read-only connections so they never contend with the
 //! single writer for its mutex, and WAL mode lets them proceed during writes.
 
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -31,18 +30,21 @@ impl ReadPool {
         }
     }
 
-    /// Borrow a read-only connection, opening a new one when the pool is empty.
-    /// The connection returns to the pool on drop (up to `max_idle` retained).
-    pub(crate) fn get(&self) -> Result<PooledReader<'_>, StorageError> {
-        let reused = self.lock().pop();
-        let conn = match reused {
-            Some(conn) => conn,
-            None => connection::open_reader(&self.path)?,
-        };
-        Ok(PooledReader {
-            conn: Some(conn),
-            pool: self,
-        })
+    /// Take a read-only connection out of the pool, opening a new one when the
+    /// pool is empty. Return it with [`ReadPool::put`] when done.
+    pub(crate) fn take(&self) -> Result<Connection, StorageError> {
+        match self.lock().pop() {
+            Some(conn) => Ok(conn),
+            None => connection::open_reader(&self.path),
+        }
+    }
+
+    /// Return a connection to the pool (up to `max_idle` retained).
+    pub(crate) fn put(&self, conn: Connection) {
+        let mut idle = self.lock();
+        if idle.len() < self.max_idle {
+            idle.push(conn);
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Connection>> {
@@ -50,33 +52,6 @@ impl ReadPool {
         match self.idle.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-}
-
-/// A read-only connection borrowed from a [`ReadPool`].
-pub(crate) struct PooledReader<'a> {
-    conn: Option<Connection>,
-    pool: &'a ReadPool,
-}
-
-impl Deref for PooledReader<'_> {
-    type Target = Connection;
-
-    fn deref(&self) -> &Connection {
-        self.conn
-            .as_ref()
-            .expect("connection present until dropped")
-    }
-}
-
-impl Drop for PooledReader<'_> {
-    fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            let mut idle = self.pool.lock();
-            if idle.len() < self.pool.max_idle {
-                idle.push(conn);
-            }
         }
     }
 }
@@ -97,15 +72,16 @@ mod tests {
         let path = dir.path().join("db");
         create_db(&path);
         let pool = ReadPool::new(path, 2);
-        {
-            let a = pool.get().unwrap();
-            let b = pool.get().unwrap();
-            let c = pool.get().unwrap();
-            for conn in [&a, &b, &c] {
-                let x: i64 = conn.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
-                assert_eq!(x, 7);
-            }
+        let a = pool.take().unwrap();
+        let b = pool.take().unwrap();
+        let c = pool.take().unwrap();
+        for conn in [&a, &b, &c] {
+            let x: i64 = conn.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+            assert_eq!(x, 7);
         }
+        pool.put(a);
+        pool.put(b);
+        pool.put(c);
         assert_eq!(pool.lock().len(), 2); // third connection was discarded
     }
 
@@ -115,14 +91,15 @@ mod tests {
         let path = dir.path().join("db");
         create_db(&path);
         let pool = ReadPool::new(path, 1);
-        let reader = pool.get().unwrap();
+        let reader = pool.take().unwrap();
         assert!(reader.execute("INSERT INTO t VALUES (8)", []).is_err());
+        pool.put(reader);
     }
 
     #[test]
     fn missing_database_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let pool = ReadPool::new(dir.path().join("missing"), 1);
-        assert!(pool.get().is_err());
+        assert!(pool.take().is_err());
     }
 }

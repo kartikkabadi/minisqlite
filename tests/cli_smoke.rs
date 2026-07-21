@@ -397,14 +397,7 @@ fn jobs_list_pages_with_after_cursor() {
     drop(store);
 
     // A full page prints a next-cursor hint.
-    let output = run_cli(&[
-        "jobs",
-        "list",
-        "--limit",
-        "2",
-        "--db",
-        db.to_str().unwrap(),
-    ]);
+    let output = run_cli(&["jobs", "list", "--limit", "2", "--db", db.to_str().unwrap()]);
     assert!(output.status.success());
     let out = stdout(&output);
     assert_eq!(out.lines().count(), 3);
