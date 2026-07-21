@@ -480,36 +480,20 @@ fn fmt_mib(bytes: u64) -> String {
 }
 
 /// Print the §1 DB-size and WAL-state fields for one workload group: on-disk
-/// DB file size, `-wal` file size, and checkpoint state from a passive
-/// `PRAGMA wal_checkpoint` on a separate connection.
+/// DB file size and `-wal` file size, read from file metadata only so state
+/// reporting never mutates the fixture between measurements.
 fn print_db_state(context: &str, path: &Path) {
     let db_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal_path = PathBuf::from(format!("{}-wal", path.display()));
     let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    let checkpoint = rusqlite::Connection::open(path)
-        .and_then(|conn| {
-            conn.busy_timeout(Duration::from_millis(5_000))?;
-            conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-        })
-        .map(|(busy, log, ckpt)| {
-            format!("passive checkpoint: busy={busy} wal_frames={log} checkpointed={ckpt}")
-        })
-        .unwrap_or_else(|e| format!("checkpoint state unavailable: {e}"));
     println!(
-        "    db state [{context}]: db={} wal={} ({checkpoint})",
+        "    db state [{context}]: db={} wal={}",
         fmt_mib(db_bytes),
         fmt_mib(wal_bytes),
     );
     json_entry(&format!(
-        "{{\"type\":\"db_state\",\"context\":\"{}\",\"db_bytes\":{db_bytes},\"wal_bytes\":{wal_bytes},\"checkpoint\":\"{}\"}}",
+        "{{\"type\":\"db_state\",\"context\":\"{}\",\"db_bytes\":{db_bytes},\"wal_bytes\":{wal_bytes}}}",
         json_escape(context),
-        json_escape(&checkpoint),
     ));
 }
 
