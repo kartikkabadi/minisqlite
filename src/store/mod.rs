@@ -10,6 +10,7 @@ pub(crate) mod jobs;
 pub(crate) mod migrations;
 pub(crate) mod ops;
 pub(crate) mod projections;
+pub(crate) mod read_pool;
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -24,6 +25,7 @@ use crate::jobs::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, JobInfo, JobState, LeaseExtensionReceipt,
 };
 use crate::projection::ProjectionEntry;
+use crate::store::read_pool::ReadPool;
 use crate::transaction::{CommitBatch, CommitReceipt, TransactionRecovery};
 
 pub use migrations::MigrationStatus;
@@ -35,6 +37,7 @@ pub struct StoreBuilder {
     path: PathBuf,
     durability: Durability,
     limits: Limits,
+    read_pool_size: usize,
 }
 
 impl StoreBuilder {
@@ -44,6 +47,7 @@ impl StoreBuilder {
             path: path.into(),
             durability: Durability::default(),
             limits: Limits::default(),
+            read_pool_size: read_pool::DEFAULT_READ_POOL_SIZE,
         }
     }
 
@@ -59,6 +63,13 @@ impl StoreBuilder {
         self
     }
 
+    /// Set the maximum number of idle read-only connections retained by the
+    /// read pool (plan §7.1). Reads never contend with the single writer.
+    pub fn read_pool_size(mut self, size: usize) -> Self {
+        self.read_pool_size = size;
+        self
+    }
+
     /// Open (or create) the store, applying pragmas and any pending migrations.
     pub fn open(self) -> Result<ControlPlaneStore, Error> {
         self.limits.validate()?;
@@ -66,6 +77,7 @@ impl StoreBuilder {
         migrations::migrate(&mut conn)?;
         Ok(ControlPlaneStore {
             writer: Mutex::new(Some(conn)),
+            readers: ReadPool::new(self.path.clone(), self.read_pool_size),
             path: self.path,
             limits: self.limits,
             durability: self.durability,
@@ -81,6 +93,7 @@ impl StoreBuilder {
         migrations::require_current(&conn)?;
         Ok(ControlPlaneStore {
             writer: Mutex::new(Some(conn)),
+            readers: ReadPool::new(self.path.clone(), self.read_pool_size),
             path: self.path,
             limits: self.limits,
             durability: self.durability,
@@ -97,6 +110,8 @@ pub struct ControlPlaneStore {
     /// The single writer connection. `None` means the connection was poisoned by an
     /// indeterminate COMMIT outcome (plan §7.4) and must be reopened before reuse.
     writer: Mutex<Option<Connection>>,
+    /// Pool of read-only connections used by all read APIs (plan §7.1).
+    readers: ReadPool,
     path: PathBuf,
     limits: Limits,
     durability: Durability,
@@ -190,16 +205,14 @@ impl ControlPlaneStore {
 
     /// Events with a global sequence strictly greater than `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        events::events_after(conn, after, limit).map_err(Error::from)
+        let conn = self.readers.get()?;
+        events::events_after(&conn, after, limit).map_err(Error::from)
     }
 
     /// The most recent `limit` events, oldest first.
     pub fn last_events(&self, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        events::last_events(conn, limit).map_err(Error::from)
+        let conn = self.readers.get()?;
+        events::last_events(&conn, limit).map_err(Error::from)
     }
 
     /// Events for one stream with a stream version of at least `from_version`, oldest
@@ -210,39 +223,34 @@ impl ControlPlaneStore {
         from_version: u64,
         limit: usize,
     ) -> Result<Vec<PersistedEvent>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        events::stream_events(conn, stream_id, from_version, limit).map_err(Error::from)
+        let conn = self.readers.get()?;
+        events::stream_events(&conn, stream_id, from_version, limit).map_err(Error::from)
     }
 
     /// Look up one event by its ID.
     pub fn get_event(&self, event_id: Id) -> Result<Option<PersistedEvent>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        events::get_event(conn, event_id).map_err(Error::from)
+        let conn = self.readers.get()?;
+        events::get_event(&conn, event_id).map_err(Error::from)
     }
 
     /// The current durable version of a stream (0 when the stream does not exist).
     pub fn stream_version(&self, stream_id: &str) -> Result<u64, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        events::stream_version(conn, stream_id).map_err(Error::from)
+        let conn = self.readers.get()?;
+        events::stream_version(&conn, stream_id).map_err(Error::from)
     }
 
     // ----- projections -----
 
     /// The current version of a projection (0 when it does not exist).
     pub fn projection_version(&self, projection: &str) -> Result<u64, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_version(conn, projection)
+        let conn = self.readers.get()?;
+        projections::projection_version(&conn, projection)
     }
 
     /// Get one projection entry by key.
     pub fn projection_get(&self, projection: &str, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_get(conn, projection, key)
+        let conn = self.readers.get()?;
+        projections::projection_get(&conn, projection, key)
     }
 
     /// Scan entries with keys starting with `prefix`, in key order.
@@ -252,9 +260,8 @@ impl ControlPlaneStore {
         prefix: &[u8],
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_scan_prefix(conn, projection, prefix, limit)
+        let conn = self.readers.get()?;
+        projections::projection_scan_prefix(&conn, projection, prefix, limit)
     }
 
     /// Paginated prefix scan: entries with keys starting with `prefix` and, when
@@ -266,9 +273,8 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_scan_prefix_page(conn, projection, prefix, after, limit)
+        let conn = self.readers.get()?;
+        projections::projection_scan_prefix_page(&conn, projection, prefix, after, limit)
     }
 
     /// Range scan: entries with `start <= key < end` (either bound optional) and,
@@ -281,23 +287,20 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_scan_range(conn, projection, start, end, after, limit)
+        let conn = self.readers.get()?;
+        projections::projection_scan_range(&conn, projection, start, end, after, limit)
     }
 
     /// List all projections and their versions.
     pub fn projections_list(&self) -> Result<Vec<(String, u64)>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projections_list(conn)
+        let conn = self.readers.get()?;
+        projections::projections_list(&conn)
     }
 
     /// The number of entries in a projection (0 when it does not exist).
     pub fn projection_entry_count(&self, projection: &str) -> Result<u64, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        projections::projection_entry_count(conn, projection)
+        let conn = self.readers.get()?;
+        projections::projection_entry_count(&conn, projection)
     }
 
     // ----- jobs -----
@@ -347,9 +350,8 @@ impl ControlPlaneStore {
 
     /// Look up one job by its ID.
     pub fn job(&self, job_id: Id) -> Result<Option<JobInfo>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        jobs::get_job(conn, job_id)
+        let conn = self.readers.get()?;
+        jobs::get_job(&conn, job_id)
     }
 
     /// List jobs, optionally filtered by queue and state, in enqueue order.
@@ -359,9 +361,8 @@ impl ControlPlaneStore {
         state: Option<JobState>,
         limit: usize,
     ) -> Result<Vec<JobInfo>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        jobs::list_jobs(conn, queue, state, limit)
+        let conn = self.readers.get()?;
+        jobs::list_jobs(&conn, queue, state, limit)
     }
 
     // ----- ops -----
@@ -369,23 +370,21 @@ impl ControlPlaneStore {
     /// Copy the database to `dest_path` using the SQLite backup API. Refuses an
     /// existing destination unless `overwrite` is set.
     pub fn backup(&self, dest_path: impl AsRef<Path>, overwrite: bool) -> Result<(), Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        ops::backup(conn, dest_path.as_ref(), overwrite)
+        // Backup reads through a pooled reader so a long copy never blocks writes.
+        let conn = self.readers.get()?;
+        ops::backup(&conn, dest_path.as_ref(), overwrite)
     }
 
     /// Run integrity, foreign-key, migration-checksum, and semantic checks.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        ops::verify(conn)
+        let conn = self.readers.get()?;
+        ops::verify(&conn)
     }
 
     /// Collect store-wide statistics.
     pub fn stats(&self) -> Result<StoreStats, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        ops::stats(conn, &self.path)
+        let conn = self.readers.get()?;
+        ops::stats(&conn, &self.path)
     }
 
     /// Produce a redacted diagnostic export as JSON Lines text.
@@ -396,16 +395,14 @@ impl ControlPlaneStore {
     /// Produce a diagnostic export, optionally including payload bytes. Lease
     /// tokens are never included.
     pub fn diagnostic_export_with(&self, include_payloads: bool) -> Result<String, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        ops::diagnostic_export(conn, &self.path, include_payloads)
+        let conn = self.readers.get()?;
+        ops::diagnostic_export(&conn, &self.path, include_payloads)
     }
 
     /// Report the status of every known migration against the database.
     pub fn migrations_status(&self) -> Result<Vec<MigrationStatus>, Error> {
-        let mut guard = self.writer();
-        let conn = self.connection(&mut guard)?;
-        migrations::status(conn).map_err(Error::from)
+        let conn = self.readers.get()?;
+        migrations::status(&conn).map_err(Error::from)
     }
 }
 
