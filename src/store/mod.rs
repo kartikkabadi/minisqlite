@@ -370,9 +370,13 @@ impl ControlPlaneStore {
     /// Copy the database to `dest_path` using the SQLite backup API. Refuses an
     /// existing destination unless `overwrite` is set.
     pub fn backup(&self, dest_path: impl AsRef<Path>, overwrite: bool) -> Result<(), Error> {
-        // Backup reads through a pooled reader so a long copy never blocks writes.
-        let conn = self.readers.get()?;
-        ops::backup(&conn, dest_path.as_ref(), overwrite)
+        // Backup runs on the writer connection: SQLite restarts a backup whenever
+        // another connection writes to the source, so a reader-driven backup can
+        // livelock under sustained commits. Holding the writer stalls writes for
+        // the duration of the copy and guarantees completion.
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        ops::backup(conn, dest_path.as_ref(), overwrite)
     }
 
     /// Run integrity, foreign-key, migration-checksum, and semantic checks.
