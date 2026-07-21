@@ -12,6 +12,8 @@
 //! - Missing jobs and stale lease tokens in commit operations are `ValidationError`s;
 //!   invalid state transitions are `Conflict::JobTransition`.
 
+use std::sync::LazyLock;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::config::EffectMode;
@@ -30,6 +32,28 @@ const DEFAULT_RETRY_DELAY_MS: i64 = 30_000;
 
 /// Maximum expired leases repaired per claim call.
 const MAINTENANCE_LIMIT: usize = 64;
+
+/// Comma-separated terminal state codes for SQL `IN` clauses, derived from
+/// [`JobState::encode`] so the encoding lives in one place.
+pub(crate) static TERMINAL_STATES_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}, {}, {}",
+        JobState::Succeeded.encode(),
+        JobState::Dead.encode(),
+        JobState::Cancelled.encode()
+    )
+});
+
+/// Comma-separated nonterminal state codes for SQL `IN` clauses.
+pub(crate) static ACTIVE_STATES_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}, {}, {}, {}",
+        JobState::Pending.encode(),
+        JobState::Leased.encode(),
+        JobState::RetryWait.encode(),
+        JobState::Uncertain.encode()
+    )
+});
 
 const JOB_COLUMNS: &str = "job_id, enqueue_sequence, queue, partition_key, payload, \
      not_before_ms, max_attempts, effect_mode, idempotency_key, state, attempt, \
@@ -145,7 +169,8 @@ fn load_job(conn: &Connection, job_id: Id) -> Result<Option<JobRow>, StorageErro
             [job_id.as_bytes().as_slice()],
             row_to_job,
         )
-        .optional()?;
+        .optional()
+        .map_err(StorageError::from_sqlite)?;
     row.transpose()
 }
 
@@ -183,10 +208,14 @@ fn drain_partition_if_empty(
     partition_key: &str,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "DELETE FROM active_partitions WHERE queue = ?1 AND partition_key = ?2 AND NOT EXISTS \
-         (SELECT 1 FROM jobs WHERE queue = ?1 AND partition_key = ?2 AND state < 4)",
+        &format!(
+            "DELETE FROM active_partitions WHERE queue = ?1 AND partition_key = ?2 AND NOT EXISTS \
+             (SELECT 1 FROM jobs WHERE queue = ?1 AND partition_key = ?2 AND state IN ({}))",
+            ACTIVE_STATES_SQL.as_str(),
+        ),
         rusqlite::params![queue, partition_key],
-    )?;
+    )
+    .map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -213,7 +242,8 @@ fn set_terminal(
             error_summary,
             transaction_id.as_bytes().as_slice(),
         ],
-    )?;
+    )
+    .map_err(StorageError::from_sqlite)?;
     drain_partition_if_empty(conn, &job.queue, &job.partition_key)
 }
 
@@ -234,7 +264,8 @@ fn set_nonterminal(
             retry_after_ms,
             transaction_id.as_bytes().as_slice(),
         ],
-    )?;
+    )
+    .map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -254,7 +285,7 @@ pub(crate) fn apply_enqueue(
             [],
             |row| row.get(0),
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     tx.execute(
         "INSERT INTO jobs (job_id, enqueue_sequence, enqueue_transaction_id, queue, \
          partition_key, payload, not_before_ms, max_attempts, effect_mode, idempotency_key, \
@@ -274,13 +305,13 @@ pub(crate) fn apply_enqueue(
             JobState::Pending.encode(),
         ],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
     tx.execute(
         "INSERT OR IGNORE INTO active_partitions (queue, partition_key, first_active_sequence) \
          VALUES (?1, ?2, ?3)",
         rusqlite::params![spec.queue, spec.partition_key, sequence],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -347,7 +378,7 @@ pub(crate) fn apply_fail(
             "UPDATE jobs SET error_summary = ?2 WHERE job_id = ?1",
             rusqlite::params![job.job_id.as_bytes().as_slice(), failure.error_summary],
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     }
     Ok(())
 }
@@ -361,8 +392,11 @@ pub(crate) fn apply_cancel(
 ) -> Result<(), Error> {
     let job = require_job(tx, cancellation.job_id)?;
     ensure_transition(&job, JobState::Cancelled)?;
+    // Spec A5.6: a pending job may be cancelled without a token; cancelling a
+    // leased job requires its current lease token.
     match cancellation.lease_token {
         Some(token) => ensure_lease_token(&job, token)?,
+        None if job.state == JobState::Pending => {}
         None => {
             return Err(ValidationError(format!(
                 "cancelling leased job {} requires its lease token",
@@ -393,8 +427,23 @@ pub(crate) fn apply_resolve(
     let job = require_job(tx, resolution.job_id)?;
     match resolution.resolution {
         Resolution::Retry => {
-            ensure_transition(&job, JobState::Pending)?;
-            set_nonterminal(tx, job.job_id, JobState::Pending, None, transaction_id)?;
+            // A job with no attempts left cannot re-enter Pending: dead-letter it
+            // so max_attempts cannot be exceeded via Uncertain -> Retry.
+            if job.attempt >= job.max_attempts {
+                ensure_transition(&job, JobState::Dead)?;
+                set_terminal(
+                    tx,
+                    &job,
+                    JobState::Dead,
+                    now_ms,
+                    transaction_id,
+                    None,
+                    Some("retry resolution exhausted max_attempts"),
+                )?;
+            } else {
+                ensure_transition(&job, JobState::Pending)?;
+                set_nonterminal(tx, job.job_id, JobState::Pending, None, transaction_id)?;
+            }
         }
         Resolution::MarkSucceeded => {
             ensure_transition(&job, JobState::Succeeded)?;
@@ -445,7 +494,6 @@ fn error_to_claim(e: Error) -> ClaimError {
         Error::Storage(s) => ClaimError::Storage(s),
         Error::Validation(v) => ClaimError::Validation(v),
         Error::Conflict(c) => ClaimError::Validation(ValidationError(c.to_string())),
-        Error::Unimplemented(what) => ClaimError::Unimplemented(what),
     }
 }
 
@@ -474,7 +522,7 @@ pub(crate) fn claim_jobs(
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| claim_storage(StorageError::from(e)))?;
+        .map_err(|e| claim_storage(StorageError::from_sqlite(e)))?;
 
     // Phase 1: plan expired-lease maintenance from current state.
     let maintenance = plan_maintenance(&tx, request).map_err(claim_storage)?;
@@ -498,6 +546,7 @@ pub(crate) fn claim_jobs(
     .map_err(claim_storage)?;
 
     for action in &maintenance {
+        ensure_transition(&action.job, action.to).map_err(error_to_claim)?;
         match action.to {
             JobState::Dead => set_terminal(
                 &tx,
@@ -532,7 +581,7 @@ pub(crate) fn claim_jobs(
                 transaction_id.as_bytes().as_slice(),
             ],
         )
-        .map_err(|e| claim_storage(StorageError::from(e)))?;
+        .map_err(|e| claim_storage(StorageError::from_sqlite(e)))?;
         tx.execute(
             "INSERT INTO claim_receipts (transaction_id, job_id, lease_token, attempt, \
              worker_id, lease_expires_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -545,7 +594,7 @@ pub(crate) fn claim_jobs(
                 lease_expires_at_ms,
             ],
         )
-        .map_err(|e| claim_storage(StorageError::from(e)))?;
+        .map_err(|e| claim_storage(StorageError::from_sqlite(e)))?;
         claimed.push(ClaimedJob {
             job_id: lease.job.job_id,
             queue: lease.job.queue.clone(),
@@ -566,14 +615,15 @@ pub(crate) fn claim_jobs(
              ON CONFLICT(queue) DO UPDATE SET last_partition_key = excluded.last_partition_key",
             rusqlite::params![request.queue, partition],
         )
-        .map_err(|e| claim_storage(StorageError::from(e)))?;
+        .map_err(|e| claim_storage(StorageError::from_sqlite(e)))?;
     }
 
     let proposed_jobs: Vec<Id> = claimed.iter().map(|job| job.job_id).collect();
-    tx.commit().map_err(|_| {
+    tx.commit().map_err(|e| {
         ClaimError::Indeterminate(IndeterminateClaim {
             transaction_id,
             proposed_jobs,
+            storage_error: StorageError::from_sqlite(e).to_string(),
         })
     })?;
 
@@ -585,6 +635,7 @@ pub(crate) fn claim_jobs(
         Ok(ClaimOutcome::Committed(CommittedClaims {
             transaction_id,
             jobs: claimed,
+            stale_jobs: Vec::new(),
         }))
     }
 }
@@ -593,22 +644,26 @@ fn plan_maintenance(
     tx: &Transaction<'_>,
     request: &ClaimRequest,
 ) -> Result<Vec<MaintenanceAction>, StorageError> {
-    let mut stmt = tx.prepare(&format!(
-        "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND state = ?2 \
+    let mut stmt = tx
+        .prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND state = ?2 \
          AND lease_expires_at_ms <= ?3 ORDER BY lease_expires_at_ms LIMIT ?4"
-    ))?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            request.queue,
-            JobState::Leased.encode(),
-            request.now_ms,
-            MAINTENANCE_LIMIT as i64,
-        ],
-        row_to_job,
-    )?;
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                request.queue,
+                JobState::Leased.encode(),
+                request.now_ms,
+                MAINTENANCE_LIMIT as i64,
+            ],
+            row_to_job,
+        )
+        .map_err(StorageError::from_sqlite)?;
     let mut actions = Vec::new();
     for row in rows {
-        let job = row??;
+        let job = row.map_err(StorageError::from_sqlite)??;
         let to = match job.effect_mode {
             EffectMode::RequiresReconciliation => JobState::Uncertain,
             EffectMode::ExplicitlyIdempotent => {
@@ -638,18 +693,18 @@ fn plan_leases(
             |row| row.get(0),
         )
         .optional()
-        .map_err(StorageError::from)?
+        .map_err(StorageError::from_sqlite)?
         .flatten();
     let mut stmt = tx
         .prepare(
             "SELECT partition_key FROM active_partitions WHERE queue = ?1 ORDER BY partition_key",
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let partitions = stmt
         .query_map([&request.queue], |row| row.get::<_, String>(0))
-        .map_err(StorageError::from)?
+        .map_err(StorageError::from_sqlite)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let start = match &cursor {
         Some(cursor) => partitions.partition_point(|p| p.as_str() <= cursor.as_str()),
         None => 0,
@@ -665,13 +720,14 @@ fn plan_leases(
             .query_row(
                 &format!(
                     "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND partition_key = ?2 \
-                     AND state < 4 ORDER BY enqueue_sequence LIMIT 1"
+                     AND state IN ({}) ORDER BY enqueue_sequence LIMIT 1",
+                    ACTIVE_STATES_SQL.as_str(),
                 ),
                 rusqlite::params![request.queue, partition],
                 row_to_job,
             )
             .optional()
-            .map_err(StorageError::from)?
+            .map_err(StorageError::from_sqlite)?
             .transpose()?;
         let Some(job) = head else { continue };
         let ready = match job.state {
@@ -700,11 +756,13 @@ fn insert_claim_transaction(
     request: &ClaimRequest,
     operation_count: usize,
 ) -> Result<(), StorageError> {
-    let sequence: i64 = tx.query_row(
-        "SELECT COALESCE(MAX(transaction_sequence), 0) + 1 FROM transactions",
-        [],
-        |row| row.get(0),
-    )?;
+    let sequence: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(transaction_sequence), 0) + 1 FROM transactions",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
     // Claim transactions are never resubmitted by ID, so the digest only needs to be
     // deterministic per request; reuse the migration FNV-1a-128 checksum.
     let digest = crate::store::migrations::checksum(&format!(
@@ -727,7 +785,8 @@ fn insert_claim_transaction(
             digest.as_slice(),
             operation_count as i64,
         ],
-    )?;
+    )
+    .map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -737,11 +796,11 @@ pub(crate) fn extend_lease(
     job_id: Id,
     lease_token: Id,
     new_expiry_ms: i64,
-    _now_ms: i64,
+    now_ms: i64,
 ) -> Result<LeaseExtensionReceipt, LeaseError> {
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let job = load_job(&tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
     if job.state != JobState::Leased {
         return Err(LeaseError::NotLeased {
@@ -753,6 +812,13 @@ pub(crate) fn extend_lease(
         return Err(LeaseError::InvalidToken { job_id });
     }
     let current_ms = job.lease_expires_at_ms.unwrap_or(i64::MIN);
+    if now_ms > current_ms {
+        return Err(LeaseError::Expired {
+            job_id,
+            lease_expires_at_ms: current_ms,
+            now_ms,
+        });
+    }
     if new_expiry_ms <= current_ms {
         return Err(LeaseError::ExpiryNotLater {
             job_id,
@@ -764,8 +830,19 @@ pub(crate) fn extend_lease(
         "UPDATE jobs SET lease_expires_at_ms = ?2 WHERE job_id = ?1",
         rusqlite::params![job_id.as_bytes().as_slice(), new_expiry_ms],
     )
-    .map_err(StorageError::from)?;
-    tx.commit().map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
+    // Keep the claim receipt truthful so `recover_claim` reconstructs the
+    // extended expiry, not the one granted at claim time.
+    tx.execute(
+        "UPDATE claim_receipts SET lease_expires_at_ms = ?3 WHERE job_id = ?1 AND lease_token = ?2",
+        rusqlite::params![
+            job_id.as_bytes().as_slice(),
+            lease_token.as_bytes().as_slice(),
+            new_expiry_ms,
+        ],
+    )
+    .map_err(StorageError::from_sqlite)?;
+    tx.commit().map_err(StorageError::from_sqlite)?;
     Ok(LeaseExtensionReceipt {
         job_id,
         attempt: job.attempt,
@@ -778,15 +855,17 @@ pub(crate) fn extend_lease(
 pub(crate) fn recover_claim(
     conn: &Connection,
     transaction_id: Id,
+    now_ms: i64,
 ) -> Result<ClaimRecovery, RecoveryError> {
     let mut stmt = conn
         .prepare(
             "SELECT r.job_id, r.lease_token, r.attempt, r.worker_id, r.lease_expires_at_ms, \
-             j.queue, j.partition_key, j.payload, j.idempotency_key \
+             j.queue, j.partition_key, j.payload, j.idempotency_key, \
+             j.state, j.lease_token, j.lease_expires_at_ms \
              FROM claim_receipts r JOIN jobs j ON j.job_id = r.job_id \
              WHERE r.transaction_id = ?1 ORDER BY r.job_id",
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map([transaction_id.as_bytes().as_slice()], |row| {
             let job_id: Vec<u8> = row.get(0)?;
@@ -798,7 +877,31 @@ pub(crate) fn recover_claim(
             let partition_key: String = row.get(6)?;
             let payload: Vec<u8> = row.get(7)?;
             let idempotency_key: Option<String> = row.get(8)?;
+            let current_state: i64 = row.get(9)?;
+            let current_token: Option<Vec<u8>> = row.get(10)?;
+            let current_expiry: Option<i64> = row.get(11)?;
             Ok((
+                (
+                    job_id,
+                    lease_token,
+                    attempt,
+                    worker_id,
+                    lease_expires_at_ms,
+                    queue,
+                    partition_key,
+                    payload,
+                    idempotency_key,
+                ),
+                (current_state, current_token, current_expiry),
+            ))
+        })
+        .map_err(StorageError::from_sqlite)?;
+    let mut jobs = Vec::new();
+    let mut stale_jobs = Vec::new();
+    let mut any_receipt = false;
+    for row in rows {
+        let (
+            (
                 job_id,
                 lease_token,
                 attempt,
@@ -808,38 +911,38 @@ pub(crate) fn recover_claim(
                 partition_key,
                 payload,
                 idempotency_key,
-            ))
-        })
-        .map_err(StorageError::from)?;
-    let mut jobs = Vec::new();
-    for row in rows {
-        let (
-            job_id,
-            lease_token,
-            attempt,
-            worker_id,
-            lease_expires_at_ms,
-            queue,
-            partition_key,
-            payload,
-            idempotency_key,
-        ) = row.map_err(StorageError::from)?;
+            ),
+            (current_state, current_token, current_expiry),
+        ) = row.map_err(StorageError::from_sqlite)?;
+        any_receipt = true;
+        let job_id = id_from_blob(job_id)?;
+        let lease_token = id_from_blob(lease_token)?;
+        // A recovered lease is executable only while it is still the job's
+        // current, unexpired lease; anything else risks double execution.
+        let still_current = current_state == JobState::Leased.encode()
+            && opt_id_from_blob(current_token)? == Some(lease_token)
+            && current_expiry.is_some_and(|expiry| expiry >= now_ms);
+        if !still_current {
+            stale_jobs.push(job_id);
+            continue;
+        }
         jobs.push(ClaimedJob {
-            job_id: id_from_blob(job_id)?,
+            job_id,
             queue,
             partition_key,
             payload,
             worker_id,
-            lease_token: id_from_blob(lease_token)?,
+            lease_token,
             attempt: attempt as u32,
             lease_expires_at_ms,
             idempotency_key,
         });
     }
-    if !jobs.is_empty() {
+    if any_receipt {
         return Ok(ClaimRecovery::Committed(CommittedClaims {
             transaction_id,
             jobs,
+            stale_jobs,
         }));
     }
     // No receipts: the claim either never committed, or committed maintenance only.
@@ -850,12 +953,13 @@ pub(crate) fn recover_claim(
             |_| Ok(true),
         )
         .optional()
-        .map_err(StorageError::from)?
+        .map_err(StorageError::from_sqlite)?
         .unwrap_or(false);
     if committed {
-        Ok(ClaimRecovery::Committed(CommittedClaims {
+        // The transaction is durable but leased nothing: maintenance only. Never
+        // report it as an empty grant.
+        Ok(ClaimRecovery::MaintenanceCommitted(MaintenanceReceipt {
             transaction_id,
-            jobs: Vec::new(),
         }))
     } else {
         // SQLite commits are atomic; a missing row means the claim rolled back.
@@ -880,16 +984,16 @@ pub(crate) fn list_jobs(
             "SELECT {JOB_COLUMNS} FROM jobs WHERE (?1 IS NULL OR queue = ?1) \
              AND (?2 IS NULL OR state = ?2) ORDER BY enqueue_sequence LIMIT ?3"
         ))
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map(
             rusqlite::params![queue, state.map(JobState::encode), limit as i64],
             row_to_job,
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let mut jobs = Vec::new();
     for row in rows {
-        let job = row.map_err(StorageError::from)??;
+        let job = row.map_err(StorageError::from_sqlite)??;
         jobs.push(job.into_info());
     }
     Ok(jobs)

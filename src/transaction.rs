@@ -343,22 +343,43 @@ impl Digest {
 }
 
 /// Receipt returned after a successful commit. Carries no physical storage details.
+///
+/// Receipts are only ever constructed by the store, so holding one is proof of a
+/// durable commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitReceipt {
-    pub transaction_id: Id,
-    pub transaction_sequence: u64,
-    pub committed_at_ms: i64,
+    pub(crate) transaction_id: Id,
+    pub(crate) transaction_sequence: u64,
+    pub(crate) committed_at_ms: i64,
+}
+
+impl CommitReceipt {
+    /// The committed transaction's ID.
+    pub fn transaction_id(&self) -> Id {
+        self.transaction_id
+    }
+
+    /// The store-wide monotonic sequence assigned to the transaction.
+    pub fn transaction_sequence(&self) -> u64 {
+        self.transaction_sequence
+    }
+
+    /// The caller-supplied commit timestamp recorded with the transaction.
+    pub fn committed_at_ms(&self) -> i64 {
+        self.committed_at_ms
+    }
 }
 
 /// Result of recovering an indeterminate commit.
+///
+/// SQLite commits are atomic, so recovery against a healthy store always resolves
+/// to a definite outcome; there is no "still indeterminate" state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionRecovery {
     /// The transaction committed durably.
     Committed(CommitReceipt),
     /// The transaction did not commit; it is safe to resubmit.
     Absent,
-    /// The store cannot yet determine the outcome; retry recovery later.
-    StillIndeterminate,
 }
 
 #[cfg(test)]

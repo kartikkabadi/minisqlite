@@ -44,6 +44,89 @@ fn verify_reports_ok_on_empty_store() {
 }
 
 #[test]
+fn verify_reports_migration_checksum_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    drop(seeded_store(&path));
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE schema_migrations SET checksum = X'00' WHERE version = 1",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // open_existing never migrates, so the mismatch is observable by verify.
+    let store = ControlPlaneStore::open_existing(&path).unwrap();
+    let report = store.verify().unwrap();
+    assert!(report
+        .findings
+        .iter()
+        .any(|f| f.check == "migration_checksums"));
+}
+
+#[test]
+fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let store = ControlPlaneStore::open(&path).unwrap();
+    store
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    store
+        .claim_jobs(&minisqlite::ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: 2_000,
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE jobs SET lease_token = NULL", [])
+        .unwrap();
+    conn.execute("DELETE FROM jobs", []).unwrap();
+    drop(conn);
+
+    let store = ControlPlaneStore::open_existing(&path).unwrap();
+    let report = store.verify().unwrap();
+    assert!(report
+        .findings
+        .iter()
+        .any(|f| f.check == "claim_receipts" && f.detail.contains("missing job")));
+
+    // Rebuild just the lease-field corruption for the leased_jobs check.
+    let dir2 = tempfile::tempdir().unwrap();
+    let path2 = dir2.path().join("db");
+    let store2 = ControlPlaneStore::open(&path2).unwrap();
+    store2
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    store2
+        .claim_jobs(&minisqlite::ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w".into(),
+            now_ms: 2_000,
+            lease_ms: 60_000,
+            limit: 1,
+        })
+        .unwrap();
+    drop(store2);
+    let conn2 = rusqlite::Connection::open(&path2).unwrap();
+    conn2
+        .execute("UPDATE jobs SET lease_token = NULL", [])
+        .unwrap();
+    drop(conn2);
+    let store2 = ControlPlaneStore::open_existing(&path2).unwrap();
+    let report2 = store2.verify().unwrap();
+    assert!(report2.findings.iter().any(|f| f.check == "leased_jobs"));
+}
+
+#[test]
 fn stats_counts_are_correct() {
     let dir = tempfile::tempdir().unwrap();
     let store = seeded_store(&dir.path().join("db"));
