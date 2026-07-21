@@ -48,12 +48,6 @@ impl From<Conflict> for Error {
     }
 }
 
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::Storage(StorageError::from(e))
-    }
-}
-
 /// A failure in the underlying SQLite storage layer or the host filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
@@ -87,8 +81,10 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-impl From<rusqlite::Error> for StorageError {
-    fn from(e: rusqlite::Error) -> Self {
+impl StorageError {
+    /// Crate-private conversion from the underlying SQLite driver error. Kept out
+    /// of the public API so no rusqlite types leak into the crate's contract.
+    pub(crate) fn from_sqlite(e: rusqlite::Error) -> Self {
         StorageError::Sqlite(e.to_string())
     }
 }

@@ -31,7 +31,7 @@ pub(crate) fn apply_projection_patch(
         "INSERT INTO projection_meta (projection, version) VALUES (?1, ?2) ON CONFLICT(projection) DO UPDATE SET version = excluded.version",
         params![patch.projection, patch.new_version as i64],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
     for mutation in &patch.mutations {
         match mutation {
             ProjectionMutation::Put { key, value } => {
@@ -39,14 +39,14 @@ pub(crate) fn apply_projection_patch(
                     "INSERT INTO projection_entries (projection, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(projection, key) DO UPDATE SET value = excluded.value",
                     params![patch.projection, key, value],
                 )
-                .map_err(StorageError::from)?;
+                .map_err(StorageError::from_sqlite)?;
             }
             ProjectionMutation::Delete { key } => {
                 tx.execute(
                     "DELETE FROM projection_entries WHERE projection = ?1 AND key = ?2",
                     params![patch.projection, key],
                 )
-                .map_err(StorageError::from)?;
+                .map_err(StorageError::from_sqlite)?;
             }
             ProjectionMutation::Clear => {
                 clear_entries(tx, &patch.projection)?;
@@ -58,7 +58,7 @@ pub(crate) fn apply_projection_patch(
                         "INSERT INTO projection_entries (projection, key, value) VALUES (?1, ?2, ?3)",
                         params![patch.projection, entry.key, entry.value],
                     )
-                    .map_err(StorageError::from)?;
+                    .map_err(StorageError::from_sqlite)?;
                 }
             }
         }
@@ -71,7 +71,7 @@ fn clear_entries(tx: &Transaction<'_>, projection: &str) -> Result<(), Error> {
         "DELETE FROM projection_entries WHERE projection = ?1",
         [projection],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -83,7 +83,7 @@ fn version_query(conn: &Connection, projection: &str) -> Result<u64, Error> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     Ok(version.unwrap_or(0) as u64)
 }
 
@@ -104,7 +104,7 @@ pub(crate) fn projection_get(
         |row| row.get(0),
     )
     .optional()
-    .map_err(|e| Error::Storage(StorageError::from(e)))
+    .map_err(|e| Error::Storage(StorageError::from_sqlite(e)))
 }
 
 /// The smallest byte string strictly greater than every key starting with
@@ -192,7 +192,7 @@ fn scan(
     args.push(&limit_arg);
     sql.push_str(&format!(" ORDER BY key LIMIT ?{}", args.len()));
 
-    let mut stmt = conn.prepare(&sql).map_err(StorageError::from)?;
+    let mut stmt = conn.prepare(&sql).map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map(args.as_slice(), |row| {
             Ok(ProjectionEntry {
@@ -200,10 +200,10 @@ fn scan(
                 value: row.get(1)?,
             })
         })
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let mut entries = Vec::new();
     for row in rows {
-        entries.push(row.map_err(StorageError::from)?);
+        entries.push(row.map_err(StorageError::from_sqlite)?);
     }
     Ok(entries)
 }
@@ -212,15 +212,15 @@ fn scan(
 pub(crate) fn projections_list(conn: &Connection) -> Result<Vec<(String, u64)>, Error> {
     let mut stmt = conn
         .prepare("SELECT projection, version FROM projection_meta ORDER BY projection")
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
         })
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let mut list = Vec::new();
     for row in rows {
-        list.push(row.map_err(StorageError::from)?);
+        list.push(row.map_err(StorageError::from_sqlite)?);
     }
     Ok(list)
 }
@@ -233,7 +233,7 @@ pub(crate) fn projection_entry_count(conn: &Connection, projection: &str) -> Res
             [projection],
             |row| row.get(0),
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     Ok(count as u64)
 }
 

@@ -18,12 +18,12 @@ pub(crate) fn commit(
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
 
     // Idempotent resubmission: a transaction ID that already committed with the same
     // digest returns the original receipt; a different digest is a hard error.
     if let Some((sequence, committed_at_ms, stored_digest)) =
-        lookup_transaction(&tx, batch.transaction_id).map_err(StorageError::from)?
+        lookup_transaction(&tx, batch.transaction_id).map_err(StorageError::from_sqlite)?
     {
         if stored_digest == digest {
             return Ok(CommitReceipt {
@@ -55,7 +55,7 @@ pub(crate) fn commit(
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(StorageError::from)? as u64;
+        .map_err(StorageError::from_sqlite)? as u64;
 
     tx.execute(
         "INSERT INTO transactions (transaction_id, transaction_sequence, committed_at_ms, correlation_id, metadata, request_digest, operation_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -69,7 +69,7 @@ pub(crate) fn commit(
             batch.operations.len() as i64,
         ],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
 
     for operation in &batch.operations {
         match operation {
@@ -134,7 +134,7 @@ pub(crate) fn commit(
             "INSERT INTO streams (stream_id, current_version) VALUES (?1, ?2) ON CONFLICT(stream_id) DO UPDATE SET current_version = excluded.current_version",
             rusqlite::params![stream_id, *version as i64],
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     }
 
     // Any failure of the COMMIT step itself may or may not have persisted; report
@@ -163,7 +163,7 @@ pub(crate) fn recover_transaction(
             [transaction_id.as_bytes().as_slice()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?;
+        .optional().map_err(StorageError::from_sqlite)?;
     Ok(match row {
         Some((sequence, committed_at_ms)) => TransactionRecovery::Committed(CommitReceipt {
             transaction_id,
@@ -205,7 +205,7 @@ fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, 
             |row| row.get(0),
         )
         .optional()
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     Ok(version.unwrap_or(0) as u64)
 }
 

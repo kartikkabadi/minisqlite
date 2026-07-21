@@ -26,7 +26,7 @@ pub(crate) fn insert_event(
             event.payload,
             event.metadata,
         ],
-    )?;
+    ).map_err(StorageError::from_sqlite)?;
     Ok(())
 }
 
@@ -38,11 +38,13 @@ pub(crate) fn events_after(
 ) -> Result<Vec<PersistedEvent>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT global_sequence, event_id, transaction_id, stream_id, stream_version, event_type, schema_version, occurred_at_ms, causation_id, correlation_id, payload, metadata FROM events WHERE global_sequence > ?1 ORDER BY global_sequence LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![after as i64, limit as i64],
-        row_to_persisted_event,
-    )?;
+    ).map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![after as i64, limit as i64],
+            row_to_persisted_event,
+        )
+        .map_err(StorageError::from_sqlite)?;
     collect(rows)
 }
 
@@ -55,11 +57,13 @@ pub(crate) fn stream_events(
 ) -> Result<Vec<PersistedEvent>, StorageError> {
     let mut stmt = conn.prepare(
         "SELECT global_sequence, event_id, transaction_id, stream_id, stream_version, event_type, schema_version, occurred_at_ms, causation_id, correlation_id, payload, metadata FROM events WHERE stream_id = ?1 AND stream_version >= ?2 ORDER BY stream_version LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        rusqlite::params![stream_id, from_version as i64, limit as i64],
-        row_to_persisted_event,
-    )?;
+    ).map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![stream_id, from_version as i64, limit as i64],
+            row_to_persisted_event,
+        )
+        .map_err(StorageError::from_sqlite)?;
     collect(rows)
 }
 
@@ -74,7 +78,7 @@ pub(crate) fn get_event(
             [event_id.as_bytes().as_slice()],
             row_to_persisted_event,
         )
-        .optional()?;
+        .optional().map_err(StorageError::from_sqlite)?;
     Ok(event)
 }
 
@@ -86,7 +90,8 @@ pub(crate) fn stream_version(conn: &Connection, stream_id: &str) -> Result<u64, 
             [stream_id],
             |row| row.get(0),
         )
-        .optional()?;
+        .optional()
+        .map_err(StorageError::from_sqlite)?;
     Ok(version.unwrap_or(0) as u64)
 }
 
@@ -95,7 +100,7 @@ fn collect(
 ) -> Result<Vec<PersistedEvent>, StorageError> {
     let mut out = Vec::new();
     for row in rows {
-        out.push(row?);
+        out.push(row.map_err(StorageError::from_sqlite)?);
     }
     Ok(out)
 }
