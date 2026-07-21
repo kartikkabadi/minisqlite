@@ -285,7 +285,13 @@ fn run(args: &[String]) -> Result<(), CliError> {
 
     // All other commands are inspection commands: open the existing database
     // without creating it and without migrating it.
-    let store = ControlPlaneStore::open_existing(&parsed.db).map_err(open_error)?;
+    if !std::path::Path::new(&parsed.db).exists() {
+        return Err(CliError::NotFound(format!(
+            "database file {} does not exist",
+            parsed.db
+        )));
+    }
+    let store = ControlPlaneStore::open_existing(&parsed.db).map_err(op_err)?;
 
     match command {
         ("doctor", None) => {
@@ -499,15 +505,6 @@ fn print_event(event: &minisqlite::PersistedEvent) {
         event.stream_version,
         event.event.event_type
     );
-}
-
-fn open_error(e: minisqlite::Error) -> CliError {
-    let message = e.to_string();
-    if message.contains("does not exist") {
-        CliError::NotFound(message)
-    } else {
-        CliError::Op(message)
-    }
 }
 
 fn jobs_resolve(parsed: &Parsed) -> Result<(), CliError> {

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use common::{open_in, temp_dir, Prng};
 use minisqlite::{
-    ClaimOutcome, ClaimRequest, CommitBatch, ControlPlaneStore, Id, JobSpec, JobState, Resolution,
+    ClaimOutcome, ClaimRequest, ClaimedJob, CommitBatch, CommitError, ControlPlaneStore, Id,
+    JobSpec, JobState, Resolution, TransactionRecovery,
 };
 
 fn soak_duration() -> Duration {
@@ -20,6 +21,21 @@ fn soak_duration() -> Duration {
         .and_then(|s| s.parse().ok())
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(3))
+}
+
+/// Acknowledge a claimed job, resolving an indeterminate COMMIT with
+/// `recover_transaction` so the count of successful acks is exact.
+fn ack(store: &ControlPlaneStore, next_id: &AtomicU64, job: &ClaimedJob) -> bool {
+    let txn = Id::from(u128::from(next_id.fetch_add(1, Ordering::Relaxed)));
+    let batch = CommitBatch::new(txn, now_ms()).acknowledge_job(job.job_id, job.lease_token, None);
+    match store.commit(&batch) {
+        Ok(_) => true,
+        Err(CommitError::Indeterminate(_)) => matches!(
+            store.recover_transaction(txn),
+            Ok(TransactionRecovery::Committed(_))
+        ),
+        Err(_) => false,
+    }
 }
 
 fn now_ms() -> i64 {
@@ -95,27 +111,13 @@ fn soak_enqueue_claim_ack_with_crashes_and_backups() {
                                     now_ms() + 500,
                                     now_ms(),
                                 );
-                                let n = next_id.fetch_add(1, Ordering::Relaxed);
-                                if store
-                                    .commit(
-                                        &CommitBatch::new(Id::from(u128::from(n)), now_ms())
-                                            .acknowledge_job(job.job_id, job.lease_token, None),
-                                    )
-                                    .is_ok()
-                                {
+                                if ack(&store, &next_id, &job) {
                                     acked.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                             // Normal completion.
                             _ => {
-                                let n = next_id.fetch_add(1, Ordering::Relaxed);
-                                if store
-                                    .commit(
-                                        &CommitBatch::new(Id::from(u128::from(n)), now_ms())
-                                            .acknowledge_job(job.job_id, job.lease_token, None),
-                                    )
-                                    .is_ok()
-                                {
+                                if ack(&store, &next_id, &job) {
                                     acked.fetch_add(1, Ordering::Relaxed);
                                 }
                             }

@@ -191,6 +191,29 @@ fn stats_counts_are_correct() {
 }
 
 #[test]
+fn stats_report_oldest_uncertain_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = ControlPlaneStore::open(dir.path().join("db")).unwrap();
+    store
+        .commit(&CommitBatch::new(Id::from(1u128), 1_000).enqueue_job(
+            minisqlite::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
+        ))
+        .unwrap();
+    let request = |now_ms| minisqlite::ClaimRequest {
+        queue: "q".into(),
+        worker_id: "w".into(),
+        now_ms,
+        lease_ms: 60_000,
+        limit: 1,
+    };
+    store.claim_jobs(&request(2_000)).unwrap();
+    // Expiry maintenance moves the reconcilable job to Uncertain at 70_000.
+    store.claim_jobs(&request(70_000)).unwrap();
+    let stats = store.stats().unwrap();
+    assert_eq!(stats.oldest_uncertain_job_ms, Some(70_000));
+}
+
+#[test]
 fn diagnostic_export_redacts_payloads_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let store = seeded_store(&dir.path().join("db"));

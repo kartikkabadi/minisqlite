@@ -360,12 +360,15 @@ pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Err
             .optional()
             .map_err(StorageError::from_sqlite)?
             .flatten(),
-        // For uncertain jobs the interesting age is when their lease expired into
-        // uncertainty, which is the lease expiry they carried at that moment.
+        // Uncertain rows carry no lease (it is cleared on the transition), so the
+        // age of an uncertain job is the commit time of the transaction that made
+        // it uncertain.
         oldest_uncertain_job_ms: conn
             .query_row(
                 &format!(
-                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    "SELECT MIN(t.committed_at_ms) FROM jobs j \
+                     JOIN transactions t ON t.transaction_id = j.updated_transaction_id \
+                     WHERE j.state = {}",
                     JobState::Uncertain.encode()
                 ),
                 [],
