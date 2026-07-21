@@ -1,7 +1,8 @@
 //! Synara provider-turn vertical slice, end to end.
 //!
-//! Demonstrates the workflow from `docs/SYNARA_INTEGRATION.md` (phase/synara-design)
-//! using only the public kernel API:
+//! Demonstrates the workflow from `docs/SYNARA_INTEGRATION.md` (currently on the
+//! `phase/synara-design` branch, PR #13, until that merges) using only the public
+//! kernel API:
 //!
 //! 1. thread created -> 2. turn requested -> 3. projection "queued" ->
 //! 4. provider job enqueued (one atomic outbox commit) -> 5. worker claims ->
