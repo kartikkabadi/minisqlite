@@ -193,6 +193,13 @@ impl ControlPlaneStore {
         events::events_after(conn, after, limit).map_err(Error::from)
     }
 
+    /// The most recent `limit` events, oldest first.
+    pub fn last_events(&self, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        events::last_events(conn, limit).map_err(Error::from)
+    }
+
     /// Events for one stream with a stream version of at least `from_version`, oldest
     /// first.
     pub fn stream_events(

@@ -67,6 +67,22 @@ pub(crate) fn stream_events(
     collect(rows)
 }
 
+/// The most recent `limit` events, oldest first.
+pub(crate) fn last_events(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<PersistedEvent>, StorageError> {
+    let mut stmt = conn.prepare(
+        "SELECT global_sequence, event_id, transaction_id, stream_id, stream_version, event_type, schema_version, occurred_at_ms, causation_id, correlation_id, payload, metadata FROM events ORDER BY global_sequence DESC LIMIT ?1",
+    ).map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([limit as i64], row_to_persisted_event)
+        .map_err(StorageError::from_sqlite)?;
+    let mut events = collect(rows)?;
+    events.reverse();
+    Ok(events)
+}
+
 /// Look up one event by its ID.
 pub(crate) fn get_event(
     conn: &Connection,

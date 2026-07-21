@@ -183,12 +183,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         ("events", Some("tail")) => {
             let limit = parsed.limit.unwrap_or(10);
-            // Tail = the last `limit` events in global order.
-            let mut events = store
-                .events_after(0, usize::MAX)
-                .map_err(|e| e.to_string())?;
-            let skip = events.len().saturating_sub(limit);
-            for event in events.drain(skip..) {
+            for event in store.last_events(limit).map_err(|e| e.to_string())? {
                 println!(
                     "{} {} {}@{} {}",
                     event.global_sequence,
