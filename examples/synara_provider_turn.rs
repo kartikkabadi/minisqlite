@@ -1,7 +1,8 @@
 //! Synara provider-turn vertical slice, end to end.
 //!
-//! Demonstrates the workflow from `docs/SYNARA_INTEGRATION.md` (phase/synara-design)
-//! using only the public kernel API:
+//! Demonstrates the workflow from `docs/SYNARA_INTEGRATION.md` (currently on the
+//! `phase/synara-design` branch, PR #13, until that merges) using only the public
+//! kernel API:
 //!
 //! 1. thread created -> 2. turn requested -> 3. projection "queued" ->
 //! 4. provider job enqueued (one atomic outbox commit) -> 5. worker claims ->
@@ -88,6 +89,39 @@ fn request_turn(
     Ok(job_id)
 }
 
+/// Worker heartbeat: durably extend the lease so no other worker can claim the job.
+fn heartbeat(
+    store: &ControlPlaneStore,
+    job: &ClaimedJob,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Must be strictly later than the current expiry (claim lease was now+30s).
+    let now = now_ms();
+    let receipt = store.extend_lease(job.job_id, job.lease_token, now + 60_000, now)?;
+    println!(
+        "[lease]  heartbeat extended lease for {} to now+60s (attempt {})",
+        job.partition_key, receipt.attempt
+    );
+    Ok(())
+}
+
+/// Worker protocol step 4: turn-started event + projection "running", one CommitBatch.
+fn start_turn(
+    store: &ControlPlaneStore,
+    thread_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let stream = format!("thread:{thread_id}");
+    store.commit(
+        &CommitBatch::new(Id::new()?, now_ms())
+            .append_event(event(&stream, "thread.turn-started", r#"{"turn":1}"#)?)
+            .apply_projection_patch(
+                ProjectionPatch::new(THREADS, store.projection_version(THREADS)?)
+                    .put(thread_id, r#"{"status":"running"}"#),
+            ),
+    )?;
+    println!("[commit] thread.turn-started       threads/{thread_id} -> running");
+    Ok(())
+}
+
 /// Step 6: the external provider effect, simulated.
 fn call_provider(job: &ClaimedJob) {
     println!(
@@ -169,6 +203,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = ControlPlaneStore::open(&db)?;
         request_turn(&store, "t-100")?;
         let (_tx, job) = claim_one(&store, "worker-1")?;
+        heartbeat(&store, &job)?;
+        start_turn(&store, "t-100")?;
         call_provider(&job);
         complete_turn(&store, "t-100", &job)?;
         println!(
@@ -202,6 +238,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 claims.len()
             );
             for job in claims {
+                heartbeat(&store, &job)?;
+                start_turn(&store, "t-200")?;
                 call_provider(&job); // exactly once, under the recovered lease
                 complete_turn(&store, "t-200", &job)?;
             }
