@@ -46,7 +46,7 @@ fn enqueue_creates_pending_job() {
     let info = store.job(id).unwrap().unwrap();
     assert_eq!(info.state, JobState::Pending);
     assert_eq!(info.attempt, 0);
-    assert_eq!(info.spec.payload, b"x".to_vec());
+    assert_eq!(info.spec.payload(), b"x".to_vec());
 }
 
 #[test]
@@ -175,18 +175,33 @@ fn cancel_leased_job_without_token_is_rejected() {
 }
 
 #[test]
-fn cancel_pending_job_is_invalid_transition() {
+fn cancel_pending_job_without_token_succeeds() {
     let (_dir, store) = store();
     let id = Id::from(1u128);
     enqueue(&store, JobSpec::reconcilable(id, "q", "p", vec![]));
-    let err = store
+    store
         .commit(&CommitBatch::new(txid(), 3_000).cancel_job(id, None))
+        .unwrap();
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn cancel_retry_wait_job_is_invalid_transition() {
+    let (_dir, store) = store();
+    let id = Id::from(1u128);
+    enqueue(&store, JobSpec::reconcilable(id, "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", 2_000);
+    store
+        .commit(&CommitBatch::new(txid(), 3_000).fail_job(id, claimed.lease_token, "e", None))
+        .unwrap();
+    let err = store
+        .commit(&CommitBatch::new(txid(), 4_000).cancel_job(id, None))
         .unwrap_err();
     assert_eq!(
         err,
         CommitError::Conflict(Conflict::JobTransition {
             job_id: id,
-            from: JobState::Pending,
+            from: JobState::RetryWait,
             to: JobState::Cancelled,
         })
     );

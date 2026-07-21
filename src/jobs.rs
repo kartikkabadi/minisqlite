@@ -4,14 +4,14 @@ use crate::id::Id;
 /// Specification for a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
-    pub job_id: Id,
-    pub queue: String,
-    pub partition_key: String,
-    pub payload: Vec<u8>,
-    pub not_before_ms: i64,
-    pub max_attempts: u32,
-    pub effect_mode: EffectMode,
-    pub idempotency_key: Option<String>,
+    pub(crate) job_id: Id,
+    pub(crate) queue: String,
+    pub(crate) partition_key: String,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) not_before_ms: i64,
+    pub(crate) max_attempts: u32,
+    pub(crate) effect_mode: EffectMode,
+    pub(crate) idempotency_key: Option<String>,
 }
 
 impl JobSpec {
@@ -100,6 +100,46 @@ impl JobSpec {
         self.max_attempts = max_attempts;
         self
     }
+
+    /// The job's unique ID.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The queue the job belongs to.
+    pub fn queue(&self) -> &str {
+        &self.queue
+    }
+
+    /// The partition key ordering the job within its queue.
+    pub fn partition_key(&self) -> &str {
+        &self.partition_key
+    }
+
+    /// The opaque job payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// The earliest time at which the job may be claimed.
+    pub fn not_before_ms(&self) -> i64 {
+        self.not_before_ms
+    }
+
+    /// The maximum number of attempts before the job is marked dead.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// How the job's external effect behaves on retry.
+    pub fn effect_mode(&self) -> EffectMode {
+        self.effect_mode
+    }
+
+    /// The idempotency key, when the effect is explicitly idempotent by key.
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
+    }
 }
 
 /// Durable state of a job.
@@ -123,8 +163,7 @@ pub enum JobState {
 
 impl JobState {
     /// Stable integer encoding used in the `jobs` table.
-    #[allow(dead_code)] // used once job writes are implemented
-    pub(crate) fn encode(self) -> i64 {
+    pub(crate) const fn encode(self) -> i64 {
         match self {
             JobState::Pending => 0,
             JobState::Leased => 1,
@@ -136,8 +175,20 @@ impl JobState {
         }
     }
 
+    /// Stable lower-case name used by stats and diagnostic exports.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            JobState::Pending => "pending",
+            JobState::Leased => "leased",
+            JobState::RetryWait => "retry_wait",
+            JobState::Uncertain => "uncertain",
+            JobState::Succeeded => "succeeded",
+            JobState::Dead => "dead",
+            JobState::Cancelled => "cancelled",
+        }
+    }
+
     /// Decode the stable integer encoding used in the `jobs` table.
-    #[allow(dead_code)] // used once job reads are implemented
     pub(crate) fn decode(value: i64) -> Option<Self> {
         match value {
             0 => Some(JobState::Pending),
@@ -160,18 +211,21 @@ impl JobState {
     }
 
     /// The exact allowed state machine. `Leased -> Leased` is permitted only for
-    /// lease extension.
+    /// lease extension; `Leased -> Pending` only for expired-lease maintenance of
+    /// explicitly idempotent jobs.
     pub fn can_transition_to(self, to: JobState) -> bool {
         use JobState::*;
         matches!(
             (self, to),
             (Pending, Leased)
+                | (Pending, Cancelled)
                 | (RetryWait, Leased)
                 | (Leased, Succeeded)
                 | (Leased, RetryWait)
                 | (Leased, Dead)
                 | (Leased, Cancelled)
                 | (Leased, Uncertain)
+                | (Leased, Pending)
                 | (Leased, Leased)
                 | (Uncertain, Pending)
                 | (Uncertain, Succeeded)
@@ -223,8 +277,14 @@ pub struct ClaimRequest {
 /// Receipt for a claim transaction that performed only expired-lease maintenance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MaintenanceReceipt {
+    pub(crate) transaction_id: Id,
+}
+
+impl MaintenanceReceipt {
     /// The transaction that recorded the maintenance transitions.
-    pub transaction_id: Id,
+    pub fn transaction_id(&self) -> Id {
+        self.transaction_id
+    }
 }
 
 /// Successful outcome of a `claim_jobs` call.
@@ -246,6 +306,7 @@ pub enum ClaimOutcome {
 pub struct CommittedClaims {
     pub(crate) transaction_id: Id,
     pub(crate) jobs: Vec<ClaimedJob>,
+    pub(crate) stale_jobs: Vec<Id>,
 }
 
 impl CommittedClaims {
@@ -254,9 +315,16 @@ impl CommittedClaims {
         self.transaction_id
     }
 
-    /// The claimed jobs.
+    /// The claimed jobs whose leases are still current and executable.
     pub fn jobs(&self) -> &[ClaimedJob] {
         &self.jobs
+    }
+
+    /// Jobs this transaction leased whose leases are no longer current (expired,
+    /// re-leased, or already resolved). They committed, but must not be executed
+    /// under the recovered tokens.
+    pub fn stale_jobs(&self) -> &[Id] {
+        &self.stale_jobs
     }
 
     /// Consume the receipt, returning the claimed jobs.
@@ -301,6 +369,7 @@ impl<'a> IntoIterator for &'a CommittedClaims {
 pub struct IndeterminateClaim {
     pub(crate) transaction_id: Id,
     pub(crate) proposed_jobs: Vec<Id>,
+    pub(crate) storage_error: String,
 }
 
 impl IndeterminateClaim {
@@ -313,18 +382,27 @@ impl IndeterminateClaim {
     pub fn proposed_jobs_for_verification(&self) -> &[Id] {
         &self.proposed_jobs
     }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
+    }
 }
 
 /// Result of recovering an indeterminate claim.
+///
+/// SQLite commits are atomic, so recovery against a healthy store always resolves
+/// to a definite outcome; there is no "still indeterminate" state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimRecovery {
     /// The claim committed; the original lease tokens are reconstructed from
     /// `claim_receipts`.
     Committed(CommittedClaims),
+    /// The transaction committed but leased no jobs: it recorded expired-lease
+    /// maintenance only.
+    MaintenanceCommitted(MaintenanceReceipt),
     /// The claim did not commit; the jobs were never leased by this transaction.
     Absent,
-    /// The store cannot yet determine the outcome; retry recovery later.
-    StillIndeterminate,
 }
 
 /// Resolution for an uncertain job.
@@ -381,9 +459,26 @@ pub struct LeaseExtension {
 /// Receipt for a durably committed lease extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseExtensionReceipt {
-    pub job_id: Id,
-    pub attempt: u32,
-    pub lease_expires_at_ms: i64,
+    pub(crate) job_id: Id,
+    pub(crate) attempt: u32,
+    pub(crate) lease_expires_at_ms: i64,
+}
+
+impl LeaseExtensionReceipt {
+    /// The extended job's ID.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The job's attempt number, unchanged by extension.
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// The new durable lease expiry.
+    pub fn lease_expires_at_ms(&self) -> i64 {
+        self.lease_expires_at_ms
+    }
 }
 
 #[cfg(test)]
@@ -412,8 +507,10 @@ mod tests {
     fn transitions_match_spec() {
         use JobState::*;
         assert!(Pending.can_transition_to(Leased));
+        assert!(Pending.can_transition_to(Cancelled));
         assert!(RetryWait.can_transition_to(Leased));
         assert!(Leased.can_transition_to(Leased));
+        assert!(Leased.can_transition_to(Pending));
         assert!(Uncertain.can_transition_to(Pending));
         assert!(!Pending.can_transition_to(Succeeded));
         assert!(!Succeeded.can_transition_to(Leased));
