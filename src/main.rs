@@ -187,18 +187,18 @@ fn parse_id(raw: &str, what: &str) -> Result<Id, CliError> {
 }
 
 fn parse_hex(raw: &str, what: &str) -> Result<Vec<u8>, CliError> {
-    if raw.len() % 2 != 0 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(CliError::Usage(format!("invalid {what} hex: {raw}")));
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks(2) {
+        let (Some(hi), Some(lo)) = (
+            pair.first().and_then(|b| (*b as char).to_digit(16)),
+            pair.get(1).and_then(|b| (*b as char).to_digit(16)),
+        ) else {
+            return Err(CliError::Usage(format!("invalid {what} hex: {raw}")));
+        };
+        out.push(((hi as u8) << 4) | lo as u8);
     }
-    Ok(raw
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
-            let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
-            (hi << 4) | lo
-        })
-        .collect())
+    Ok(out)
 }
 
 fn hex(bytes: &[u8]) -> String {
