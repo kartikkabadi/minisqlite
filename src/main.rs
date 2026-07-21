@@ -508,7 +508,10 @@ fn run(args: &[String]) -> Result<(), CliError> {
             }
             Ok(())
         }
-        _ => unreachable!("command validated before dispatch"),
+        _ => Err(CliError::Usage(format!(
+            "unknown command: {}\n{USAGE}",
+            args.join(" ")
+        ))),
     }
 }
 
