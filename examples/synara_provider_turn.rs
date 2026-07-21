@@ -183,6 +183,17 @@ fn claim_one(
                 );
                 match store.recover_claim(claim.transaction_id(), now_ms())? {
                     ClaimRecovery::Committed(claims) => {
+                        // Stale jobs committed under this claim but must not be
+                        // executed with the recovered tokens; reconcilable jobs
+                        // surface as Uncertain (effect status unknown).
+                        for stale in claims.stale_jobs() {
+                            println!("[claim]  stale job {stale}: do not execute; surfaces as Uncertain");
+                        }
+                        if claims.is_empty() {
+                            // Every receipt job went stale: no lease held. Claim again.
+                            println!("[claim]  recovered claim holds no executable jobs");
+                            continue;
+                        }
                         let tx = claims.transaction_id();
                         return Ok((tx, claims.into_jobs().remove(0)));
                     }
