@@ -146,6 +146,14 @@ pub(crate) fn commit(
         })
     })?;
 
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(CommitError::Indeterminate(IndeterminateCommit {
+            transaction_id: batch.transaction_id,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
+
     Ok(CommitReceipt {
         transaction_id: batch.transaction_id,
         transaction_sequence: sequence,

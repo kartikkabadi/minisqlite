@@ -12,12 +12,9 @@ pub(crate) fn open(path: &Path, durability: Durability) -> Result<Connection, St
     Ok(conn)
 }
 
-/// Open an existing SQLite database at `path` without creating it. Used by
-/// inspection tooling, which must never create files as a side effect.
-pub(crate) fn open_existing(
-    path: &Path,
-    durability: Durability,
-) -> Result<Connection, StorageError> {
+/// Open an existing SQLite database at `path` read-only. Used by inspection
+/// tooling, which must never create files or mutate the database.
+pub(crate) fn open_existing(path: &Path) -> Result<Connection, StorageError> {
     if !path.exists() {
         return Err(StorageError::Io(format!(
             "database file {} does not exist",
@@ -26,10 +23,16 @@ pub(crate) fn open_existing(
     }
     let conn = Connection::open_with_flags(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(StorageError::from_sqlite)?;
-    apply_pragmas(&conn, durability)?;
+    // Read-only connections must not attempt journal-mode changes.
+    conn.execute_batch(
+        "PRAGMA foreign_keys=ON;\n\
+         PRAGMA trusted_schema=OFF;\n\
+         PRAGMA busy_timeout=5000;",
+    )
+    .map_err(StorageError::from_sqlite)?;
     Ok(conn)
 }
 

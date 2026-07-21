@@ -7,6 +7,7 @@ mod common;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use minisqlite::{
     ClaimOutcome, ClaimRequest, CommitBatch, CommitError, Conflict, ControlPlaneStore, Event, Id,
@@ -236,11 +237,40 @@ fn child_commit_worker() {
     let store = ControlPlaneStore::open(&db).unwrap();
     for i in 0..count {
         let stream = format!("s{}", i % 4);
-        store
-            .commit(&CommitBatch::new(txid(), 2_000).append_event(event(&stream, "child")))
-            .unwrap();
+        commit_with_retry(
+            &store,
+            CommitBatch::new(txid(), 2_000).append_event(event(&stream, "child")),
+        );
     }
     std::process::exit(0);
+}
+
+/// Commit exactly once under heavy cross-process contention: retry with backoff
+/// on busy/locked storage errors, and resolve indeterminate outcomes honestly
+/// via `recover_transaction` before deciding whether to retry.
+fn commit_with_retry(store: &ControlPlaneStore, batch: CommitBatch) {
+    let mut delay = Duration::from_millis(5);
+    loop {
+        match store.commit(&batch) {
+            Ok(_) => return,
+            Err(minisqlite::CommitError::Indeterminate(info)) => {
+                match store.recover_transaction(info.transaction_id()).unwrap() {
+                    minisqlite::TransactionRecovery::Committed(_) => return,
+                    minisqlite::TransactionRecovery::Absent => {}
+                }
+            }
+            Err(minisqlite::CommitError::Storage(e)) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("locked") || msg.contains("busy"),
+                    "unexpected storage error: {msg}"
+                );
+            }
+            Err(e) => panic!("unexpected commit error: {e:?}"),
+        }
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_millis(200));
+    }
 }
 
 #[test]
