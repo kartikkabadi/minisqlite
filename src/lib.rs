@@ -37,6 +37,8 @@ pub use jobs::{
     LeaseExtensionReceipt, MaintenanceReceipt, Resolution,
 };
 pub use projection::{ProjectionEntry, ProjectionMutation, ProjectionPatch};
+#[cfg(feature = "failpoints")]
+pub use store::failpoints;
 pub use store::{
     ControlPlaneStore, MigrationStatus, StoreBuilder, StoreStats, VerifyFinding, VerifyReport,
 };
