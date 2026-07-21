@@ -63,7 +63,7 @@ pub(crate) fn commit(
             batch.transaction_id.as_bytes().as_slice(),
             sequence as i64,
             batch.committed_at_ms,
-            batch.correlation_id.map(|id| id.0.to_vec()),
+            batch.correlation_id.map(|id| id.as_bytes().to_vec()),
             batch.metadata,
             digest.as_slice(),
             batch.operations.len() as i64,
