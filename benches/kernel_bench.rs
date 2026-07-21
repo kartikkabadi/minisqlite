@@ -49,7 +49,8 @@ fn main() {
 
     let profile = Profile::from_env();
     let root = bench_root();
-    print_environment(&root, &profile);
+    let durability_check = DurabilityCheck::detect(&root);
+    print_environment(&root, &profile, &durability_check);
 
     transaction_workloads(&root, &profile);
     scale_event_history(&root, &profile);
@@ -69,7 +70,7 @@ fn main() {
             }
         }
     }
-    let report_path = write_json_report(&root, &profile);
+    let report_path = write_json_report(&root, &profile, &durability_check);
     println!(
         "\nkernel_bench: JSON report written to {}",
         report_path.display()
@@ -218,6 +219,74 @@ fn device_class(device: &str) -> String {
     format!("unknown class, device {device}")
 }
 
+/// §1 suspicious-durability enforcement: flag environments that invalidate
+/// durability-sensitive numbers (ephemeral/virtual filesystems, implausibly
+/// fast fsync) instead of silently reporting them.
+struct DurabilityCheck {
+    suspicious: bool,
+    reason: String,
+    fsync_baseline: String,
+}
+
+impl DurabilityCheck {
+    /// fsync medians below this on a dirty file imply the sync never reached
+    /// durable media (tmpfs, lying cache, coalesced syncs).
+    const SUSPICIOUS_FSYNC_US: f64 = 50.0;
+
+    fn detect(root: &Path) -> Self {
+        let mut reasons = Vec::new();
+        let (fstype, _, _) = filesystem_for(root);
+        const EPHEMERAL: &[&str] = &[
+            "tmpfs", "ramfs", "overlay", "overlayfs", "9p", "nfs", "nfs4", "cifs",
+        ];
+        if EPHEMERAL.contains(&fstype.as_str()) {
+            reasons.push(format!(
+                "bench directory is on {fstype} (ephemeral/virtual filesystem)"
+            ));
+        }
+        let fsync_baseline = match fsync_median_us(root) {
+            Some(median_us) => {
+                if median_us < Self::SUSPICIOUS_FSYNC_US {
+                    reasons.push(format!(
+                        "fsync median {median_us:.1}us is implausibly fast for durable storage"
+                    ));
+                }
+                format!("median {median_us:.1}us over 20 syncs of a dirty 4 KiB file")
+            }
+            None => "unavailable (fsync probe failed)".to_string(),
+        };
+        Self {
+            suspicious: !reasons.is_empty(),
+            reason: if reasons.is_empty() {
+                "none".to_string()
+            } else {
+                reasons.join("; ")
+            },
+            fsync_baseline,
+        }
+    }
+}
+
+/// Median latency of syncing a freshly rewritten 4 KiB file, in microseconds.
+fn fsync_median_us(root: &Path) -> Option<f64> {
+    use std::io::{Seek, Write};
+    let path = root.join("fsync-probe.tmp");
+    let mut file = std::fs::File::create(&path).ok()?;
+    let block = [0u8; 4096];
+    let mut samples = Vec::with_capacity(20);
+    for _ in 0..20 {
+        file.rewind().ok()?;
+        file.write_all(&block).ok()?;
+        let t = Instant::now();
+        file.sync_all().ok()?;
+        samples.push(t.elapsed());
+    }
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    samples.sort_unstable();
+    Some(percentile(&samples, 0.50).as_secs_f64() * 1e6)
+}
+
 /// Measure the page size the store actually uses: open a probe store in the
 /// bench root and read `PRAGMA page_size` from its database.
 fn measured_page_size(root: &Path) -> String {
@@ -247,7 +316,7 @@ fn env_field(key: &str, value: &str) {
         .push((key.to_string(), value.to_string()));
 }
 
-fn print_environment(root: &Path, profile: &Profile) {
+fn print_environment(root: &Path, profile: &Profile, durability_check: &DurabilityCheck) {
     let (fstype, opts, device) = filesystem_for(root);
     println!("== kernel_bench environment report (docs/BENCHMARKS.md §1) ==");
     env_field(
@@ -317,6 +386,14 @@ fn print_environment(root: &Path, profile: &Profile) {
     env_field(
         "Peak RSS",
         "per workload, sampled in a fresh child process (VmHWM), printed below",
+    );
+    env_field("Fsync baseline", &durability_check.fsync_baseline);
+    env_field(
+        "Suspicious durability",
+        &format!(
+            "{} (reason: {})",
+            durability_check.suspicious, durability_check.reason
+        ),
     );
 }
 
@@ -463,7 +540,7 @@ fn json_entry(entry: &str) {
 }
 
 /// Write the §5 machine-readable report blob for this run.
-fn write_json_report(root: &Path, profile: &Profile) -> PathBuf {
+fn write_json_report(root: &Path, profile: &Profile, durability_check: &DurabilityCheck) -> PathBuf {
     let mut out = String::from("{\n  \"environment\": {\n");
     let env = JSON_ENV.lock().expect("env lock");
     for (i, (key, value)) in env.iter().enumerate() {
@@ -475,8 +552,10 @@ fn write_json_report(root: &Path, profile: &Profile) -> PathBuf {
         ));
     }
     out.push_str(&format!(
-        "  }},\n  \"profile\": \"{}\",\n  \"entries\": [\n",
-        if profile.full { "full" } else { "reduced" }
+        "  }},\n  \"profile\": \"{}\",\n  \"suspicious_durability\": {},\n  \"suspicious_durability_reason\": \"{}\",\n  \"entries\": [\n",
+        if profile.full { "full" } else { "reduced" },
+        durability_check.suspicious,
+        json_escape(&durability_check.reason),
     ));
     let entries = JSON_ENTRIES.lock().expect("entries lock");
     for (i, entry) in entries.iter().enumerate() {
