@@ -245,15 +245,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[reopen] store reopened; recovering claim {claim_tx}");
     match store.recover_claim(claim_tx, now_ms())? {
         ClaimRecovery::Committed(claims) => {
-            println!(
-                "[recover] claim receipt found: {} job(s), original lease tokens restored",
-                claims.len()
-            );
-            for job in claims {
-                heartbeat(&store, &job)?;
-                start_turn(&store, "t-200")?;
-                call_provider(&job); // exactly once, under the recovered lease
-                complete_turn(&store, "t-200", &job)?;
+            // Jobs whose leases lapsed before recovery are stale: they must not
+            // be executed with the recovered tokens. Reconcilable stale jobs
+            // surface as Uncertain (effect status unknown) until reconciled.
+            for stale in claims.stale_jobs() {
+                println!("[recover] stale job {stale}: not executable; surfaces as Uncertain");
+            }
+            if claims.is_empty() {
+                println!("[recover] claim committed but no executable jobs remain; no lease held");
+            } else {
+                println!(
+                    "[recover] claim receipt found: {} job(s), original lease tokens restored",
+                    claims.len()
+                );
+                for job in claims.into_jobs() {
+                    heartbeat(&store, &job)?;
+                    start_turn(&store, "t-200")?;
+                    call_provider(&job); // exactly once, under the recovered lease
+                    complete_turn(&store, "t-200", &job)?;
+                }
             }
         }
         ClaimRecovery::MaintenanceCommitted(_) => {
