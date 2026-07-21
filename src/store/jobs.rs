@@ -427,8 +427,23 @@ pub(crate) fn apply_resolve(
     let job = require_job(tx, resolution.job_id)?;
     match resolution.resolution {
         Resolution::Retry => {
-            ensure_transition(&job, JobState::Pending)?;
-            set_nonterminal(tx, job.job_id, JobState::Pending, None, transaction_id)?;
+            // A job with no attempts left cannot re-enter Pending: dead-letter it
+            // so max_attempts cannot be exceeded via Uncertain -> Retry.
+            if job.attempt >= job.max_attempts {
+                ensure_transition(&job, JobState::Dead)?;
+                set_terminal(
+                    tx,
+                    &job,
+                    JobState::Dead,
+                    now_ms,
+                    transaction_id,
+                    None,
+                    Some("retry resolution exhausted max_attempts"),
+                )?;
+            } else {
+                ensure_transition(&job, JobState::Pending)?;
+                set_nonterminal(tx, job.job_id, JobState::Pending, None, transaction_id)?;
+            }
         }
         Resolution::MarkSucceeded => {
             ensure_transition(&job, JobState::Succeeded)?;

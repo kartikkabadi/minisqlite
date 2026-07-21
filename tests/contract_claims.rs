@@ -375,6 +375,28 @@ fn uncertain_jobs_resolve_to_retry_succeeded_or_dead() {
         .is_err());
 }
 
+#[test]
+fn retry_resolution_dead_letters_when_max_attempts_exhausted() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(
+        &store,
+        1,
+        JobSpec::reconcilable(id(10), "q", "p", vec![]).with_max_attempts(1),
+    );
+    claim_all(&store, "q", NOW);
+    // Expire the lease into Uncertain; the single attempt is spent.
+    store
+        .claim_jobs(&claim_request("q", NOW + LEASE_MS + 1))
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Uncertain);
+
+    store
+        .commit(&CommitBatch::new(id(100), NOW).resolve_uncertain_job(id(10), Resolution::Retry))
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Dead);
+}
+
 // ----- lease extension -----
 
 #[test]
