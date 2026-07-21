@@ -928,9 +928,10 @@ pub(crate) fn recover_claim(
         .map_err(StorageError::from_sqlite)?
         .unwrap_or(false);
     if committed {
-        Ok(ClaimRecovery::Committed(CommittedClaims {
+        // The transaction is durable but leased nothing: maintenance only. Never
+        // report it as an empty grant.
+        Ok(ClaimRecovery::MaintenanceCommitted(MaintenanceReceipt {
             transaction_id,
-            jobs: Vec::new(),
         }))
     } else {
         // SQLite commits are atomic; a missing row means the claim rolled back.

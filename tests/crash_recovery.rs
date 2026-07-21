@@ -117,9 +117,6 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
                 );
                 absent_seen = true;
             }
-            TransactionRecovery::StillIndeterminate => {
-                panic!("commit {i} still indeterminate after clean reopen")
-            }
         }
     }
     // Every commit the child saw complete must be durable.

@@ -351,14 +351,15 @@ pub struct CommitReceipt {
 }
 
 /// Result of recovering an indeterminate commit.
+///
+/// SQLite commits are atomic, so recovery against a healthy store always resolves
+/// to a definite outcome; there is no "still indeterminate" state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionRecovery {
     /// The transaction committed durably.
     Committed(CommitReceipt),
     /// The transaction did not commit; it is safe to resubmit.
     Absent,
-    /// The store cannot yet determine the outcome; retry recovery later.
-    StillIndeterminate,
 }
 
 #[cfg(test)]

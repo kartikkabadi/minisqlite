@@ -334,15 +334,19 @@ impl IndeterminateClaim {
 }
 
 /// Result of recovering an indeterminate claim.
+///
+/// SQLite commits are atomic, so recovery against a healthy store always resolves
+/// to a definite outcome; there is no "still indeterminate" state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimRecovery {
     /// The claim committed; the original lease tokens are reconstructed from
     /// `claim_receipts`.
     Committed(CommittedClaims),
+    /// The transaction committed but leased no jobs: it recorded expired-lease
+    /// maintenance only.
+    MaintenanceCommitted(MaintenanceReceipt),
     /// The claim did not commit; the jobs were never leased by this transaction.
     Absent,
-    /// The store cannot yet determine the outcome; retry recovery later.
-    StillIndeterminate,
 }
 
 /// Resolution for an uncertain job.
