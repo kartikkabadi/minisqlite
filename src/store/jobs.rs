@@ -449,7 +449,6 @@ fn error_to_claim(e: Error) -> ClaimError {
         Error::Storage(s) => ClaimError::Storage(s),
         Error::Validation(v) => ClaimError::Validation(v),
         Error::Conflict(c) => ClaimError::Validation(ValidationError(c.to_string())),
-        Error::Unimplemented(what) => ClaimError::Unimplemented(what),
     }
 }
 
