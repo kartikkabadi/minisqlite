@@ -364,10 +364,7 @@ fn list_jobs_filters_by_queue_and_state() {
 fn jobs_page_paginates_with_moving_cursor() {
     let (_dir, store) = store();
     for i in 1u128..=5 {
-        enqueue(
-            &store,
-            JobSpec::reconcilable(Id::from(i), "q", "p", vec![]),
-        );
+        enqueue(&store, JobSpec::reconcilable(Id::from(i), "q", "p", vec![]));
     }
 
     let (page, cursor) = store.jobs_page(Some("q"), None, 0, 2).unwrap();
