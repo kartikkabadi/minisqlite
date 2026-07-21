@@ -398,3 +398,20 @@ fn jobs_page_paginates_with_moving_cursor() {
     let (page, _) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
     assert!(page.is_empty());
 }
+
+#[test]
+fn jobs_page_rejects_out_of_range_cursor() {
+    let (_dir, store) = store();
+    enqueue(
+        &store,
+        JobSpec::reconcilable(Id::from(1u128), "q", "p", vec![]),
+    );
+
+    let err = store.jobs_page(Some("q"), None, u64::MAX, 2).unwrap_err();
+    assert!(matches!(err, minisqlite::Error::Validation(_)), "{err:?}");
+
+    let err = store
+        .jobs_page(Some("q"), None, (i64::MAX as u64) + 1, 2)
+        .unwrap_err();
+    assert!(matches!(err, minisqlite::Error::Validation(_)), "{err:?}");
+}
