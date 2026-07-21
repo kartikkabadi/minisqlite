@@ -69,6 +69,21 @@ impl StoreBuilder {
             durability: self.durability,
         })
     }
+
+    /// Open an existing store for inspection: never creates the database file and
+    /// never migrates. Fails with a clear error if the file does not exist or its
+    /// schema is not exactly this build's supported version.
+    pub fn open_existing(self) -> Result<ControlPlaneStore, Error> {
+        self.limits.validate()?;
+        let conn = connection::open_existing(&self.path, self.durability)?;
+        migrations::require_current(&conn)?;
+        Ok(ControlPlaneStore {
+            writer: Mutex::new(Some(conn)),
+            path: self.path,
+            limits: self.limits,
+            durability: self.durability,
+        })
+    }
 }
 
 /// A typed embedded control-plane state kernel on SQLite.
@@ -89,6 +104,12 @@ impl ControlPlaneStore {
     /// Open (or create) a store at `path` with default configuration.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, Error> {
         StoreBuilder::new(path).open()
+    }
+
+    /// Open an existing store for inspection with default configuration: never
+    /// creates the database file and never migrates.
+    pub fn open_existing(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        StoreBuilder::new(path).open_existing()
     }
 
     /// Start building a store with custom configuration.

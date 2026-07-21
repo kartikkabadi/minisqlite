@@ -105,6 +105,41 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Verify the schema is exactly at this build's supported version without applying
+/// anything. An older schema is an error: inspection tooling must never migrate.
+pub(crate) fn require_current(conn: &Connection) -> Result<(), StorageError> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let current: u32 = if has_table == 0 {
+        0
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?
+    };
+    let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
+    if current > supported {
+        return Err(StorageError::SchemaTooNew {
+            version: current,
+            supported,
+        });
+    }
+    if current < supported {
+        return Err(StorageError::Sqlite(format!(
+            "schema version {current} is older than supported {supported}; open the store with a writer to migrate"
+        )));
+    }
+    Ok(())
+}
+
 /// Report the status of every known migration against the database.
 pub(crate) fn status(conn: &Connection) -> Result<Vec<MigrationStatus>, StorageError> {
     let mut out = Vec::with_capacity(MIGRATIONS.len());
