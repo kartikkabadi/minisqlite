@@ -35,7 +35,16 @@ fn log_line(log: &mut File, line: &str) {
     log.sync_data().unwrap();
 }
 
-fn spawn_killed_child(test_name: &str, db: &Path, log: &Path, run_ms: u64) {
+/// Spawn the env-gated child and kill it only after its log shows at least
+/// `min_progress` completed operations (lines starting with `progress_prefix`),
+/// so slow machines cannot fail the minimum-progress assertions.
+fn spawn_killed_child(
+    test_name: &str,
+    db: &Path,
+    log: &Path,
+    progress_prefix: &str,
+    min_progress: usize,
+) {
     let exe = std::env::current_exe().unwrap();
     let mut child = std::process::Command::new(exe)
         .args([test_name, "--exact", "--test-threads=1"])
@@ -43,7 +52,16 @@ fn spawn_killed_child(test_name: &str, db: &Path, log: &Path, run_ms: u64) {
         .env("MINISQLITE_CRASH_LOG", log)
         .spawn()
         .unwrap();
-    std::thread::sleep(Duration::from_millis(run_ms));
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let progress = std::fs::read_to_string(log)
+            .map(|s| s.lines().filter(|l| l.starts_with(progress_prefix)).count())
+            .unwrap_or(0);
+        if progress >= min_progress || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     child.kill().unwrap();
     child.wait().unwrap();
 }
@@ -78,7 +96,7 @@ fn killed_mid_commit_store_reopens_consistent_and_recovers_honestly() {
     let log_path = dir.path().join("commit.log");
     drop(common::open(&db)); // run migrations before the child races on first open
 
-    spawn_killed_child("child_crash_commit_worker", &db, &log_path, 400);
+    spawn_killed_child("child_crash_commit_worker", &db, &log_path, "done ", 11);
 
     let store = common::open(&db);
     assert_clean(&store);
@@ -360,7 +378,7 @@ fn killed_mid_claim_leases_are_recoverable_and_bounded() {
     }
     drop(store);
 
-    spawn_killed_child("child_crash_claim_worker", &db, &log_path, 400);
+    spawn_killed_child("child_crash_claim_worker", &db, &log_path, "claim ", 6);
 
     let store = common::open(&db);
     assert_clean(&store);
