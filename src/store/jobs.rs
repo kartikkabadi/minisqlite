@@ -894,3 +894,43 @@ pub(crate) fn list_jobs(
     }
     Ok(jobs)
 }
+
+/// List one page of jobs after a pagination cursor (`enqueue_sequence`),
+/// returning the page and the cursor for the next page.
+pub(crate) fn list_jobs_page(
+    conn: &Connection,
+    queue: Option<&str>,
+    state: Option<JobState>,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<(Vec<JobInfo>, u64), Error> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {JOB_COLUMNS} FROM jobs WHERE enqueue_sequence > ?1 \
+             AND (?2 IS NULL OR queue = ?2) AND (?3 IS NULL OR state = ?3) \
+             ORDER BY enqueue_sequence LIMIT ?4"
+        ))
+        .map_err(StorageError::from)?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                after_sequence as i64,
+                queue,
+                state.map(JobState::encode),
+                limit as i64
+            ],
+            |row| {
+                let sequence: i64 = row.get(1)?;
+                Ok((sequence, row_to_job(row)?))
+            },
+        )
+        .map_err(StorageError::from)?;
+    let mut jobs = Vec::new();
+    let mut cursor = after_sequence;
+    for row in rows {
+        let (sequence, job) = row.map_err(StorageError::from)?;
+        cursor = sequence as u64;
+        jobs.push(job?.into_info());
+    }
+    Ok((jobs, cursor))
+}
