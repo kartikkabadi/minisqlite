@@ -359,3 +359,27 @@ fn list_jobs_filters_by_queue_and_state() {
     let uncertain = store.jobs(None, Some(JobState::Uncertain), 10).unwrap();
     assert!(uncertain.is_empty());
 }
+
+#[test]
+fn jobs_page_paginates_with_moving_cursor() {
+    let (_dir, store) = store();
+    for i in 1u128..=5 {
+        enqueue(&store, JobSpec::reconcilable(Id::from(i), "q", "p", vec![]));
+    }
+
+    let (page, cursor) = store.jobs_page(Some("q"), None, 0, 2).unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].job_id, Id::from(1u128));
+    assert_eq!(page[1].job_id, Id::from(2u128));
+
+    let (page, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0].job_id, Id::from(3u128));
+
+    let (page, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].job_id, Id::from(5u128));
+
+    let (page, _) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert!(page.is_empty());
+}
