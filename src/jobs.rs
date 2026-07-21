@@ -177,6 +177,7 @@ impl JobState {
         matches!(
             (self, to),
             (Pending, Leased)
+                | (Pending, Cancelled)
                 | (RetryWait, Leased)
                 | (Leased, Succeeded)
                 | (Leased, RetryWait)
@@ -429,6 +430,7 @@ mod tests {
     fn transitions_match_spec() {
         use JobState::*;
         assert!(Pending.can_transition_to(Leased));
+        assert!(Pending.can_transition_to(Cancelled));
         assert!(RetryWait.can_transition_to(Leased));
         assert!(Leased.can_transition_to(Leased));
         assert!(Uncertain.can_transition_to(Pending));

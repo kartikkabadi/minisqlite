@@ -392,8 +392,11 @@ pub(crate) fn apply_cancel(
 ) -> Result<(), Error> {
     let job = require_job(tx, cancellation.job_id)?;
     ensure_transition(&job, JobState::Cancelled)?;
+    // Spec A5.6: a pending job may be cancelled without a token; cancelling a
+    // leased job requires its current lease token.
     match cancellation.lease_token {
         Some(token) => ensure_lease_token(&job, token)?,
+        None if job.state == JobState::Pending => {}
         None => {
             return Err(ValidationError(format!(
                 "cancelling leased job {} requires its lease token",
