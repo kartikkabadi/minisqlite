@@ -195,7 +195,7 @@ pub(crate) fn recover_transaction(
 fn lookup_transaction(
     tx: &Transaction<'_>,
     transaction_id: Id,
-) -> Result<Option<(u64, i64, [u8; 16])>, StorageError> {
+) -> Result<Option<(u64, i64, Vec<u8>)>, StorageError> {
     let row = tx
         .query_row(
             "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
@@ -209,13 +209,9 @@ fn lookup_transaction(
         )
         .optional()
         .map_err(StorageError::from_sqlite)?;
-    row.map(|(sequence, committed_at_ms, digest)| {
-        let fixed: [u8; 16] = digest
-            .try_into()
-            .map_err(|_| StorageError::Sqlite("corrupt 16-byte request digest column".into()))?;
-        Ok((sequence as u64, committed_at_ms, fixed))
-    })
-    .transpose()
+    // The digest is compared as an opaque blob: a row written by an older build
+    // with a different digest algorithm simply fails the resubmission match.
+    Ok(row.map(|(sequence, committed_at_ms, digest)| (sequence as u64, committed_at_ms, digest)))
 }
 
 fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, CommitError> {
