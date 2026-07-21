@@ -78,8 +78,9 @@ pub(crate) fn get_event(
             [event_id.as_bytes().as_slice()],
             row_to_persisted_event,
         )
-        .optional().map_err(StorageError::from_sqlite)?;
-    Ok(event)
+        .optional()
+        .map_err(StorageError::from_sqlite)?;
+    event.transpose()
 }
 
 /// The current durable version of a stream (0 when the stream does not exist).
@@ -96,40 +97,53 @@ pub(crate) fn stream_version(conn: &Connection, stream_id: &str) -> Result<u64, 
 }
 
 fn collect(
-    rows: impl Iterator<Item = Result<PersistedEvent, rusqlite::Error>>,
+    rows: impl Iterator<Item = Result<Result<PersistedEvent, StorageError>, rusqlite::Error>>,
 ) -> Result<Vec<PersistedEvent>, StorageError> {
     let mut out = Vec::new();
     for row in rows {
-        out.push(row.map_err(StorageError::from_sqlite)?);
+        out.push(row.map_err(StorageError::from_sqlite)??);
     }
     Ok(out)
 }
 
-fn row_to_persisted_event(row: &Row<'_>) -> Result<PersistedEvent, rusqlite::Error> {
+fn row_to_persisted_event(
+    row: &Row<'_>,
+) -> Result<Result<PersistedEvent, StorageError>, rusqlite::Error> {
     let global_sequence: i64 = row.get(0)?;
     let stream_version: i64 = row.get(4)?;
-    Ok(PersistedEvent {
-        transaction_id: blob_to_id(row.get(2)?),
-        global_sequence: global_sequence as u64,
-        stream_version: stream_version as u64,
-        event: Event {
-            event_id: blob_to_id(row.get(1)?),
-            stream_id: row.get(3)?,
-            event_type: row.get(5)?,
-            schema_version: row.get(6)?,
-            occurred_at_ms: row.get(7)?,
-            causation_id: row.get::<_, Option<Vec<u8>>>(8)?.map(blob_to_id),
-            correlation_id: row.get::<_, Option<Vec<u8>>>(9)?.map(blob_to_id),
-            payload: row.get(10)?,
-            metadata: row.get(11)?,
-        },
-    })
+    let transaction_id: Vec<u8> = row.get(2)?;
+    let event_id: Vec<u8> = row.get(1)?;
+    let stream_id: String = row.get(3)?;
+    let event_type: String = row.get(5)?;
+    let schema_version: u32 = row.get(6)?;
+    let occurred_at_ms: i64 = row.get(7)?;
+    let causation_id: Option<Vec<u8>> = row.get(8)?;
+    let correlation_id: Option<Vec<u8>> = row.get(9)?;
+    let payload: Vec<u8> = row.get(10)?;
+    let metadata: Vec<u8> = row.get(11)?;
+    Ok((|| {
+        Ok(PersistedEvent {
+            transaction_id: blob_to_id(transaction_id)?,
+            global_sequence: global_sequence as u64,
+            stream_version: stream_version as u64,
+            event: Event {
+                event_id: blob_to_id(event_id)?,
+                stream_id,
+                event_type,
+                schema_version,
+                occurred_at_ms,
+                causation_id: causation_id.map(blob_to_id).transpose()?,
+                correlation_id: correlation_id.map(blob_to_id).transpose()?,
+                payload,
+                metadata,
+            },
+        })
+    })())
 }
 
-fn blob_to_id(blob: Vec<u8>) -> Id {
-    let mut bytes = [0u8; 16];
-    if blob.len() == 16 {
-        bytes.copy_from_slice(&blob);
-    }
-    Id::from_bytes(bytes)
+fn blob_to_id(blob: Vec<u8>) -> Result<Id, StorageError> {
+    let bytes: [u8; 16] = blob
+        .try_into()
+        .map_err(|_| StorageError::Sqlite("corrupt 16-byte id column".into()))?;
+    Ok(Id::from_bytes(bytes))
 }

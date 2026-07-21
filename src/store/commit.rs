@@ -23,7 +23,7 @@ pub(crate) fn commit(
     // Idempotent resubmission: a transaction ID that already committed with the same
     // digest returns the original receipt; a different digest is a hard error.
     if let Some((sequence, committed_at_ms, stored_digest)) =
-        lookup_transaction(&tx, batch.transaction_id).map_err(StorageError::from_sqlite)?
+        lookup_transaction(&tx, batch.transaction_id)?
     {
         if stored_digest == digest {
             return Ok(CommitReceipt {
@@ -179,22 +179,27 @@ pub(crate) fn recover_transaction(
 fn lookup_transaction(
     tx: &Transaction<'_>,
     transaction_id: Id,
-) -> Result<Option<(u64, i64, [u8; 16])>, rusqlite::Error> {
-    tx.query_row(
-        "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
-        [transaction_id.as_bytes().as_slice()],
-        |row| {
-            let sequence: i64 = row.get(0)?;
-            let committed_at_ms: i64 = row.get(1)?;
-            let digest: Vec<u8> = row.get(2)?;
-            let mut fixed = [0u8; 16];
-            if digest.len() == 16 {
-                fixed.copy_from_slice(&digest);
-            }
-            Ok((sequence as u64, committed_at_ms, fixed))
-        },
-    )
-    .optional()
+) -> Result<Option<(u64, i64, [u8; 16])>, StorageError> {
+    let row = tx
+        .query_row(
+            "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
+            [transaction_id.as_bytes().as_slice()],
+            |row| {
+                let sequence: i64 = row.get(0)?;
+                let committed_at_ms: i64 = row.get(1)?;
+                let digest: Vec<u8> = row.get(2)?;
+                Ok((sequence, committed_at_ms, digest))
+            },
+        )
+        .optional()
+        .map_err(StorageError::from_sqlite)?;
+    row.map(|(sequence, committed_at_ms, digest)| {
+        let fixed: [u8; 16] = digest
+            .try_into()
+            .map_err(|_| StorageError::Sqlite("corrupt 16-byte request digest column".into()))?;
+        Ok((sequence as u64, committed_at_ms, fixed))
+    })
+    .transpose()
 }
 
 fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, CommitError> {
