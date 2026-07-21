@@ -1,7 +1,4 @@
 use std::fmt;
-use std::io;
-#[cfg(unix)]
-use std::io::Read;
 use std::str::FromStr;
 
 /// A 128-bit opaque identifier used for transaction IDs, event IDs, job IDs, and lease tokens.
@@ -109,22 +106,8 @@ impl fmt::Display for InvalidId {
 
 impl std::error::Error for InvalidId {}
 
-fn secure_random(buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut file = std::fs::File::open("/dev/urandom")?;
-        file.read_exact(buf)?;
-        Ok(())
-    }
-
-    // The crate forbids `unsafe`, so platforms without a file-based CSPRNG source
-    // are not yet supported.
-    #[cfg(not(unix))]
-    {
-        Err(io::Error::other(
-            "no secure random source for this platform",
-        ))
-    }
+fn secure_random(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    getrandom::getrandom(buf)
 }
 
 fn hex_value(b: u8) -> Option<u8> {
