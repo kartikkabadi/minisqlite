@@ -237,7 +237,14 @@ impl DurabilityCheck {
         let mut reasons = Vec::new();
         let (fstype, _, _) = filesystem_for(root);
         const EPHEMERAL: &[&str] = &[
-            "tmpfs", "ramfs", "overlay", "overlayfs", "9p", "nfs", "nfs4", "cifs",
+            "tmpfs",
+            "ramfs",
+            "overlay",
+            "overlayfs",
+            "9p",
+            "nfs",
+            "nfs4",
+            "cifs",
         ];
         if EPHEMERAL.contains(&fstype.as_str()) {
             reasons.push(format!(
@@ -540,7 +547,11 @@ fn json_entry(entry: &str) {
 }
 
 /// Write the §5 machine-readable report blob for this run.
-fn write_json_report(root: &Path, profile: &Profile, durability_check: &DurabilityCheck) -> PathBuf {
+fn write_json_report(
+    root: &Path,
+    profile: &Profile,
+    durability_check: &DurabilityCheck,
+) -> PathBuf {
     let mut out = String::from("{\n  \"environment\": {\n");
     let env = JSON_ENV.lock().expect("env lock");
     for (i, (key, value)) in env.iter().enumerate() {
@@ -622,25 +633,55 @@ fn print_fresh_process_rss(root: &Path, label: &str, workload: &str, db: Option<
     ));
 }
 
+/// The fixture database an `o*` RSS child reads (`KERNEL_BENCH_DB`).
+fn rss_child_db() -> PathBuf {
+    PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"))
+}
+
 /// Child-process entry point for fresh-process RSS sampling: run one workload
-/// and print this process's `VmHWM` in KiB.
+/// and print this process's `VmHWM` in KiB. Every T workload runs against a
+/// fresh child-local DB; every O workload reads the shared fixture passed via
+/// `KERNEL_BENCH_DB`.
 fn rss_child_main(workload: &str) {
     let root = PathBuf::from(std::env::var("KERNEL_BENCH_ROOT").expect("KERNEL_BENCH_ROOT"));
     let dir = root.join("rss-child");
     std::fs::create_dir_all(&dir).expect("mkdir rss-child");
     let mut ids = IdGen::new(99);
     let mut clock = Clock::new();
-    match workload {
-        "t3-strict" | "t3-relaxed" => {
-            let durability = if workload == "t3-strict" {
-                Durability::Strict
-            } else {
-                Durability::Relaxed
-            };
-            let path = dir.join(format!("{workload}.db"));
-            let _ = std::fs::remove_file(&path);
-            let store = open_store(&path, durability);
-            for n in 0..(WARMUP + 100) as u64 {
+    let iters = (WARMUP + 100) as u64;
+    let durability = if workload.ends_with("-strict") {
+        Durability::Strict
+    } else {
+        Durability::Relaxed
+    };
+    let fresh_db = |name: &str| {
+        let path = dir.join(format!("{name}.db"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        path
+    };
+    let kind = workload.split('-').next().unwrap_or(workload);
+    match kind {
+        "t1" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for _ in 0..iters {
+                let batch = CommitBatch::new(ids.next(), clock.tick())
+                    .append_event(event(&mut ids, &mut clock, "s"));
+                store.commit(&batch).expect("child T1 commit");
+            }
+        }
+        "t2" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for n in 0..iters {
+                let batch = CommitBatch::new(ids.next(), clock.tick())
+                    .append_event(event(&mut ids, &mut clock, "s"))
+                    .apply_projection_patch(ProjectionPatch::new("proj", n).put(b"key", b"value"));
+                store.commit(&batch).expect("child T2 commit");
+            }
+        }
+        "t3" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for n in 0..iters {
                 let job = JobSpec::reconcilable(ids.next(), "q", format!("p{n}"), b"{}".to_vec());
                 let batch = CommitBatch::new(ids.next(), clock.tick())
                     .append_event(event(&mut ids, &mut clock, "s"))
@@ -649,10 +690,16 @@ fn rss_child_main(workload: &str) {
                 store.commit(&batch).expect("child T3 commit");
             }
         }
-        "t5-claim" => {
-            let path = dir.join("t5-claim.db");
-            let _ = std::fs::remove_file(&path);
-            let store = open_store(&path, Durability::Relaxed);
+        "t4" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            for _ in 0..iters {
+                let jobs = claim(&store, "q", clock.tick(), 1);
+                assert_eq!(jobs.len(), 1, "child T4 expected one claimed job");
+            }
+        }
+        "t5" => {
+            let store = open_store(&fresh_db(workload), durability);
             let rounds = 5u64;
             populate_jobs(&store, &mut ids, &mut clock, "q", "p", 100 * rounds, 100);
             for _ in 0..rounds {
@@ -660,14 +707,154 @@ fn rss_child_main(workload: &str) {
                 ack_all(&store, &mut ids, &mut clock, &jobs);
             }
         }
-        "o1-open" => {
-            let db = PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"));
-            let store = ControlPlaneStore::open(&db).expect("child O1 open");
+        "t6" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            let mut version = 0u64;
+            loop {
+                let jobs = claim(&store, "q", clock.tick(), 100);
+                if jobs.is_empty() {
+                    break;
+                }
+                for job in jobs {
+                    let batch = CommitBatch::new(ids.next(), clock.tick())
+                        .append_event(event(&mut ids, &mut clock, "s"))
+                        .apply_projection_patch(
+                            ProjectionPatch::new("proj", version).put(b"key", b"done"),
+                        )
+                        .acknowledge_job(job.job_id, job.lease_token, None);
+                    store.commit(&batch).expect("child T6 commit");
+                    version += 1;
+                }
+            }
+        }
+        "t7" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", 1, 1);
+            let job = claim(&store, "q", clock.tick(), 1)
+                .pop()
+                .expect("child T7 claim");
+            let mut expiry = job.lease_expires_at_ms;
+            for _ in 0..iters {
+                expiry += 1_000;
+                store
+                    .extend_lease(job.job_id, job.lease_token, expiry, clock.tick())
+                    .expect("child T7 extend lease");
+            }
+        }
+        "t8" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            let mut leased = Vec::new();
+            loop {
+                let request = ClaimRequest {
+                    queue: "q".into(),
+                    worker_id: "bench-worker".into(),
+                    now_ms: clock.tick(),
+                    lease_ms: 1,
+                    limit: 1000,
+                };
+                let jobs = claimed_jobs(store.claim_jobs(&request).expect("child T8 claim"));
+                if jobs.is_empty() {
+                    break;
+                }
+                leased.extend(jobs.into_iter().map(|j| j.job_id));
+            }
+            clock.0 += 3_600_000; // expire every short lease
+            for _ in 0..(iters / 32 + 2) {
+                // Maintenance repairs at most 64 expired leases per claim call.
+                let request = ClaimRequest {
+                    queue: "q".into(),
+                    worker_id: "bench-worker".into(),
+                    now_ms: clock.tick(),
+                    lease_ms: 1,
+                    limit: 0,
+                };
+                store.claim_jobs(&request).expect("child T8 maintenance");
+            }
+            for job_id in leased {
+                let job = store
+                    .job(job_id)
+                    .expect("child T8 job lookup")
+                    .expect("child T8 job");
+                if job.state == minisqlite::JobState::Uncertain {
+                    let batch = CommitBatch::new(ids.next(), clock.tick())
+                        .resolve_uncertain_job(job_id, Resolution::MarkSucceeded);
+                    store.commit(&batch).expect("child T8 resolve");
+                }
+            }
+        }
+        "o1" => {
+            let store = ControlPlaneStore::open(rss_child_db()).expect("child O1 open");
             store.stream_version("s0").expect("child O1 first read");
         }
-        "o9-export" => {
-            let db = PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"));
-            let store = open_store(&db, Durability::Relaxed);
+        "o2" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            for _ in 0..iters {
+                let events = store
+                    .stream_events("s0", 1, 100)
+                    .expect("child O2 stream read");
+                assert_eq!(events.len(), 100, "child O2 expected 100 events");
+            }
+        }
+        "o3" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut cursor = 0u64;
+            loop {
+                let events = store.events_after(cursor, PAGE).expect("child O3 page");
+                match events.last() {
+                    Some(last) if events.len() == PAGE => cursor = last.global_sequence,
+                    _ => break,
+                }
+            }
+        }
+        "o4" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            for n in 0..iters {
+                let key = format!("key/{:08}", (n * 7919) % 10_000);
+                let value = store
+                    .projection_get("proj", key.as_bytes())
+                    .expect("child O4 get");
+                assert!(value.is_some(), "child O4 expected a value");
+            }
+        }
+        "o5" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let page = store
+                    .projection_scan_prefix_page("proj", b"key/", after.as_deref(), PAGE)
+                    .expect("child O5 page");
+                match page.last() {
+                    Some(last) if page.len() == PAGE => after = Some(last.key.clone()),
+                    _ => break,
+                }
+            }
+        }
+        "o6" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut cursor = 0u64;
+            loop {
+                let (jobs, next) = store
+                    .jobs_page(Some("histq"), None, cursor, PAGE)
+                    .expect("child O6 jobs page");
+                if jobs.len() < PAGE {
+                    break;
+                }
+                cursor = next;
+            }
+        }
+        "o7" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let dest = dir.join("o7-backup.db");
+            store.backup(&dest, true).expect("child O7 backup");
+        }
+        "o8" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            store.verify().expect("child O8 verify");
+        }
+        "o9" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
             let export = store.diagnostic_export().expect("child O9 export");
             assert!(!export.is_empty(), "child O9 export empty");
         }
@@ -803,9 +990,15 @@ fn transaction_workloads(root: &Path, profile: &Profile) {
         commit_workloads(root, profile, durability, label);
         claim_workloads(root, profile, durability, label);
         lifecycle_workloads(root, profile, durability, label);
-        print_fresh_process_rss(root, &format!("T3 {label}"), &format!("t3-{label}"), None);
+        for t in 1..=8 {
+            print_fresh_process_rss(
+                root,
+                &format!("T{t} {label}"),
+                &format!("t{t}-{label}"),
+                None,
+            );
+        }
     }
-    print_fresh_process_rss(root, "T5 claim batch", "t5-claim", None);
 }
 
 fn commit_workloads(root: &Path, profile: &Profile, durability: Durability, label: &str) {
@@ -1145,6 +1338,12 @@ fn scale_event_history(root: &Path, profile: &Profile) {
                 assert_eq!(events.len(), 100, "O2 expected 100 events");
             },
         );
+        print_fresh_process_rss(
+            root,
+            &format!("O2 stream read @ {population} events"),
+            "o2-read",
+            Some(&path),
+        );
 
         // O3: global pagination over the full history in 256-event pages.
         if profile.cold {
@@ -1171,6 +1370,12 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             fmt_dur(first),
             fmt_dur(last)
         );
+        print_fresh_process_rss(
+            root,
+            &format!("O3 pagination @ {population} events"),
+            "o3-pages",
+            Some(&path),
+        );
 
         // O8: integrity verification.
         if profile.cold {
@@ -1182,6 +1387,12 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             &format!("O8 verify @ {population} events"),
             t.elapsed(),
             &format!("ok={}", verify.is_ok()),
+        );
+        print_fresh_process_rss(
+            root,
+            &format!("O8 verify @ {population} events"),
+            "o8-verify",
+            Some(&path),
         );
 
         // O9: paged diagnostic export of the full history.
@@ -1276,6 +1487,12 @@ fn scale_terminal_jobs(root: &Path, profile: &Profile) {
             "    O6 linearity check: first page {} vs last page {}",
             fmt_dur(first),
             fmt_dur(last)
+        );
+        print_fresh_process_rss(
+            root,
+            &format!("O6 jobs pagination @ {population} terminal jobs"),
+            "o6-jobs",
+            Some(&path),
         );
 
         print_db_state(&format!("{population} terminal jobs"), &path);
@@ -1385,6 +1602,7 @@ fn operational_projections(root: &Path, profile: &Profile) {
             n += 1;
         },
     );
+    print_fresh_process_rss(root, "O4 projection point read", "o4-point", Some(&path));
 
     if profile.cold {
         drop_caches();
@@ -1403,6 +1621,7 @@ fn operational_projections(root: &Path, profile: &Profile) {
         }
     }
     report("O5 prefix scan page (256 entries)", &mut pages);
+    print_fresh_process_rss(root, "O5 prefix scan", "o5-scan", Some(&path));
     print_db_state("O4/O5 projection fixture", &path);
 }
 
@@ -1479,4 +1698,5 @@ fn live_backup(root: &Path, profile: &Profile) {
         ),
     );
     print_db_state("O7 backup source", &path);
+    print_fresh_process_rss(root, "O7 backup", "o7-backup", Some(&path));
 }
