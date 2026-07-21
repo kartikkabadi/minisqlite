@@ -87,11 +87,9 @@ minisqlite backup backup.db --db control-plane.db
 
 ## Design
 
-- [docs/ADR-001.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/ADR-001.md) — why SQLite is the production storage substrate
-- [docs/ROADMAP.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/ROADMAP.md) — delivery phases and exit criteria
-- [docs/SCOPE.md](https://github.com/kartikkabadi/minisqlite/blob/phase/control-plane-kernel-docs/docs/SCOPE.md) — what is included and explicitly excluded
-
-These documents currently live on the `phase/control-plane-kernel-docs` branch and land on `main` via [PR #11](https://github.com/kartikkabadi/minisqlite/pull/11).
+- [docs/ADR-001.md](https://github.com/kartikkabadi/minisqlite/blob/a34637409aff5b6bcef1444df075ad86982ea998/docs/ADR-001.md) — why SQLite is the production storage substrate
+- [docs/ROADMAP.md](https://github.com/kartikkabadi/minisqlite/blob/a34637409aff5b6bcef1444df075ad86982ea998/docs/ROADMAP.md) — delivery phases and exit criteria
+- [docs/SCOPE.md](https://github.com/kartikkabadi/minisqlite/blob/a34637409aff5b6bcef1444df075ad86982ea998/docs/SCOPE.md) — what is included and explicitly excluded
 
 Explicit non-goals: SQL exposed through the public API, distributed consensus, multi-process writers, replication, a workflow DSL, and a public multi-backend storage abstraction.
 
