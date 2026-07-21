@@ -38,8 +38,8 @@ mod transaction;
 
 pub use config::{Durability, EffectMode, Limits};
 pub use error::{
-    ClaimError, CommitError, Conflict, Error, IndeterminateCommit, LeaseError, RecoveryError,
-    StorageError, ValidationError,
+    ClaimError, CommitError, Conflict, Error, IndeterminateCommit, IndeterminateLease,
+    LeaseConflict, LeaseError, RecoveryError, StorageError, ValidationError,
 };
 pub use event::{Event, PersistedEvent, StreamVersion};
 pub use id::{Id, InvalidId};

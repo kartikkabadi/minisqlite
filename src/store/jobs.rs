@@ -18,7 +18,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::config::EffectMode;
 use crate::error::{
-    ClaimError, Conflict, Error, LeaseError, RecoveryError, StorageError, ValidationError,
+    ClaimError, Conflict, Error, IndeterminateLease, LeaseConflict, LeaseError, RecoveryError,
+    StorageError, ValidationError,
 };
 use crate::id::Id;
 use crate::jobs::{
@@ -813,6 +814,11 @@ fn insert_claim_transaction(
 }
 
 /// Durably extend an active lease.
+///
+/// Pre-commit failures are typed conflicts or storage errors and persist nothing;
+/// a failed COMMIT step is [`LeaseError::Indeterminate`] because the extension may
+/// or may not be durable. Callers recover by reading the job's lease state via
+/// `store.job(job_id)`.
 pub(crate) fn extend_lease(
     conn: &mut Connection,
     job_id: Id,
@@ -832,7 +838,22 @@ pub(crate) fn extend_lease(
         },
         now_ms,
     )?;
-    tx.commit().map_err(StorageError::from_sqlite)?;
+    // Only the COMMIT step is indeterminate: it may or may not have persisted.
+    if let Err(e) = tx.commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: StorageError::from_sqlite(e).to_string(),
+        }));
+    }
+
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(LeaseError::Indeterminate(IndeterminateLease {
+            job_id,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
+
     Ok(receipt)
 }
 
@@ -848,30 +869,33 @@ pub(crate) fn apply_extend_lease(
         lease_token,
         new_expiry_ms,
     } = *extension;
-    let job = load_job(tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
+    let job = load_job(tx, job_id)?.ok_or(LeaseConflict::JobNotFound(job_id))?;
     if job.state != JobState::Leased {
-        return Err(LeaseError::NotLeased {
+        return Err(LeaseConflict::NotLeased {
             job_id,
             state: job.state,
-        });
+        }
+        .into());
     }
     if job.lease_token != Some(lease_token) {
-        return Err(LeaseError::InvalidToken { job_id });
+        return Err(LeaseConflict::InvalidToken { job_id }.into());
     }
     let current_ms = job.lease_expires_at_ms.unwrap_or(i64::MIN);
     if now_ms > current_ms {
-        return Err(LeaseError::Expired {
+        return Err(LeaseConflict::Expired {
             job_id,
             lease_expires_at_ms: current_ms,
             now_ms,
-        });
+        }
+        .into());
     }
     if new_expiry_ms <= current_ms {
-        return Err(LeaseError::ExpiryNotLater {
+        return Err(LeaseConflict::ExpiryNotLater {
             job_id,
             current_ms,
             requested_ms: new_expiry_ms,
-        });
+        }
+        .into());
     }
     tx.execute(
         "UPDATE jobs SET lease_expires_at_ms = ?2 WHERE job_id = ?1",

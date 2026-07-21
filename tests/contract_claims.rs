@@ -6,7 +6,7 @@ mod common;
 use common::{db_path, id, open, open_in, temp_dir};
 use minisqlite::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch, ControlPlaneStore, Id,
-    IndeterminateClaim, JobSpec, JobState, LeaseError, Resolution,
+    IndeterminateClaim, JobSpec, JobState, LeaseConflict, LeaseError, Resolution,
 };
 
 const NOW: i64 = 10_000;
@@ -412,7 +412,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), id(999), expiry + 1_000, NOW)
             .unwrap_err(),
-        LeaseError::InvalidToken { .. }
+        LeaseError::Conflict(LeaseConflict::InvalidToken { .. })
     ));
 
     // The new expiry must be strictly later than the current expiry.
@@ -420,7 +420,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), claimed.lease_token, expiry, NOW)
             .unwrap_err(),
-        LeaseError::ExpiryNotLater { .. }
+        LeaseError::Conflict(LeaseConflict::ExpiryNotLater { .. })
     ));
 
     // Unknown jobs are rejected.
@@ -428,7 +428,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(404), claimed.lease_token, expiry + 1_000, NOW)
             .unwrap_err(),
-        LeaseError::JobNotFound(_)
+        LeaseError::Conflict(LeaseConflict::JobNotFound(_))
     ));
 
     // A valid extension moves the expiry without incrementing the attempt.
@@ -450,7 +450,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), claimed.lease_token, expiry + 2_000, NOW)
             .unwrap_err(),
-        LeaseError::NotLeased { .. }
+        LeaseError::Conflict(LeaseConflict::NotLeased { .. })
     ));
 }
 
@@ -507,7 +507,7 @@ fn extending_an_expired_lease_fails() {
         store
             .extend_lease(id(10), claimed.lease_token, expiry + 10_000, expiry + 1)
             .unwrap_err(),
-        LeaseError::Expired { .. }
+        LeaseError::Conflict(LeaseConflict::Expired { .. })
     ));
 }
 

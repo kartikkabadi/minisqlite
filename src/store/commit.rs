@@ -129,8 +129,14 @@ pub(crate) fn commit(
             Operation::ExtendLease(extension) => {
                 crate::store::jobs::apply_extend_lease(&tx, extension, batch.committed_at_ms)
                     .map_err(|e| match e {
+                        crate::error::LeaseError::Conflict(c) => {
+                            CommitError::Conflict(Conflict::Lease(c))
+                        }
                         crate::error::LeaseError::Storage(s) => CommitError::Storage(s),
-                        other => ValidationError(other.to_string()).into(),
+                        // apply_extend_lease never commits, so it cannot be indeterminate.
+                        crate::error::LeaseError::Indeterminate(i) => CommitError::Storage(
+                            StorageError::Sqlite(i.storage_error().to_string()),
+                        ),
                     })?;
             }
         }

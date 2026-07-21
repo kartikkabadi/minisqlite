@@ -3,7 +3,7 @@
 
 use minisqlite::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, CommitBatch, ControlPlaneStore, Id, JobSpec,
-    JobState, LeaseError,
+    JobState, LeaseConflict, LeaseError,
 };
 
 fn store() -> (tempfile::TempDir, ControlPlaneStore) {
@@ -234,25 +234,25 @@ fn extend_lease_rules() {
         store
             .extend_lease(Id::from(9u128), claimed.lease_token, 20_000, 3_000)
             .unwrap_err(),
-        LeaseError::JobNotFound(Id::from(9u128))
+        LeaseError::Conflict(LeaseConflict::JobNotFound(Id::from(9u128)))
     );
     // Wrong token.
     assert_eq!(
         store
             .extend_lease(id, Id::from(8u128), 20_000, 3_000)
             .unwrap_err(),
-        LeaseError::InvalidToken { job_id: id }
+        LeaseError::Conflict(LeaseConflict::InvalidToken { job_id: id })
     );
     // Expiry must strictly increase.
     assert_eq!(
         store
             .extend_lease(id, claimed.lease_token, 12_000, 3_000)
             .unwrap_err(),
-        LeaseError::ExpiryNotLater {
+        LeaseError::Conflict(LeaseConflict::ExpiryNotLater {
             job_id: id,
             current_ms: 12_000,
             requested_ms: 12_000,
-        }
+        })
     );
     // Success: expiry extended, attempt unchanged, durable.
     let receipt = store
@@ -271,10 +271,10 @@ fn extend_lease_rules() {
         store
             .extend_lease(id, claimed.lease_token, 30_000, 5_000)
             .unwrap_err(),
-        LeaseError::NotLeased {
+        LeaseError::Conflict(LeaseConflict::NotLeased {
             job_id: id,
             state: JobState::Succeeded,
-        }
+        })
     );
 }
 

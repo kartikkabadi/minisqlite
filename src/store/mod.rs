@@ -320,6 +320,10 @@ impl ControlPlaneStore {
     }
 
     /// Durably extend an active lease. Does not increment the attempt counter.
+    ///
+    /// On an indeterminate COMMIT outcome the writer connection is discarded and
+    /// reopened lazily by the next operation (plan §7.4). Callers recover by
+    /// reading the job's current lease state with [`ControlPlaneStore::job`].
     pub fn extend_lease(
         &self,
         job_id: Id,
@@ -329,7 +333,11 @@ impl ControlPlaneStore {
     ) -> Result<LeaseExtensionReceipt, LeaseError> {
         let mut guard = self.writer();
         let conn = self.connection(&mut guard).map_err(LeaseError::Storage)?;
-        jobs::extend_lease(conn, job_id, lease_token, new_expiry_ms, now_ms)
+        let result = jobs::extend_lease(conn, job_id, lease_token, new_expiry_ms, now_ms);
+        if matches!(result, Err(LeaseError::Indeterminate(_))) {
+            *guard = None;
+        }
+        result
     }
 
     /// Recover the outcome of an indeterminate claim, reconstructing original lease
