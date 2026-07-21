@@ -17,8 +17,9 @@ state kernel on SQLite, not a from-scratch SQL engine.
 - Durable jobs: partition-ordered claiming, leases with extension, retries,
   max attempts, cancellation, and explicit effect modes
   (`reconcilable`, `idempotent`, `intrinsically_idempotent`)
-- Honest uncertainty handling: indeterminate commits and claims return only a
-  transaction ID (`IndeterminateCommit`, `IndeterminateClaim`) and are
+- Honest uncertainty handling: indeterminate commits and claims return typed
+  errors (`IndeterminateCommit`, `IndeterminateClaim`) with no payloads or
+  lease tokens, and are
   recovered explicitly via `recover_transaction` / `recover_claim`;
   uncertain claims can never yield executable work
 - SQLite backend (WAL mode, checksummed forward-only migrations, `Strict` /
