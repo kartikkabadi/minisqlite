@@ -12,6 +12,8 @@
 //! - Missing jobs and stale lease tokens in commit operations are `ValidationError`s;
 //!   invalid state transitions are `Conflict::JobTransition`.
 
+use std::sync::LazyLock;
+
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::config::EffectMode;
@@ -30,6 +32,28 @@ const DEFAULT_RETRY_DELAY_MS: i64 = 30_000;
 
 /// Maximum expired leases repaired per claim call.
 const MAINTENANCE_LIMIT: usize = 64;
+
+/// Comma-separated terminal state codes for SQL `IN` clauses, derived from
+/// [`JobState::encode`] so the encoding lives in one place.
+pub(crate) static TERMINAL_STATES_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}, {}, {}",
+        JobState::Succeeded.encode(),
+        JobState::Dead.encode(),
+        JobState::Cancelled.encode()
+    )
+});
+
+/// Comma-separated nonterminal state codes for SQL `IN` clauses.
+pub(crate) static ACTIVE_STATES_SQL: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "{}, {}, {}, {}",
+        JobState::Pending.encode(),
+        JobState::Leased.encode(),
+        JobState::RetryWait.encode(),
+        JobState::Uncertain.encode()
+    )
+});
 
 const JOB_COLUMNS: &str = "job_id, enqueue_sequence, queue, partition_key, payload, \
      not_before_ms, max_attempts, effect_mode, idempotency_key, state, attempt, \
@@ -184,8 +208,11 @@ fn drain_partition_if_empty(
     partition_key: &str,
 ) -> Result<(), StorageError> {
     conn.execute(
-        "DELETE FROM active_partitions WHERE queue = ?1 AND partition_key = ?2 AND NOT EXISTS \
-         (SELECT 1 FROM jobs WHERE queue = ?1 AND partition_key = ?2 AND state < 4)",
+        &format!(
+            "DELETE FROM active_partitions WHERE queue = ?1 AND partition_key = ?2 AND NOT EXISTS \
+             (SELECT 1 FROM jobs WHERE queue = ?1 AND partition_key = ?2 AND state IN ({}))",
+            ACTIVE_STATES_SQL.as_str(),
+        ),
         rusqlite::params![queue, partition_key],
     )
     .map_err(StorageError::from_sqlite)?;
@@ -673,7 +700,8 @@ fn plan_leases(
             .query_row(
                 &format!(
                     "SELECT {JOB_COLUMNS} FROM jobs WHERE queue = ?1 AND partition_key = ?2 \
-                     AND state < 4 ORDER BY enqueue_sequence LIMIT 1"
+                     AND state IN ({}) ORDER BY enqueue_sequence LIMIT 1",
+                    ACTIVE_STATES_SQL.as_str(),
                 ),
                 rusqlite::params![request.queue, partition],
                 row_to_job,

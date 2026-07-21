@@ -7,6 +7,8 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{Error, StorageError, ValidationError};
+use crate::jobs::JobState;
+use crate::store::jobs::{ACTIVE_STATES_SQL, TERMINAL_STATES_SQL};
 use crate::store::migrations;
 
 /// A single finding from [`ControlPlaneStore::verify`](crate::ControlPlaneStore::verify):
@@ -188,10 +190,11 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
 
     // Terminal jobs must carry no lease fields.
     let mut stmt = conn
-        .prepare(
-            "SELECT job_id FROM jobs WHERE state IN (4, 5, 6)
+        .prepare(&format!(
+            "SELECT job_id FROM jobs WHERE state IN ({})
          AND (lease_token IS NOT NULL OR worker_id IS NOT NULL OR lease_expires_at_ms IS NOT NULL)",
-        )
+            TERMINAL_STATES_SQL.as_str(),
+        ))
         .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map([], |row| row.get::<_, Vec<u8>>(0))
@@ -206,11 +209,12 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
 
     // Every active partition must contain nonterminal work.
     let mut stmt = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT ap.queue, ap.partition_key FROM active_partitions ap
          WHERE NOT EXISTS (SELECT 1 FROM jobs j WHERE j.queue = ap.queue
-             AND j.partition_key = ap.partition_key AND j.state IN (0, 1, 2, 3))",
-        )
+             AND j.partition_key = ap.partition_key AND j.state IN ({}))",
+            ACTIVE_STATES_SQL.as_str(),
+        ))
         .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map([], |row| {
@@ -286,7 +290,10 @@ pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Err
             .map_err(StorageError::from_sqlite)? as u32,
         oldest_active_lease_ms: conn
             .query_row(
-                "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = 1",
+                &format!(
+                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    JobState::Leased.encode()
+                ),
                 [],
                 |row| row.get(0),
             )
@@ -297,7 +304,10 @@ pub(crate) fn stats(conn: &Connection, db_path: &Path) -> Result<StoreStats, Err
         // uncertainty, which is the lease expiry they carried at that moment.
         oldest_uncertain_job_ms: conn
             .query_row(
-                "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = 3",
+                &format!(
+                    "SELECT MIN(lease_expires_at_ms) FROM jobs WHERE state = {}",
+                    JobState::Uncertain.encode()
+                ),
                 [],
                 |row| row.get(0),
             )
@@ -317,15 +327,9 @@ fn count(conn: &Connection, table: &str) -> Result<u64, Error> {
 }
 
 fn state_name(code: i64) -> String {
-    match code {
-        0 => "pending".into(),
-        1 => "leased".into(),
-        2 => "retry_wait".into(),
-        3 => "uncertain".into(),
-        4 => "succeeded".into(),
-        5 => "dead".into(),
-        6 => "cancelled".into(),
-        other => format!("unknown({other})"),
+    match JobState::decode(code) {
+        Some(state) => state.name().into(),
+        None => format!("unknown({code})"),
     }
 }
 

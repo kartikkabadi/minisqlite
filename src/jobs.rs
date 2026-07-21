@@ -123,8 +123,7 @@ pub enum JobState {
 
 impl JobState {
     /// Stable integer encoding used in the `jobs` table.
-    #[allow(dead_code)] // used once job writes are implemented
-    pub(crate) fn encode(self) -> i64 {
+    pub(crate) const fn encode(self) -> i64 {
         match self {
             JobState::Pending => 0,
             JobState::Leased => 1,
@@ -136,8 +135,20 @@ impl JobState {
         }
     }
 
+    /// Stable lower-case name used by stats and diagnostic exports.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            JobState::Pending => "pending",
+            JobState::Leased => "leased",
+            JobState::RetryWait => "retry_wait",
+            JobState::Uncertain => "uncertain",
+            JobState::Succeeded => "succeeded",
+            JobState::Dead => "dead",
+            JobState::Cancelled => "cancelled",
+        }
+    }
+
     /// Decode the stable integer encoding used in the `jobs` table.
-    #[allow(dead_code)] // used once job reads are implemented
     pub(crate) fn decode(value: i64) -> Option<Self> {
         match value {
             0 => Some(JobState::Pending),
