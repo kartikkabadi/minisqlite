@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use rusqlite::Connection;
 
 use crate::config::{Durability, Limits};
-use crate::error::{ClaimError, CommitError, Error, LeaseError, RecoveryError};
+use crate::error::{ClaimError, CommitError, Error, LeaseError, RecoveryError, StorageError};
 use crate::event::PersistedEvent;
 use crate::id::Id;
 use crate::jobs::{
@@ -63,7 +63,7 @@ impl StoreBuilder {
         let mut conn = connection::open(&self.path, self.durability)?;
         migrations::migrate(&mut conn)?;
         Ok(ControlPlaneStore {
-            writer: Mutex::new(conn),
+            writer: Mutex::new(Some(conn)),
             path: self.path,
             limits: self.limits,
             durability: self.durability,
@@ -77,7 +77,9 @@ impl StoreBuilder {
 /// durable jobs, and honest uncertainty handling.
 #[derive(Debug)]
 pub struct ControlPlaneStore {
-    writer: Mutex<Connection>,
+    /// The single writer connection. `None` means the connection was poisoned by an
+    /// indeterminate COMMIT outcome (plan §7.4) and must be reopened before reuse.
+    writer: Mutex<Option<Connection>>,
     path: PathBuf,
     limits: Limits,
     durability: Durability,
@@ -109,7 +111,7 @@ impl ControlPlaneStore {
         self.limits
     }
 
-    fn writer(&self) -> std::sync::MutexGuard<'_, Connection> {
+    fn writer(&self) -> std::sync::MutexGuard<'_, Option<Connection>> {
         // A poisoned mutex means another thread panicked mid-operation; the SQLite
         // transaction it held has rolled back, so the connection is safe to reuse.
         match self.writer.lock() {
@@ -118,29 +120,56 @@ impl ControlPlaneStore {
         }
     }
 
+    /// Return the live writer connection, reopening it if a previous indeterminate
+    /// COMMIT poisoned it.
+    fn connection<'a>(
+        &self,
+        guard: &'a mut Option<Connection>,
+    ) -> Result<&'a mut Connection, StorageError> {
+        if guard.is_none() {
+            *guard = Some(connection::open(&self.path, self.durability)?);
+        }
+        guard
+            .as_mut()
+            .ok_or_else(|| StorageError::Io("writer connection unavailable".into()))
+    }
+
     // ----- transactions -----
 
     /// Atomically commit a batch of events, projection patches, and job operations.
+    ///
+    /// On an indeterminate COMMIT outcome the writer connection is discarded and
+    /// reopened lazily by the next operation (plan §7.4).
     pub fn commit(&self, batch: &CommitBatch) -> Result<CommitReceipt, CommitError> {
-        let mut conn = self.writer();
-        commit::commit(&mut conn, &self.limits, batch)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard).map_err(CommitError::Storage)?;
+        let result = commit::commit(conn, &self.limits, batch);
+        if matches!(result, Err(CommitError::Indeterminate(_))) {
+            *guard = None;
+        }
+        result
     }
 
-    /// Recover the outcome of an indeterminate commit.
+    /// Recover the outcome of an indeterminate commit. Always reopens a fresh
+    /// connection first when the writer was poisoned by the failed COMMIT.
     pub fn recover_transaction(
         &self,
         transaction_id: Id,
     ) -> Result<TransactionRecovery, RecoveryError> {
-        let conn = self.writer();
-        commit::recover_transaction(&conn, transaction_id).map_err(RecoveryError::from)
+        let mut guard = self.writer();
+        let conn = self
+            .connection(&mut guard)
+            .map_err(RecoveryError::Storage)?;
+        commit::recover_transaction(conn, transaction_id).map_err(RecoveryError::from)
     }
 
     // ----- events -----
 
     /// Events with a global sequence strictly greater than `after`, oldest first.
     pub fn events_after(&self, after: u64, limit: usize) -> Result<Vec<PersistedEvent>, Error> {
-        let conn = self.writer();
-        events::events_after(&conn, after, limit).map_err(Error::from)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        events::events_after(conn, after, limit).map_err(Error::from)
     }
 
     /// Events for one stream with a stream version of at least `from_version`, oldest
@@ -151,34 +180,39 @@ impl ControlPlaneStore {
         from_version: u64,
         limit: usize,
     ) -> Result<Vec<PersistedEvent>, Error> {
-        let conn = self.writer();
-        events::stream_events(&conn, stream_id, from_version, limit).map_err(Error::from)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        events::stream_events(conn, stream_id, from_version, limit).map_err(Error::from)
     }
 
     /// Look up one event by its ID.
     pub fn get_event(&self, event_id: Id) -> Result<Option<PersistedEvent>, Error> {
-        let conn = self.writer();
-        events::get_event(&conn, event_id).map_err(Error::from)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        events::get_event(conn, event_id).map_err(Error::from)
     }
 
     /// The current durable version of a stream (0 when the stream does not exist).
     pub fn stream_version(&self, stream_id: &str) -> Result<u64, Error> {
-        let conn = self.writer();
-        events::stream_version(&conn, stream_id).map_err(Error::from)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        events::stream_version(conn, stream_id).map_err(Error::from)
     }
 
     // ----- projections -----
 
     /// The current version of a projection (0 when it does not exist).
     pub fn projection_version(&self, projection: &str) -> Result<u64, Error> {
-        let conn = self.writer();
-        projections::projection_version(&conn, projection)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_version(conn, projection)
     }
 
     /// Get one projection entry by key.
     pub fn projection_get(&self, projection: &str, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        let conn = self.writer();
-        projections::projection_get(&conn, projection, key)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_get(conn, projection, key)
     }
 
     /// Scan entries with keys starting with `prefix`, in key order.
@@ -188,8 +222,9 @@ impl ControlPlaneStore {
         prefix: &[u8],
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.writer();
-        projections::projection_scan_prefix(&conn, projection, prefix, limit)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_scan_prefix(conn, projection, prefix, limit)
     }
 
     /// Paginated prefix scan: entries with keys starting with `prefix` and, when
@@ -201,8 +236,9 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.writer();
-        projections::projection_scan_prefix_page(&conn, projection, prefix, after, limit)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_scan_prefix_page(conn, projection, prefix, after, limit)
     }
 
     /// Range scan: entries with `start <= key < end` (either bound optional) and,
@@ -215,28 +251,39 @@ impl ControlPlaneStore {
         after: Option<&[u8]>,
         limit: usize,
     ) -> Result<Vec<ProjectionEntry>, Error> {
-        let conn = self.writer();
-        projections::projection_scan_range(&conn, projection, start, end, after, limit)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_scan_range(conn, projection, start, end, after, limit)
     }
 
     /// List all projections and their versions.
     pub fn projections_list(&self) -> Result<Vec<(String, u64)>, Error> {
-        let conn = self.writer();
-        projections::projections_list(&conn)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projections_list(conn)
     }
 
     /// The number of entries in a projection (0 when it does not exist).
     pub fn projection_entry_count(&self, projection: &str) -> Result<u64, Error> {
-        let conn = self.writer();
-        projections::projection_entry_count(&conn, projection)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        projections::projection_entry_count(conn, projection)
     }
 
     // ----- jobs -----
 
     /// Claim ready jobs from one queue, performing bounded expired-lease maintenance.
+    ///
+    /// On an indeterminate COMMIT outcome the writer connection is discarded and
+    /// reopened lazily by the next operation (plan §7.4).
     pub fn claim_jobs(&self, request: &ClaimRequest) -> Result<ClaimOutcome, ClaimError> {
-        let mut conn = self.writer();
-        jobs::claim_jobs(&mut conn, request)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard).map_err(ClaimError::Storage)?;
+        let result = jobs::claim_jobs(conn, request);
+        if matches!(result, Err(ClaimError::Indeterminate(_))) {
+            *guard = None;
+        }
+        result
     }
 
     /// Durably extend an active lease. Does not increment the attempt counter.
@@ -247,21 +294,28 @@ impl ControlPlaneStore {
         new_expiry_ms: i64,
         now_ms: i64,
     ) -> Result<LeaseExtensionReceipt, LeaseError> {
-        let mut conn = self.writer();
-        jobs::extend_lease(&mut conn, job_id, lease_token, new_expiry_ms, now_ms)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard).map_err(LeaseError::Storage)?;
+        jobs::extend_lease(conn, job_id, lease_token, new_expiry_ms, now_ms)
     }
 
     /// Recover the outcome of an indeterminate claim, reconstructing original lease
     /// tokens from durable claim receipts.
+    /// Always reopens a fresh connection first when the writer was poisoned by the
+    /// failed COMMIT.
     pub fn recover_claim(&self, transaction_id: Id) -> Result<ClaimRecovery, RecoveryError> {
-        let conn = self.writer();
-        jobs::recover_claim(&conn, transaction_id)
+        let mut guard = self.writer();
+        let conn = self
+            .connection(&mut guard)
+            .map_err(RecoveryError::Storage)?;
+        jobs::recover_claim(conn, transaction_id)
     }
 
     /// Look up one job by its ID.
     pub fn job(&self, job_id: Id) -> Result<Option<JobInfo>, Error> {
-        let conn = self.writer();
-        jobs::get_job(&conn, job_id)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        jobs::get_job(conn, job_id)
     }
 
     /// List jobs, optionally filtered by queue and state, in enqueue order.
@@ -271,8 +325,9 @@ impl ControlPlaneStore {
         state: Option<JobState>,
         limit: usize,
     ) -> Result<Vec<JobInfo>, Error> {
-        let conn = self.writer();
-        jobs::list_jobs(&conn, queue, state, limit)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        jobs::list_jobs(conn, queue, state, limit)
     }
 
     // ----- ops -----
@@ -280,20 +335,23 @@ impl ControlPlaneStore {
     /// Copy the database to `dest_path` using the SQLite backup API. Refuses an
     /// existing destination unless `overwrite` is set.
     pub fn backup(&self, dest_path: impl AsRef<Path>, overwrite: bool) -> Result<(), Error> {
-        let conn = self.writer();
-        ops::backup(&conn, dest_path.as_ref(), overwrite)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        ops::backup(conn, dest_path.as_ref(), overwrite)
     }
 
     /// Run integrity, foreign-key, migration-checksum, and semantic checks.
     pub fn verify(&self) -> Result<VerifyReport, Error> {
-        let conn = self.writer();
-        ops::verify(&conn)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        ops::verify(conn)
     }
 
     /// Collect store-wide statistics.
     pub fn stats(&self) -> Result<StoreStats, Error> {
-        let conn = self.writer();
-        ops::stats(&conn, &self.path)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        ops::stats(conn, &self.path)
     }
 
     /// Produce a redacted diagnostic export as JSON Lines text.
@@ -304,14 +362,16 @@ impl ControlPlaneStore {
     /// Produce a diagnostic export, optionally including payload bytes. Lease
     /// tokens are never included.
     pub fn diagnostic_export_with(&self, include_payloads: bool) -> Result<String, Error> {
-        let conn = self.writer();
-        ops::diagnostic_export(&conn, &self.path, include_payloads)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        ops::diagnostic_export(conn, &self.path, include_payloads)
     }
 
     /// Report the status of every known migration against the database.
     pub fn migrations_status(&self) -> Result<Vec<MigrationStatus>, Error> {
-        let conn = self.writer();
-        migrations::status(&conn).map_err(Error::from)
+        let mut guard = self.writer();
+        let conn = self.connection(&mut guard)?;
+        migrations::status(conn).map_err(Error::from)
     }
 }
 
@@ -413,6 +473,26 @@ mod tests {
             .expect_stream_version("s1", 1)
             .append_event(event(12, "s1", "b"));
         assert_eq!(store.commit(&ok).unwrap().transaction_sequence, 2);
+    }
+
+    #[test]
+    fn poisoned_writer_connection_is_reopened_before_the_next_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(&dir);
+        let batch = CommitBatch::new(Id::from(1u128), 2_000).append_event(event(10, "s1", "a"));
+        let receipt = store.commit(&batch).unwrap();
+
+        // Simulate the poisoning performed after an indeterminate COMMIT outcome.
+        *store.writer() = None;
+        assert_eq!(
+            store.recover_transaction(Id::from(1u128)).unwrap(),
+            TransactionRecovery::Committed(receipt)
+        );
+
+        // Writes also reopen the connection after poisoning.
+        *store.writer() = None;
+        let next = CommitBatch::new(Id::from(2u128), 2_001).append_event(event(11, "s1", "b"));
+        assert_eq!(store.commit(&next).unwrap().transaction_sequence, 2);
     }
 
     #[test]
