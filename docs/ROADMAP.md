@@ -14,6 +14,21 @@ Freeze and archive the journal rewrite (PR #9,
 `archive/append-only-journal-v1`, tag `journal-v1-experimental`); establish
 the ADR, roadmap, scope, and PR rules before any implementation.
 
+**Frozen-state record (PR #9):**
+
+- Frozen head: `e02bec053a1584f487ca7f0142b3d9454e5c3562`
+  (= `archive/append-only-journal-v1` = tag `journal-v1-experimental`).
+- CI at the frozen head: run
+  [29768537788](https://github.com/kartikkabadi/minisqlite/actions/runs/29768537788)
+  — green on ubuntu-latest, macos-latest, windows-latest, MSRV (Rust 1.89),
+  and Socket Security.
+- Unresolved review findings at freeze time: Review #9 (PR #9, review of
+  2026-07-20) returned a **NOT MERGE-READY** verdict with 13 merge blockers.
+  Fixes for all 13 were pushed and itemized in
+  [PR #9 comment 5025737156](https://github.com/kartikkabadi/minisqlite/pull/9#issuecomment-5025737156),
+  but no independent re-review of the frozen head `e02bec0` occurred before
+  the freeze, so those fixes remain unverified by review.
+
 **Exit criteria:** ADR-001, ROADMAP, SCOPE, and PR-RULES merged to `main`;
 ADR signed off by the technical decision owner and referenced from the root
 README; PR #9 archived and closed; Issue #10 open as the tracking issue;
