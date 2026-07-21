@@ -364,9 +364,15 @@ pub(crate) fn apply_fail(
             Some(&failure.error_summary),
         )?;
     } else {
-        let retry_after = failure
-            .retry_after_ms
-            .unwrap_or(now_ms + DEFAULT_RETRY_DELAY_MS);
+        let retry_after = match failure.retry_after_ms {
+            Some(ms) => ms,
+            None => now_ms.checked_add(DEFAULT_RETRY_DELAY_MS).ok_or_else(|| {
+                Error::Validation(ValidationError(
+                    "default retry timestamp overflows i64; supply retry_after_ms explicitly"
+                        .into(),
+                ))
+            })?,
+        };
         set_nonterminal(
             tx,
             job.job_id,
@@ -519,6 +525,14 @@ pub(crate) fn claim_jobs(
             "claim lease_ms must be positive".into(),
         )));
     }
+    let lease_expires_at_ms = request
+        .now_ms
+        .checked_add(request.lease_ms)
+        .ok_or_else(|| {
+            ClaimError::Validation(ValidationError(
+                "lease expiry timestamp overflows i64".into(),
+            ))
+        })?;
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -564,7 +578,6 @@ pub(crate) fn claim_jobs(
     }
 
     let mut claimed = Vec::with_capacity(leases.len());
-    let lease_expires_at_ms = request.now_ms + request.lease_ms;
     for lease in &leases {
         let attempt = lease.job.attempt + 1;
         tx.execute(
