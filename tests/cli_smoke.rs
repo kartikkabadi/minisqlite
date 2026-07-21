@@ -380,3 +380,50 @@ fn projections_scan_and_get() {
         Some(4)
     );
 }
+
+#[test]
+fn jobs_list_pages_with_after_cursor() {
+    use minisqlite::JobSpec;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("db");
+    let store = ControlPlaneStore::open(&db).unwrap();
+    for id in 1..=3u128 {
+        store
+            .commit(&CommitBatch::new(Id::from(100 + id), 2_000).enqueue_job(
+                JobSpec::reconcilable(Id::from(id), "q", format!("p{id}"), vec![]),
+            ))
+            .unwrap();
+    }
+    drop(store);
+
+    // A full page prints a next-cursor hint.
+    let output = run_cli(&[
+        "jobs",
+        "list",
+        "--limit",
+        "2",
+        "--db",
+        db.to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 3);
+    assert!(out.contains("next: --after 2"));
+
+    // Following the hint returns the remaining job with no further hint.
+    let output = run_cli(&[
+        "jobs",
+        "list",
+        "--limit",
+        "2",
+        "--after",
+        "2",
+        "--db",
+        db.to_str().unwrap(),
+    ]);
+    assert!(output.status.success());
+    let out = stdout(&output);
+    assert_eq!(out.lines().count(), 1);
+    assert!(!out.contains("next:"));
+    assert!(out.contains(&Id::from(3u128).to_hex()));
+}

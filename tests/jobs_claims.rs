@@ -401,3 +401,30 @@ fn lease_at_exact_expiry_is_current_everywhere() {
     assert!(matches!(outcome, ClaimOutcome::MaintenanceCommitted(_)));
     assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Uncertain);
 }
+
+#[test]
+fn jobs_page_paginates_by_enqueue_sequence() {
+    let (_dir, store) = store();
+    for id in 1..=5u128 {
+        enqueue(&store, id, "a");
+    }
+    let (first, cursor) = store.jobs_page(Some("q"), None, 0, 2).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0].job_id, Id::from(1u128));
+    assert_eq!(first[1].job_id, Id::from(2u128));
+    let (second, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0].job_id, Id::from(3u128));
+    let (last, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].job_id, Id::from(5u128));
+    // An exhausted cursor returns an empty page and an unchanged cursor.
+    let (empty, done) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(done, cursor);
+    // State filters apply within the page.
+    let (pending, _) = store
+        .jobs_page(Some("q"), Some(JobState::Leased), 0, 10)
+        .unwrap();
+    assert!(pending.is_empty());
+}
