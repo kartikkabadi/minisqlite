@@ -72,12 +72,12 @@ impl StoreBuilder {
         })
     }
 
-    /// Open an existing store for inspection: never creates the database file and
-    /// never migrates. Fails with a clear error if the file does not exist or its
-    /// schema is not exactly this build's supported version.
+    /// Open an existing store read-only for inspection: never creates the database
+    /// file, never migrates, and never writes. Fails with a clear error if the file
+    /// does not exist or its schema is not exactly this build's supported version.
     pub fn open_existing(self) -> Result<ControlPlaneStore, Error> {
         self.limits.validate()?;
-        let conn = connection::open_existing(&self.path, self.durability)?;
+        let conn = connection::open_existing(&self.path)?;
         migrations::require_current(&conn)?;
         Ok(ControlPlaneStore {
             writer: Mutex::new(Some(conn)),
