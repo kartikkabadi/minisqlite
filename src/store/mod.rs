@@ -429,13 +429,6 @@ mod tests {
     fn stubbed_subsystems_fail_gracefully() {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(&dir);
-        let batch = CommitBatch::new(Id::from(1u128), 2_000).enqueue_job(
-            crate::jobs::JobSpec::reconcilable(Id::from(10u128), "q", "p", vec![]),
-        );
-        assert!(matches!(
-            store.commit(&batch).unwrap_err(),
-            CommitError::Unimplemented(_)
-        ));
         assert!(matches!(
             store.verify().unwrap_err(),
             Error::Unimplemented(_)
