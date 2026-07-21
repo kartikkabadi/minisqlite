@@ -13,8 +13,9 @@
 //!
 //! Each run also emits a machine-readable report blob (§5) to
 //! `target/kernel-bench/report.json`. Set `KERNEL_BENCH_COLD=1` to request a
-//! cold-cache run: OS caches are dropped before open-time measurements when
-//! `/proc/sys/vm/drop_caches` is writable; without root the run stays warm
+//! cold-cache run: OS caches are dropped before open-time and every read
+//! workload measurement when `/proc/sys/vm/drop_caches` is writable; without
+//! root the run stays warm
 //! and is labeled `cold mode unavailable (requires root)` per §1.
 
 use std::path::{Path, PathBuf};
@@ -48,7 +49,8 @@ fn main() {
 
     let profile = Profile::from_env();
     let root = bench_root();
-    print_environment(&root, &profile);
+    let durability_check = DurabilityCheck::detect(&root);
+    print_environment(&root, &profile, &durability_check);
 
     transaction_workloads(&root, &profile);
     scale_event_history(&root, &profile);
@@ -68,7 +70,7 @@ fn main() {
             }
         }
     }
-    let report_path = write_json_report(&root, &profile);
+    let report_path = write_json_report(&root, &profile, &durability_check);
     println!(
         "\nkernel_bench: JSON report written to {}",
         report_path.display()
@@ -86,7 +88,8 @@ struct Profile {
     txn_iters: usize,
     /// Measured iterations for batch-claim workloads (T5 variants).
     claim_iters: usize,
-    /// Drop OS caches before open-time measurements (requires root).
+    /// Drop OS caches before open-time and read-workload measurements
+    /// (requires root).
     cold: bool,
     event_populations: Vec<u64>,
     terminal_job_populations: Vec<u64>,
@@ -216,6 +219,97 @@ fn device_class(device: &str) -> String {
     format!("unknown class, device {device}")
 }
 
+/// §1 suspicious-durability enforcement: flag environments that invalidate
+/// durability-sensitive numbers (ephemeral/virtual filesystems, implausibly
+/// fast fsync) instead of silently reporting them.
+struct DurabilityCheck {
+    suspicious: bool,
+    reason: String,
+    fsync_baseline: String,
+}
+
+impl DurabilityCheck {
+    /// fsync medians below this on a dirty file imply the sync never reached
+    /// durable media (tmpfs, lying cache, coalesced syncs).
+    const SUSPICIOUS_FSYNC_US: f64 = 50.0;
+
+    fn detect(root: &Path) -> Self {
+        let mut reasons = Vec::new();
+        let (fstype, _, _) = filesystem_for(root);
+        const EPHEMERAL: &[&str] = &[
+            "tmpfs",
+            "ramfs",
+            "overlay",
+            "overlayfs",
+            "9p",
+            "nfs",
+            "nfs4",
+            "cifs",
+        ];
+        if EPHEMERAL.contains(&fstype.as_str()) {
+            reasons.push(format!(
+                "bench directory is on {fstype} (ephemeral/virtual filesystem)"
+            ));
+        }
+        let fsync_baseline = match fsync_median_us(root) {
+            Some(median_us) => {
+                if median_us < Self::SUSPICIOUS_FSYNC_US {
+                    reasons.push(format!(
+                        "fsync median {median_us:.1}us is implausibly fast for durable storage"
+                    ));
+                }
+                format!("median {median_us:.1}us over 20 syncs of a dirty 4 KiB file")
+            }
+            None => "unavailable (fsync probe failed)".to_string(),
+        };
+        Self {
+            suspicious: !reasons.is_empty(),
+            reason: if reasons.is_empty() {
+                "none".to_string()
+            } else {
+                reasons.join("; ")
+            },
+            fsync_baseline,
+        }
+    }
+}
+
+/// Median latency of syncing a freshly rewritten 4 KiB file, in microseconds.
+fn fsync_median_us(root: &Path) -> Option<f64> {
+    use std::io::{Seek, Write};
+    let path = root.join("fsync-probe.tmp");
+    let mut file = std::fs::File::create(&path).ok()?;
+    let block = [0u8; 4096];
+    let mut samples = Vec::with_capacity(20);
+    for _ in 0..20 {
+        file.rewind().ok()?;
+        file.write_all(&block).ok()?;
+        let t = Instant::now();
+        file.sync_all().ok()?;
+        samples.push(t.elapsed());
+    }
+    drop(file);
+    let _ = std::fs::remove_file(&path);
+    samples.sort_unstable();
+    Some(percentile(&samples, 0.50).as_secs_f64() * 1e6)
+}
+
+/// Measure the page size the store actually uses: open a probe store in the
+/// bench root and read `PRAGMA page_size` from its database.
+fn measured_page_size(root: &Path) -> String {
+    let path = root.join("page-size-probe.db");
+    let page_size = ControlPlaneStore::open(&path).ok().and_then(|_store| {
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| conn.query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0)))
+            .ok()
+    });
+    let _ = std::fs::remove_file(&path);
+    match page_size {
+        Some(n) => format!("{n} (measured via PRAGMA page_size)"),
+        None => "unavailable (page-size probe failed)".to_string(),
+    }
+}
+
 fn vmhwm_kb() -> Option<f64> {
     read_first_match("/proc/self/status", "VmHWM")
         .and_then(|kb| kb.trim_end_matches(" kB").trim().parse().ok())
@@ -229,7 +323,7 @@ fn env_field(key: &str, value: &str) {
         .push((key.to_string(), value.to_string()));
 }
 
-fn print_environment(root: &Path, profile: &Profile) {
+fn print_environment(root: &Path, profile: &Profile, durability_check: &DurabilityCheck) {
     let (fstype, opts, device) = filesystem_for(root);
     println!("== kernel_bench environment report (docs/BENCHMARKS.md §1) ==");
     env_field(
@@ -251,10 +345,7 @@ fn print_environment(root: &Path, profile: &Profile) {
     env_field("SQLite version", rusqlite::version());
     env_field("Filesystem", &format!("{fstype}, {opts}"));
     env_field("Storage device", &device_class(&device));
-    env_field(
-        "Page size",
-        "4096 (SQLite default; store does not override)",
-    );
+    env_field("Page size", &measured_page_size(root));
     env_field(
         "WAL state",
         "WAL on (set at open), fresh DB per fixture; per-group sizes on 'db state' lines",
@@ -264,7 +355,7 @@ fn print_environment(root: &Path, profile: &Profile) {
         "per scale section / workload group, on 'db state' lines below",
     );
     let cache = if profile.cold {
-        "cold (drop_caches before open-time measurements)".to_string()
+        "cold (drop_caches before open-time and every read workload)".to_string()
     } else if std::env::var("KERNEL_BENCH_COLD").is_ok_and(|v| v == "1") {
         "warm; cold mode unavailable (requires root to write /proc/sys/vm/drop_caches)".to_string()
     } else {
@@ -302,6 +393,14 @@ fn print_environment(root: &Path, profile: &Profile) {
     env_field(
         "Peak RSS",
         "per workload, sampled in a fresh child process (VmHWM), printed below",
+    );
+    env_field("Fsync baseline", &durability_check.fsync_baseline);
+    env_field(
+        "Suspicious durability",
+        &format!(
+            "{} (reason: {})",
+            durability_check.suspicious, durability_check.reason
+        ),
     );
 }
 
@@ -448,7 +547,11 @@ fn json_entry(entry: &str) {
 }
 
 /// Write the §5 machine-readable report blob for this run.
-fn write_json_report(root: &Path, profile: &Profile) -> PathBuf {
+fn write_json_report(
+    root: &Path,
+    profile: &Profile,
+    durability_check: &DurabilityCheck,
+) -> PathBuf {
     let mut out = String::from("{\n  \"environment\": {\n");
     let env = JSON_ENV.lock().expect("env lock");
     for (i, (key, value)) in env.iter().enumerate() {
@@ -460,8 +563,10 @@ fn write_json_report(root: &Path, profile: &Profile) -> PathBuf {
         ));
     }
     out.push_str(&format!(
-        "  }},\n  \"profile\": \"{}\",\n  \"entries\": [\n",
-        if profile.full { "full" } else { "reduced" }
+        "  }},\n  \"profile\": \"{}\",\n  \"suspicious_durability\": {},\n  \"suspicious_durability_reason\": \"{}\",\n  \"entries\": [\n",
+        if profile.full { "full" } else { "reduced" },
+        durability_check.suspicious,
+        json_escape(&durability_check.reason),
     ));
     let entries = JSON_ENTRIES.lock().expect("entries lock");
     for (i, entry) in entries.iter().enumerate() {
@@ -480,36 +585,20 @@ fn fmt_mib(bytes: u64) -> String {
 }
 
 /// Print the §1 DB-size and WAL-state fields for one workload group: on-disk
-/// DB file size, `-wal` file size, and checkpoint state from a passive
-/// `PRAGMA wal_checkpoint` on a separate connection.
+/// DB file size and `-wal` file size, read from file metadata only so state
+/// reporting never mutates the fixture between measurements.
 fn print_db_state(context: &str, path: &Path) {
     let db_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let wal_path = PathBuf::from(format!("{}-wal", path.display()));
     let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-    let checkpoint = rusqlite::Connection::open(path)
-        .and_then(|conn| {
-            conn.busy_timeout(Duration::from_millis(5_000))?;
-            conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-        })
-        .map(|(busy, log, ckpt)| {
-            format!("passive checkpoint: busy={busy} wal_frames={log} checkpointed={ckpt}")
-        })
-        .unwrap_or_else(|e| format!("checkpoint state unavailable: {e}"));
     println!(
-        "    db state [{context}]: db={} wal={} ({checkpoint})",
+        "    db state [{context}]: db={} wal={}",
         fmt_mib(db_bytes),
         fmt_mib(wal_bytes),
     );
     json_entry(&format!(
-        "{{\"type\":\"db_state\",\"context\":\"{}\",\"db_bytes\":{db_bytes},\"wal_bytes\":{wal_bytes},\"checkpoint\":\"{}\"}}",
+        "{{\"type\":\"db_state\",\"context\":\"{}\",\"db_bytes\":{db_bytes},\"wal_bytes\":{wal_bytes}}}",
         json_escape(context),
-        json_escape(&checkpoint),
     ));
 }
 
@@ -544,25 +633,55 @@ fn print_fresh_process_rss(root: &Path, label: &str, workload: &str, db: Option<
     ));
 }
 
+/// The fixture database an `o*` RSS child reads (`KERNEL_BENCH_DB`).
+fn rss_child_db() -> PathBuf {
+    PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"))
+}
+
 /// Child-process entry point for fresh-process RSS sampling: run one workload
-/// and print this process's `VmHWM` in KiB.
+/// and print this process's `VmHWM` in KiB. Every T workload runs against a
+/// fresh child-local DB; every O workload reads the shared fixture passed via
+/// `KERNEL_BENCH_DB`.
 fn rss_child_main(workload: &str) {
     let root = PathBuf::from(std::env::var("KERNEL_BENCH_ROOT").expect("KERNEL_BENCH_ROOT"));
     let dir = root.join("rss-child");
     std::fs::create_dir_all(&dir).expect("mkdir rss-child");
     let mut ids = IdGen::new(99);
     let mut clock = Clock::new();
-    match workload {
-        "t3-strict" | "t3-relaxed" => {
-            let durability = if workload == "t3-strict" {
-                Durability::Strict
-            } else {
-                Durability::Relaxed
-            };
-            let path = dir.join(format!("{workload}.db"));
-            let _ = std::fs::remove_file(&path);
-            let store = open_store(&path, durability);
-            for n in 0..(WARMUP + 100) as u64 {
+    let iters = (WARMUP + 100) as u64;
+    let durability = if workload.ends_with("-strict") {
+        Durability::Strict
+    } else {
+        Durability::Relaxed
+    };
+    let fresh_db = |name: &str| {
+        let path = dir.join(format!("{name}.db"));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        path
+    };
+    let kind = workload.split('-').next().unwrap_or(workload);
+    match kind {
+        "t1" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for _ in 0..iters {
+                let batch = CommitBatch::new(ids.next(), clock.tick())
+                    .append_event(event(&mut ids, &mut clock, "s"));
+                store.commit(&batch).expect("child T1 commit");
+            }
+        }
+        "t2" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for n in 0..iters {
+                let batch = CommitBatch::new(ids.next(), clock.tick())
+                    .append_event(event(&mut ids, &mut clock, "s"))
+                    .apply_projection_patch(ProjectionPatch::new("proj", n).put(b"key", b"value"));
+                store.commit(&batch).expect("child T2 commit");
+            }
+        }
+        "t3" => {
+            let store = open_store(&fresh_db(workload), durability);
+            for n in 0..iters {
                 let job = JobSpec::reconcilable(ids.next(), "q", format!("p{n}"), b"{}".to_vec());
                 let batch = CommitBatch::new(ids.next(), clock.tick())
                     .append_event(event(&mut ids, &mut clock, "s"))
@@ -571,10 +690,16 @@ fn rss_child_main(workload: &str) {
                 store.commit(&batch).expect("child T3 commit");
             }
         }
-        "t5-claim" => {
-            let path = dir.join("t5-claim.db");
-            let _ = std::fs::remove_file(&path);
-            let store = open_store(&path, Durability::Relaxed);
+        "t4" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            for _ in 0..iters {
+                let jobs = claim(&store, "q", clock.tick(), 1);
+                assert_eq!(jobs.len(), 1, "child T4 expected one claimed job");
+            }
+        }
+        "t5" => {
+            let store = open_store(&fresh_db(workload), durability);
             let rounds = 5u64;
             populate_jobs(&store, &mut ids, &mut clock, "q", "p", 100 * rounds, 100);
             for _ in 0..rounds {
@@ -582,14 +707,154 @@ fn rss_child_main(workload: &str) {
                 ack_all(&store, &mut ids, &mut clock, &jobs);
             }
         }
-        "o1-open" => {
-            let db = PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"));
-            let store = ControlPlaneStore::open(&db).expect("child O1 open");
+        "t6" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            let mut version = 0u64;
+            loop {
+                let jobs = claim(&store, "q", clock.tick(), 100);
+                if jobs.is_empty() {
+                    break;
+                }
+                for job in jobs {
+                    let batch = CommitBatch::new(ids.next(), clock.tick())
+                        .append_event(event(&mut ids, &mut clock, "s"))
+                        .apply_projection_patch(
+                            ProjectionPatch::new("proj", version).put(b"key", b"done"),
+                        )
+                        .acknowledge_job(job.job_id, job.lease_token, None);
+                    store.commit(&batch).expect("child T6 commit");
+                    version += 1;
+                }
+            }
+        }
+        "t7" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", 1, 1);
+            let job = claim(&store, "q", clock.tick(), 1)
+                .pop()
+                .expect("child T7 claim");
+            let mut expiry = job.lease_expires_at_ms;
+            for _ in 0..iters {
+                expiry += 1_000;
+                store
+                    .extend_lease(job.job_id, job.lease_token, expiry, clock.tick())
+                    .expect("child T7 extend lease");
+            }
+        }
+        "t8" => {
+            let store = open_store(&fresh_db(workload), durability);
+            populate_jobs(&store, &mut ids, &mut clock, "q", "p", iters, iters);
+            let mut leased = Vec::new();
+            loop {
+                let request = ClaimRequest {
+                    queue: "q".into(),
+                    worker_id: "bench-worker".into(),
+                    now_ms: clock.tick(),
+                    lease_ms: 1,
+                    limit: 1000,
+                };
+                let jobs = claimed_jobs(store.claim_jobs(&request).expect("child T8 claim"));
+                if jobs.is_empty() {
+                    break;
+                }
+                leased.extend(jobs.into_iter().map(|j| j.job_id));
+            }
+            clock.0 += 3_600_000; // expire every short lease
+            for _ in 0..(iters / 32 + 2) {
+                // Maintenance repairs at most 64 expired leases per claim call.
+                let request = ClaimRequest {
+                    queue: "q".into(),
+                    worker_id: "bench-worker".into(),
+                    now_ms: clock.tick(),
+                    lease_ms: 1,
+                    limit: 0,
+                };
+                store.claim_jobs(&request).expect("child T8 maintenance");
+            }
+            for job_id in leased {
+                let job = store
+                    .job(job_id)
+                    .expect("child T8 job lookup")
+                    .expect("child T8 job");
+                if job.state == minisqlite::JobState::Uncertain {
+                    let batch = CommitBatch::new(ids.next(), clock.tick())
+                        .resolve_uncertain_job(job_id, Resolution::MarkSucceeded);
+                    store.commit(&batch).expect("child T8 resolve");
+                }
+            }
+        }
+        "o1" => {
+            let store = ControlPlaneStore::open(rss_child_db()).expect("child O1 open");
             store.stream_version("s0").expect("child O1 first read");
         }
-        "o9-export" => {
-            let db = PathBuf::from(std::env::var("KERNEL_BENCH_DB").expect("KERNEL_BENCH_DB"));
-            let store = open_store(&db, Durability::Relaxed);
+        "o2" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            for _ in 0..iters {
+                let events = store
+                    .stream_events("s0", 1, 100)
+                    .expect("child O2 stream read");
+                assert_eq!(events.len(), 100, "child O2 expected 100 events");
+            }
+        }
+        "o3" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut cursor = 0u64;
+            loop {
+                let events = store.events_after(cursor, PAGE).expect("child O3 page");
+                match events.last() {
+                    Some(last) if events.len() == PAGE => cursor = last.global_sequence,
+                    _ => break,
+                }
+            }
+        }
+        "o4" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            for n in 0..iters {
+                let key = format!("key/{:08}", (n * 7919) % 10_000);
+                let value = store
+                    .projection_get("proj", key.as_bytes())
+                    .expect("child O4 get");
+                assert!(value.is_some(), "child O4 expected a value");
+            }
+        }
+        "o5" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut after: Option<Vec<u8>> = None;
+            loop {
+                let page = store
+                    .projection_scan_prefix_page("proj", b"key/", after.as_deref(), PAGE)
+                    .expect("child O5 page");
+                match page.last() {
+                    Some(last) if page.len() == PAGE => after = Some(last.key.clone()),
+                    _ => break,
+                }
+            }
+        }
+        "o6" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let mut cursor = 0u64;
+            loop {
+                let (jobs, next) = store
+                    .jobs_page(Some("histq"), None, cursor, PAGE)
+                    .expect("child O6 jobs page");
+                if jobs.len() < PAGE {
+                    break;
+                }
+                cursor = next;
+            }
+        }
+        "o7" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            let dest = dir.join("o7-backup.db");
+            store.backup(&dest, true).expect("child O7 backup");
+        }
+        "o8" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
+            store.verify().expect("child O8 verify");
+        }
+        "o9" => {
+            let store = open_store(&rss_child_db(), Durability::Relaxed);
             let export = store.diagnostic_export().expect("child O9 export");
             assert!(!export.is_empty(), "child O9 export empty");
         }
@@ -725,9 +990,15 @@ fn transaction_workloads(root: &Path, profile: &Profile) {
         commit_workloads(root, profile, durability, label);
         claim_workloads(root, profile, durability, label);
         lifecycle_workloads(root, profile, durability, label);
-        print_fresh_process_rss(root, &format!("T3 {label}"), &format!("t3-{label}"), None);
+        for t in 1..=8 {
+            print_fresh_process_rss(
+                root,
+                &format!("T{t} {label}"),
+                &format!("t{t}-{label}"),
+                None,
+            );
+        }
     }
-    print_fresh_process_rss(root, "T5 claim batch", "t5-claim", None);
 }
 
 fn commit_workloads(root: &Path, profile: &Profile, durability: Durability, label: &str) {
@@ -1023,9 +1294,12 @@ fn scale_event_history(root: &Path, profile: &Profile) {
                 },
             );
             population += (WARMUP + profile.txn_iters) as u64;
+            // Capture DB/WAL sizes while this store is still open: dropping
+            // the store checkpoints and deletes the WAL file.
+            if durability == Durability::Relaxed {
+                print_db_state(&format!("{population} events"), &path);
+            }
         }
-
-        print_db_state(&format!("{population} events"), &path);
 
         // O1: open time (store dropped and reopened per measurement).
         let mut samples = Vec::new();
@@ -1052,6 +1326,9 @@ fn scale_event_history(root: &Path, profile: &Profile) {
         let store = open_store(&path, Durability::Relaxed);
 
         // O2: read 100 events from one stream.
+        if profile.cold {
+            drop_caches();
+        }
         run_workload(
             &format!("O2 stream read 100 @ {population} events"),
             WARMUP,
@@ -1061,8 +1338,17 @@ fn scale_event_history(root: &Path, profile: &Profile) {
                 assert_eq!(events.len(), 100, "O2 expected 100 events");
             },
         );
+        print_fresh_process_rss(
+            root,
+            &format!("O2 stream read @ {population} events"),
+            "o2-read",
+            Some(&path),
+        );
 
         // O3: global pagination over the full history in 256-event pages.
+        if profile.cold {
+            drop_caches();
+        }
         let mut pages = Vec::new();
         let mut cursor = 0u64;
         loop {
@@ -1084,8 +1370,17 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             fmt_dur(first),
             fmt_dur(last)
         );
+        print_fresh_process_rss(
+            root,
+            &format!("O3 pagination @ {population} events"),
+            "o3-pages",
+            Some(&path),
+        );
 
         // O8: integrity verification.
+        if profile.cold {
+            drop_caches();
+        }
         let t = Instant::now();
         let verify = store.verify().expect("O8 verify");
         report_single(
@@ -1093,8 +1388,17 @@ fn scale_event_history(root: &Path, profile: &Profile) {
             t.elapsed(),
             &format!("ok={}", verify.is_ok()),
         );
+        print_fresh_process_rss(
+            root,
+            &format!("O8 verify @ {population} events"),
+            "o8-verify",
+            Some(&path),
+        );
 
         // O9: paged diagnostic export of the full history.
+        if profile.cold {
+            drop_caches();
+        }
         let t = Instant::now();
         let export = store.diagnostic_export().expect("O9 export");
         report_single(
@@ -1158,6 +1462,9 @@ fn scale_terminal_jobs(root: &Path, profile: &Profile) {
 
         // O6: page through the whole terminal history with a moving cursor
         // (like O3/O5), never refetching the first page.
+        if profile.cold {
+            drop_caches();
+        }
         let mut pages = Vec::new();
         let mut cursor = 0u64;
         loop {
@@ -1180,6 +1487,12 @@ fn scale_terminal_jobs(root: &Path, profile: &Profile) {
             "    O6 linearity check: first page {} vs last page {}",
             fmt_dur(first),
             fmt_dur(last)
+        );
+        print_fresh_process_rss(
+            root,
+            &format!("O6 jobs pagination @ {population} terminal jobs"),
+            "o6-jobs",
+            Some(&path),
         );
 
         print_db_state(&format!("{population} terminal jobs"), &path);
@@ -1272,6 +1585,9 @@ fn operational_projections(root: &Path, profile: &Profile) {
     }
     let store = open_store(&path, Durability::Relaxed);
 
+    if profile.cold {
+        drop_caches();
+    }
     let mut n = 0u64;
     run_workload(
         "O4 projection point read",
@@ -1286,7 +1602,11 @@ fn operational_projections(root: &Path, profile: &Profile) {
             n += 1;
         },
     );
+    print_fresh_process_rss(root, "O4 projection point read", "o4-point", Some(&path));
 
+    if profile.cold {
+        drop_caches();
+    }
     let mut pages = Vec::new();
     let mut after: Option<Vec<u8>> = None;
     loop {
@@ -1301,6 +1621,7 @@ fn operational_projections(root: &Path, profile: &Profile) {
         }
     }
     report("O5 prefix scan page (256 entries)", &mut pages);
+    print_fresh_process_rss(root, "O5 prefix scan", "o5-scan", Some(&path));
     print_db_state("O4/O5 projection fixture", &path);
 }
 
@@ -1309,7 +1630,7 @@ fn operational_projections(root: &Path, profile: &Profile) {
 // ---------------------------------------------------------------------------
 
 fn live_backup(root: &Path, profile: &Profile) {
-    println!("\n== §2.3 O7 live backup (writer stall while commits continue) ==");
+    println!("\n== §2.3 O7 live backup (writer mutex serialization while commits continue) ==");
     let dir = root.join("backup");
     std::fs::create_dir_all(&dir).expect("mkdir");
     let path = dir.join("source.db");
@@ -1372,9 +1693,10 @@ fn live_backup(root: &Path, profile: &Profile) {
         &format!("O7 live backup of {} MiB DB", size >> 20),
         backup_time,
         &format!(
-            "max writer stall (worst commit latency)={}",
+            "writer mutex serialization: worst commit latency behind backup={}",
             fmt_dur(max_stall)
         ),
     );
     print_db_state("O7 backup source", &path);
+    print_fresh_process_rss(root, "O7 backup", "o7-backup", Some(&path));
 }
