@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::StorageError;
 
@@ -91,7 +91,9 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
                 }
             }
             None => {
-                let tx = conn.transaction().map_err(StorageError::from_sqlite)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(StorageError::from_sqlite)?;
                 tx.execute_batch(migration.sql)
                     .map_err(StorageError::from_sqlite)?;
                 tx.execute(
