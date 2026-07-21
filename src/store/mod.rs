@@ -296,10 +296,16 @@ impl ControlPlaneStore {
         ops::stats(&conn, &self.path)
     }
 
-    /// Produce a redacted diagnostic export as text.
+    /// Produce a redacted diagnostic export as JSON Lines text.
     pub fn diagnostic_export(&self) -> Result<String, Error> {
+        self.diagnostic_export_with(false)
+    }
+
+    /// Produce a diagnostic export, optionally including payload bytes. Lease
+    /// tokens are never included.
+    pub fn diagnostic_export_with(&self, include_payloads: bool) -> Result<String, Error> {
         let conn = self.writer();
-        ops::diagnostic_export(&conn, &self.path)
+        ops::diagnostic_export(&conn, &self.path, include_payloads)
     }
 
     /// Report the status of every known migration against the database.
@@ -423,16 +429,6 @@ mod tests {
             store.recover_transaction(Id::from(9u128)).unwrap(),
             TransactionRecovery::Absent
         );
-    }
-
-    #[test]
-    fn stubbed_subsystems_fail_gracefully() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = open_store(&dir);
-        assert!(matches!(
-            store.verify().unwrap_err(),
-            Error::Unimplemented(_)
-        ));
     }
 
     #[test]
