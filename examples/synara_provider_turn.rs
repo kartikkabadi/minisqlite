@@ -151,15 +151,17 @@ fn complete_turn(
         // template that retries the whole turn, re-run the provider effect).
         // Resolve with recover_transaction: Committed means done, Absent means
         // the commit never landed and the same batch is safe to resubmit.
-        Err(CommitError::Indeterminate(i)) => match store.recover_transaction(i.transaction_id())? {
-            TransactionRecovery::Committed(_) => {
-                println!("[commit] indeterminate ack resolved: committed; nothing to retry")
+        Err(CommitError::Indeterminate(i)) => {
+            match store.recover_transaction(i.transaction_id())? {
+                TransactionRecovery::Committed(_) => {
+                    println!("[commit] indeterminate ack resolved: committed; nothing to retry")
+                }
+                TransactionRecovery::Absent => {
+                    println!("[commit] indeterminate ack resolved: absent; resubmitting");
+                    store.commit(&batch)?;
+                }
             }
-            TransactionRecovery::Absent => {
-                println!("[commit] indeterminate ack resolved: absent; resubmitting");
-                store.commit(&batch)?;
-            }
-        },
+        }
         Err(other) => return Err(other.into()),
     }
     println!("[commit] thread.turn-completed     threads/{thread_id} -> idle, job acked");
@@ -202,7 +204,9 @@ fn claim_one(
                         // executed with the recovered tokens; reconcilable jobs
                         // surface as Uncertain (effect status unknown).
                         for stale in claims.stale_jobs() {
-                            println!("[claim]  stale job {stale}: do not execute; surfaces as Uncertain");
+                            println!(
+                                "[claim]  stale job {stale}: do not execute; surfaces as Uncertain"
+                            );
                         }
                         if claims.is_empty() {
                             // Every receipt job went stale: no lease held. Claim again.
