@@ -29,9 +29,13 @@ fn claim_request(queue: &str, now_ms: i64) -> ClaimRequest {
 }
 
 fn claim_all(store: &ControlPlaneStore, queue: &str, now_ms: i64) -> Vec<ClaimedJob> {
-    match store.claim_jobs(&claim_request(queue, now_ms)).unwrap() {
-        ClaimOutcome::Committed(claims) => claims.into_jobs(),
-        other => panic!("expected committed claims, got {other:?}"),
+    // MaintenanceCommitted means durable progress was made; poll again immediately.
+    loop {
+        match store.claim_jobs(&claim_request(queue, now_ms)).unwrap() {
+            ClaimOutcome::Committed(claims) => return claims.into_jobs(),
+            ClaimOutcome::MaintenanceCommitted(_) => continue,
+            other => panic!("expected committed claims, got {other:?}"),
+        }
     }
 }
 
@@ -48,7 +52,6 @@ fn job_state(store: &ControlPlaneStore, job_id: Id) -> JobState {
 // ----- enqueue -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn duplicate_job_id_in_new_transaction_is_rejected() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -67,7 +70,6 @@ fn duplicate_job_id_in_new_transaction_is_rejected() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn enqueue_is_idempotent_on_resubmission() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -81,7 +83,6 @@ fn enqueue_is_idempotent_on_resubmission() {
 // ----- claim outcomes -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn claim_on_empty_queue_is_noop() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -92,7 +93,6 @@ fn claim_on_empty_queue_is_noop() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn claim_before_not_before_is_noop() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -110,7 +110,6 @@ fn claim_before_not_before_is_noop() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn claim_grants_committed_claims_with_accessors() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -144,7 +143,6 @@ fn claim_grants_committed_claims_with_accessors() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn claim_takes_at_most_one_head_job_per_partition() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -171,7 +169,6 @@ fn claim_takes_at_most_one_head_job_per_partition() {
 // ----- lease-token validation and stale acknowledgement -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn acknowledgement_requires_current_lease_token() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -188,7 +185,6 @@ fn acknowledgement_requires_current_lease_token() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn stale_acknowledgement_after_reclaim_is_rejected() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -215,7 +211,6 @@ fn stale_acknowledgement_after_reclaim_is_rejected() {
 // ----- failure, retries, and max attempts -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn failure_before_max_attempts_enters_retry_wait_then_dead() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -250,7 +245,6 @@ fn failure_before_max_attempts_enters_retry_wait_then_dead() {
 // ----- lease expiry per effect mode -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn expired_reconcilable_lease_becomes_uncertain() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -270,7 +264,6 @@ fn expired_reconcilable_lease_becomes_uncertain() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn expired_idempotent_lease_is_retried() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -288,7 +281,6 @@ fn expired_idempotent_lease_is_retried() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn expired_idempotent_lease_at_max_attempts_becomes_dead() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -312,21 +304,23 @@ fn expired_idempotent_lease_at_max_attempts_becomes_dead() {
 // ----- cancellation -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn cancellation_of_pending_and_leased_jobs() {
     let dir = temp_dir();
     let store = open_in(&dir);
     enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p1", vec![]));
     enqueue(&store, 2, JobSpec::reconcilable(id(11), "q", "p2", vec![]));
 
-    // A pending job cancels without a lease token.
-    store
+    // Only leased jobs may be cancelled; a pending job is rejected.
+    assert!(store
         .commit(&CommitBatch::new(id(3), NOW).cancel_job(id(10), None))
-        .unwrap();
-    assert_eq!(job_state(&store, id(10)), JobState::Cancelled);
+        .is_err());
+    assert_eq!(job_state(&store, id(10)), JobState::Pending);
 
     // A leased job requires its current lease token.
-    let claimed = claim_one(&store, "q", NOW);
+    let mut jobs = claim_all(&store, "q", NOW);
+    assert_eq!(jobs.len(), 2);
+    jobs.sort_by_key(|j| j.job_id);
+    let claimed = jobs.remove(1);
     assert_eq!(claimed.job_id, id(11));
     assert!(store
         .commit(&CommitBatch::new(id(4), NOW).cancel_job(id(11), None))
@@ -338,14 +332,13 @@ fn cancellation_of_pending_and_leased_jobs() {
 
     // Terminal jobs cannot be cancelled again.
     assert!(store
-        .commit(&CommitBatch::new(id(6), NOW).cancel_job(id(10), None))
+        .commit(&CommitBatch::new(id(6), NOW).cancel_job(id(11), None))
         .is_err());
 }
 
 // ----- uncertain resolution -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn uncertain_jobs_resolve_to_retry_succeeded_or_dead() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -386,7 +379,6 @@ fn uncertain_jobs_resolve_to_retry_succeeded_or_dead() {
 // ----- lease extension -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn lease_extension_rules() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -444,7 +436,6 @@ fn lease_extension_rules() {
 // ----- claim recovery -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn recover_claim_reports_committed_with_original_tokens_and_absent() {
     let dir = temp_dir();
     let path = db_path(&dir);

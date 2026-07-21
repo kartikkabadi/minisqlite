@@ -422,7 +422,6 @@ fn model_equivalence_events_only() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn model_equivalence_full() {
     run_model(0xC0FFEE, 300, true);
 }

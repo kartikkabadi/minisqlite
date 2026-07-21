@@ -203,7 +203,6 @@ fn ordered_event_reads_and_pagination_after_reopen() {
 // ----- projections -----
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn projection_patch_advances_exactly_one_version() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -229,7 +228,6 @@ fn projection_patch_advances_exactly_one_version() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn projection_multi_mutation_patch_is_one_version() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -263,7 +261,6 @@ fn projection_multi_mutation_patch_is_one_version() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn projection_version_conflict_is_typed_and_persists_nothing() {
     let dir = temp_dir();
     let store = open_in(&dir);
@@ -390,7 +387,6 @@ fn get_event_and_missing_lookups() {
 }
 
 #[test]
-#[ignore = "pending subsystem integration"]
 fn verify_reports_consistent_store() {
     let dir = temp_dir();
     let store = open_in(&dir);
