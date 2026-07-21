@@ -46,7 +46,7 @@ fn enqueue_creates_pending_job() {
     let info = store.job(id).unwrap().unwrap();
     assert_eq!(info.state, JobState::Pending);
     assert_eq!(info.attempt, 0);
-    assert_eq!(info.spec.payload, b"x".to_vec());
+    assert_eq!(info.spec.payload(), b"x".to_vec());
 }
 
 #[test]

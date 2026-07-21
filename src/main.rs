@@ -210,7 +210,7 @@ fn run(args: &[String]) -> Result<(), String> {
             for job in jobs {
                 println!(
                     "{} {} {} {:?} attempt {}",
-                    job.job_id, job.spec.queue, job.spec.partition_key, job.state, job.attempt
+                    job.job_id, job.spec.queue(), job.spec.partition_key(), job.state, job.attempt
                 );
             }
             Ok(())

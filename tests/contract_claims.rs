@@ -66,7 +66,7 @@ fn duplicate_job_id_in_new_transaction_is_rejected() {
     // The original job is untouched and the failed transaction left no trace.
     let info = store.job(id(10)).unwrap().unwrap();
     assert_eq!(info.state, JobState::Pending);
-    assert_eq!(info.spec.partition_key, "p");
+    assert_eq!(info.spec.partition_key(), "p");
 }
 
 #[test]

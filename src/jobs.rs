@@ -4,14 +4,14 @@ use crate::id::Id;
 /// Specification for a durable job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobSpec {
-    pub job_id: Id,
-    pub queue: String,
-    pub partition_key: String,
-    pub payload: Vec<u8>,
-    pub not_before_ms: i64,
-    pub max_attempts: u32,
-    pub effect_mode: EffectMode,
-    pub idempotency_key: Option<String>,
+    pub(crate) job_id: Id,
+    pub(crate) queue: String,
+    pub(crate) partition_key: String,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) not_before_ms: i64,
+    pub(crate) max_attempts: u32,
+    pub(crate) effect_mode: EffectMode,
+    pub(crate) idempotency_key: Option<String>,
 }
 
 impl JobSpec {
@@ -99,6 +99,46 @@ impl JobSpec {
     pub fn with_max_attempts(mut self, max_attempts: u32) -> Self {
         self.max_attempts = max_attempts;
         self
+    }
+
+    /// The job's unique ID.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The queue the job belongs to.
+    pub fn queue(&self) -> &str {
+        &self.queue
+    }
+
+    /// The partition key ordering the job within its queue.
+    pub fn partition_key(&self) -> &str {
+        &self.partition_key
+    }
+
+    /// The opaque job payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// The earliest time at which the job may be claimed.
+    pub fn not_before_ms(&self) -> i64 {
+        self.not_before_ms
+    }
+
+    /// The maximum number of attempts before the job is marked dead.
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    /// How the job's external effect behaves on retry.
+    pub fn effect_mode(&self) -> EffectMode {
+        self.effect_mode
+    }
+
+    /// The idempotency key, when the effect is explicitly idempotent by key.
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 }
 
