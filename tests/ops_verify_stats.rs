@@ -85,6 +85,9 @@ fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
         .unwrap();
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
+    // Simulate corruption that the v2 CHECK constraints would normally reject.
+    conn.execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
     conn.execute("UPDATE jobs SET lease_token = NULL", [])
         .unwrap();
     conn.execute("DELETE FROM jobs", []).unwrap();
@@ -118,6 +121,9 @@ fn verify_reports_leased_jobs_missing_lease_fields_and_orphaned_receipts() {
     drop(store2);
     let conn2 = rusqlite::Connection::open(&path2).unwrap();
     conn2
+        .execute_batch("PRAGMA ignore_check_constraints=ON")
+        .unwrap();
+    conn2
         .execute("UPDATE jobs SET lease_token = NULL", [])
         .unwrap();
     drop(conn2);
@@ -138,7 +144,7 @@ fn stats_counts_are_correct() {
     assert_eq!(stats.projection_entries, 0);
     assert!(stats.jobs_by_state.is_empty());
     assert_eq!(stats.active_partitions, 0);
-    assert_eq!(stats.migration_version, 1);
+    assert_eq!(stats.migration_version, 2);
     assert!(stats.file_size_bytes > 0);
     assert_eq!(stats.oldest_active_lease_ms, None);
     assert_eq!(stats.oldest_uncertain_job_ms, None);
@@ -152,7 +158,7 @@ fn diagnostic_export_redacts_payloads_by_default() {
     let first = export.lines().next().unwrap();
     assert!(first.contains("\"kind\":\"header\""));
     assert!(first.contains("\"restorable\":false"));
-    assert!(first.contains("\"schema_version\":1"));
+    assert!(first.contains("\"schema_version\":2"));
     assert!(first.contains("\"payloads_included\":false"));
     assert!(export.contains("\"payload_len\":7"));
     assert!(!export.contains("payload_hex"));
