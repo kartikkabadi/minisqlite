@@ -619,13 +619,22 @@ pub(crate) fn claim_jobs(
     }
 
     let proposed_jobs: Vec<Id> = claimed.iter().map(|job| job.job_id).collect();
-    tx.commit().map_err(|e| {
-        ClaimError::Indeterminate(IndeterminateClaim {
+    if let Err(e) = tx.commit() {
+        return Err(ClaimError::Indeterminate(IndeterminateClaim {
             transaction_id,
             proposed_jobs,
             storage_error: StorageError::from_sqlite(e).to_string(),
-        })
-    })?;
+        }));
+    }
+
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(ClaimError::Indeterminate(IndeterminateClaim {
+            transaction_id,
+            proposed_jobs,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
 
     if claimed.is_empty() {
         Ok(ClaimOutcome::MaintenanceCommitted(MaintenanceReceipt {
