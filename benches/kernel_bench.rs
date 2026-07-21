@@ -1007,9 +1007,12 @@ fn scale_event_history(root: &Path, profile: &Profile) {
                 },
             );
             population += (WARMUP + profile.txn_iters) as u64;
+            // Capture DB/WAL sizes while this store is still open: dropping
+            // the store checkpoints and deletes the WAL file.
+            if durability == Durability::Relaxed {
+                print_db_state(&format!("{population} events"), &path);
+            }
         }
-
-        print_db_state(&format!("{population} events"), &path);
 
         // O1: open time (store dropped and reopened per measurement).
         let mut samples = Vec::new();
