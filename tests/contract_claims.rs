@@ -310,17 +310,16 @@ fn cancellation_of_pending_and_leased_jobs() {
     enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p1", vec![]));
     enqueue(&store, 2, JobSpec::reconcilable(id(11), "q", "p2", vec![]));
 
-    // Only leased jobs may be cancelled; a pending job is rejected.
-    assert!(store
+    // A pending job may be cancelled without a token (spec A5.6).
+    store
         .commit(&CommitBatch::new(id(3), NOW).cancel_job(id(10), None))
-        .is_err());
-    assert_eq!(job_state(&store, id(10)), JobState::Pending);
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Cancelled);
 
     // A leased job requires its current lease token.
     let mut jobs = claim_all(&store, "q", NOW);
-    assert_eq!(jobs.len(), 2);
-    jobs.sort_by_key(|j| j.job_id);
-    let claimed = jobs.remove(1);
+    assert_eq!(jobs.len(), 1);
+    let claimed = jobs.remove(0);
     assert_eq!(claimed.job_id, id(11));
     assert!(store
         .commit(&CommitBatch::new(id(4), NOW).cancel_job(id(11), None))
