@@ -192,10 +192,43 @@ impl ControlPlaneStore {
         projections::projection_scan_prefix(&conn, projection, prefix, limit)
     }
 
+    /// Paginated prefix scan: entries with keys starting with `prefix` and, when
+    /// `after` is given, strictly greater than `after`, in key order.
+    pub fn projection_scan_prefix_page(
+        &self,
+        projection: &str,
+        prefix: &[u8],
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<ProjectionEntry>, Error> {
+        let conn = self.writer();
+        projections::projection_scan_prefix_page(&conn, projection, prefix, after, limit)
+    }
+
+    /// Range scan: entries with `start <= key < end` (either bound optional) and,
+    /// when `after` is given, strictly greater than `after`, in key order.
+    pub fn projection_scan_range(
+        &self,
+        projection: &str,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<ProjectionEntry>, Error> {
+        let conn = self.writer();
+        projections::projection_scan_range(&conn, projection, start, end, after, limit)
+    }
+
     /// List all projections and their versions.
     pub fn projections_list(&self) -> Result<Vec<(String, u64)>, Error> {
         let conn = self.writer();
         projections::projections_list(&conn)
+    }
+
+    /// The number of entries in a projection (0 when it does not exist).
+    pub fn projection_entry_count(&self, projection: &str) -> Result<u64, Error> {
+        let conn = self.writer();
+        projections::projection_entry_count(&conn, projection)
     }
 
     // ----- jobs -----
@@ -402,10 +435,6 @@ mod tests {
         assert!(matches!(
             store.commit(&batch).unwrap_err(),
             CommitError::Unimplemented(_)
-        ));
-        assert!(matches!(
-            store.projection_version("p").unwrap_err(),
-            Error::Unimplemented(_)
         ));
         assert!(matches!(
             store.verify().unwrap_err(),
