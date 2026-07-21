@@ -546,6 +546,7 @@ pub(crate) fn claim_jobs(
     .map_err(claim_storage)?;
 
     for action in &maintenance {
+        ensure_transition(&action.job, action.to).map_err(error_to_claim)?;
         match action.to {
             JobState::Dead => set_terminal(
                 &tx,

@@ -211,7 +211,8 @@ impl JobState {
     }
 
     /// The exact allowed state machine. `Leased -> Leased` is permitted only for
-    /// lease extension.
+    /// lease extension; `Leased -> Pending` only for expired-lease maintenance of
+    /// explicitly idempotent jobs.
     pub fn can_transition_to(self, to: JobState) -> bool {
         use JobState::*;
         matches!(
@@ -224,6 +225,7 @@ impl JobState {
                 | (Leased, Dead)
                 | (Leased, Cancelled)
                 | (Leased, Uncertain)
+                | (Leased, Pending)
                 | (Leased, Leased)
                 | (Uncertain, Pending)
                 | (Uncertain, Succeeded)
@@ -508,6 +510,7 @@ mod tests {
         assert!(Pending.can_transition_to(Cancelled));
         assert!(RetryWait.can_transition_to(Leased));
         assert!(Leased.can_transition_to(Leased));
+        assert!(Leased.can_transition_to(Pending));
         assert!(Uncertain.can_transition_to(Pending));
         assert!(!Pending.can_transition_to(Succeeded));
         assert!(!Succeeded.can_transition_to(Leased));
