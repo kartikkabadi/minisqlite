@@ -1024,7 +1024,7 @@ pub(crate) fn list_jobs_page(
              AND (?2 IS NULL OR queue = ?2) AND (?3 IS NULL OR state = ?3) \
              ORDER BY enqueue_sequence LIMIT ?4"
         ))
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let rows = stmt
         .query_map(
             rusqlite::params![
@@ -1038,11 +1038,11 @@ pub(crate) fn list_jobs_page(
                 Ok((sequence, row_to_job(row)?))
             },
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     let mut jobs = Vec::new();
     let mut cursor = after_sequence;
     for row in rows {
-        let (sequence, job) = row.map_err(StorageError::from)?;
+        let (sequence, job) = row.map_err(StorageError::from_sqlite)?;
         cursor = sequence as u64;
         jobs.push(job?.into_info());
     }
