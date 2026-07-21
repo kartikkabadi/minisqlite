@@ -243,6 +243,8 @@ pub enum ClaimError {
     Indeterminate(crate::jobs::IndeterminateClaim),
     /// The claim request failed static validation; nothing was persisted.
     Validation(ValidationError),
+    /// A concurrency or state conflict; nothing was persisted.
+    Conflict(Conflict),
     /// A storage failure occurred before the commit step; nothing was persisted.
     Storage(StorageError),
 }
@@ -256,6 +258,7 @@ impl fmt::Display for ClaimError {
                 i.transaction_id()
             ),
             ClaimError::Validation(e) => write!(f, "{e}"),
+            ClaimError::Conflict(e) => write!(f, "{e}"),
             ClaimError::Storage(e) => write!(f, "{e}"),
         }
     }

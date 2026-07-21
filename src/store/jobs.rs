@@ -499,7 +499,7 @@ fn error_to_claim(e: Error) -> ClaimError {
     match e {
         Error::Storage(s) => ClaimError::Storage(s),
         Error::Validation(v) => ClaimError::Validation(v),
-        Error::Conflict(c) => ClaimError::Validation(ValidationError(c.to_string())),
+        Error::Conflict(c) => ClaimError::Conflict(c),
     }
 }
 
