@@ -1,7 +1,7 @@
 # Roadmap: SQLite-backed control-plane kernel
 
-An 8-week plan covering Phases 0–7, following the control-plane kernel
-end-to-end execution plan. Tracking: Issue #10. Storage decision:
+An 8-week plan covering Phases 0–7 of the pivot to a SQLite-backed
+control-plane kernel. Tracking: Issue #10. Storage decision:
 [ADR-001](./ADR-001.md). Scope boundaries: [SCOPE.md](./SCOPE.md).
 
 Ordering principle: **semantics first**. The public semantic API and
@@ -13,6 +13,21 @@ implementation work (Phase 2).
 Freeze and archive the journal rewrite (PR #9,
 `archive/append-only-journal-v1`, tag `journal-v1-experimental`); establish
 the ADR, roadmap, scope, and PR rules before any implementation.
+
+**Frozen-state record (PR #9):**
+
+- Frozen head: `e02bec053a1584f487ca7f0142b3d9454e5c3562`
+  (= `archive/append-only-journal-v1` = tag `journal-v1-experimental`).
+- CI at the frozen head: run
+  [29768537788](https://github.com/kartikkabadi/minisqlite/actions/runs/29768537788)
+  — green on ubuntu-latest, macos-latest, windows-latest, MSRV (Rust 1.89),
+  and Socket Security.
+- Unresolved review findings at freeze time: Review #9 (PR #9, review of
+  2026-07-20) returned a **NOT MERGE-READY** verdict with 13 merge blockers.
+  Fixes for all 13 were pushed and itemized in
+  [PR #9 comment 5025737156](https://github.com/kartikkabadi/minisqlite/pull/9#issuecomment-5025737156),
+  but no independent re-review of the frozen head `e02bec0` occurred before
+  the freeze, so those fixes remain unverified by review.
 
 **Exit criteria:** ADR-001, ROADMAP, SCOPE, and PR-RULES merged to `main`;
 ADR signed off by the technical decision owner and referenced from the root
@@ -131,8 +146,7 @@ signs off.
 
 ## Recommended PR sequence
 
-Small, focused PRs per [PR-RULES.md](./PR-RULES.md), following the plan's
-§17 sequence:
+Small, focused PRs per [PR-RULES.md](./PR-RULES.md), in this order:
 
 1. docs: archive decision — ADR-001, roadmap, scope, PR rules (this PR)
 2. semantics: IDs, `CommitBatch`, events, projection patches, job state
@@ -150,7 +164,7 @@ Small, focused PRs per [PR-RULES.md](./PR-RULES.md), following the plan's
 9. ops: doctor, verify, stats, online backup, diagnostic export
 10. synara: provider-turn vertical slice, feature flag, crash drills,
     operator uncertainty view
-11. performance and hardening: benchmark suite, RSS measurement, soak
-    harness, dependency auditing
+11. performance and hardening: benchmark suite, indexes, RSS measurement,
+    soak harness, dependency auditing
 12. release preparation: naming decision, README, migration policy,
     release notes, final end-to-end review
