@@ -165,7 +165,7 @@ Small, focused PRs per [PR-RULES.md](./PR-RULES.md), following the plan's
 9. ops: doctor, verify, stats, online backup, diagnostic export
 10. synara: provider-turn vertical slice, feature flag, crash drills,
     operator uncertainty view
-11. performance and hardening: benchmark suite, RSS measurement, soak
-    harness, dependency auditing
+11. performance and hardening: benchmark suite, indexes, RSS measurement,
+    soak harness, dependency auditing
 12. release preparation: naming decision, README, migration policy,
     release notes, final end-to-end review
