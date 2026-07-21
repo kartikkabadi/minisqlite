@@ -6,13 +6,38 @@ contain. See [ADR-001](./ADR-001.md) and [ROADMAP.md](./ROADMAP.md).
 ## In scope
 
 - SQLite as the sole production storage substrate (single file, WAL mode).
-- Typed, append-only event log with a monotonic sequence invariant.
-- Deterministic projections with tracked positions and full rebuild support.
-- Durable job queue with at-least-once execution, retries, and backoff.
+- Transaction IDs and idempotent resubmission (canonical request digests;
+  duplicate transaction IDs with identical content return the original
+  receipt, with different content fail deterministically).
+- Typed, append-only event streams with per-stream versions and a global
+  sequence.
+- Expected stream-version conflict detection with typed conflict errors.
+- Projection patches: one patch atomically advances one projection version
+  (`new_version == expected_version + 1`) and may contain multiple
+  mutations (put, delete, clear, replace).
+- Durable jobs with a typed state machine (Pending, Leased, RetryWait,
+  Uncertain, Succeeded, Dead, Cancelled).
+- Leases with tokens, worker IDs, and expiries.
+- Retries with backoff and a maximum attempt count.
+- Cancellation.
+- Uncertain outcomes: indeterminate commits and claims return only a
+  transaction ID (never executable work), with typed recovery APIs
+  (committed / absent / still indeterminate). Effect modes make retry
+  behavior explicit: reconciliation-required jobs (the default) become
+  `Uncertain` on lease expiry and are never silently retried; only
+  explicitly idempotent jobs re-enter the retry path.
+- Claim recovery: reconstructing committed claims (with original lease
+  tokens) from claim receipts after an indeterminate claim.
+- Heartbeats / lease renewal: token-checked lease extension primitives in
+  the core, with an optional runtime helper.
+- Live online backup (safe during writes, restorable, integrity-checked).
+- Diagnostics: doctor, verify, stats, and paginated non-restorable
+  diagnostic export with payload redaction by default.
+- Synara integration: one provider-turn vertical slice behind a feature
+  flag, with failure drills and an operator view for uncertain jobs.
 - A typed public kernel API for a single writer process.
-- Explicit representation of uncertainty (in-flight jobs, unacknowledged
-  writes, projection rebuild states).
-- Crash-injection, property, and integrity testing.
+- Crash-injection, property, model-based, concurrency, and integrity
+  testing.
 - Documentation, examples, and a tagged release.
 
 ## Out of scope (non-goals)
