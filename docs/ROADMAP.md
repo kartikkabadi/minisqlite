@@ -1,7 +1,7 @@
 # Roadmap: SQLite-backed control-plane kernel
 
-An 8-week plan covering Phases 0–7, following the control-plane kernel
-end-to-end execution plan. Tracking: Issue #10. Storage decision:
+An 8-week plan covering Phases 0–7 of the pivot to a SQLite-backed
+control-plane kernel. Tracking: Issue #10. Storage decision:
 [ADR-001](./ADR-001.md). Scope boundaries: [SCOPE.md](./SCOPE.md).
 
 Ordering principle: **semantics first**. The public semantic API and
@@ -146,8 +146,7 @@ signs off.
 
 ## Recommended PR sequence
 
-Small, focused PRs per [PR-RULES.md](./PR-RULES.md), following the plan's
-§17 sequence:
+Small, focused PRs per [PR-RULES.md](./PR-RULES.md), in this order:
 
 1. docs: archive decision — ADR-001, roadmap, scope, PR rules (this PR)
 2. semantics: IDs, `CommitBatch`, events, projection patches, job state
