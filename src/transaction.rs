@@ -1,6 +1,8 @@
 use crate::event::Event;
 use crate::id::Id;
-use crate::jobs::{JobAck, JobCancellation, JobFailure, JobResolution, JobSpec, Resolution};
+use crate::jobs::{
+    JobAck, JobCancellation, JobFailure, JobResolution, JobSpec, LeaseExtension, Resolution,
+};
 use crate::projection::{ProjectionMutation, ProjectionPatch};
 
 /// One logical operation within a [`CommitBatch`].
@@ -20,6 +22,8 @@ pub enum Operation {
     CancelJob(JobCancellation),
     /// Resolve an uncertain job outcome.
     ResolveJob(JobResolution),
+    /// Extend an active lease.
+    ExtendLease(LeaseExtension),
 }
 
 /// A precondition that `stream_id` is at exactly `version` before the commit applies.
@@ -146,6 +150,17 @@ impl CommitBatch {
         self
     }
 
+    /// Extend an active lease atomically with the rest of the batch. Requires the
+    /// current lease token; `committed_at_ms` is used as "now" for expiry checks.
+    pub fn extend_lease(mut self, job_id: Id, lease_token: Id, new_expiry_ms: i64) -> Self {
+        self.operations.push(Operation::ExtendLease(LeaseExtension {
+            job_id,
+            lease_token,
+            new_expiry_ms,
+        }));
+        self
+    }
+
     /// The transaction id of this batch.
     pub fn transaction_id(&self) -> Id {
         self.transaction_id
@@ -153,14 +168,12 @@ impl CommitBatch {
 
     /// Compute the canonical request digest for idempotent resubmission checks.
     ///
-    /// The digest is FNV-1a-128 over a canonical, length-prefixed byte serialization of
+    /// The digest is SHA-256 over a canonical, length-prefixed byte serialization of
     /// (committed_at_ms, correlation_id, metadata, expected stream versions in the order
-    /// given, ordered operations). FNV-1a is not cryptographic, but the digest only guards
-    /// a trusted local caller against accidentally reusing a transaction ID with different
-    /// content; adversarial collisions are out of scope. The serialization uses fixed-width
-    /// big-endian integers and explicit tags, so it is stable across process runs and
-    /// platforms.
-    pub(crate) fn request_digest(&self) -> [u8; 16] {
+    /// given, ordered operations), so collisions are cryptographically infeasible even
+    /// for adversarial content. The serialization uses fixed-width big-endian integers
+    /// and explicit tags, so it is stable across process runs and platforms.
+    pub(crate) fn request_digest(&self) -> [u8; 32] {
         let mut d = Digest::new();
         d.write_i64(self.committed_at_ms);
         d.write_opt_id(self.correlation_id);
@@ -277,29 +290,29 @@ fn digest_operation(d: &mut Digest, op: &Operation) {
                 Resolution::MarkDead => 3,
             });
         }
+        Operation::ExtendLease(e) => {
+            d.write_u8(8);
+            d.write_id(e.job_id);
+            d.write_id(e.lease_token);
+            d.write_i64(e.new_expiry_ms);
+        }
     }
 }
 
-/// FNV-1a-128 incremental hasher over canonical length-prefixed input.
+/// SHA-256 incremental hasher over canonical length-prefixed input.
 struct Digest {
-    state: u128,
+    state: crate::sha256::Sha256,
 }
 
 impl Digest {
-    const OFFSET_BASIS: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-
     fn new() -> Self {
         Self {
-            state: Self::OFFSET_BASIS,
+            state: crate::sha256::Sha256::new(),
         }
     }
 
     fn write_raw(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= u128::from(b);
-            self.state = self.state.wrapping_mul(Self::PRIME);
-        }
+        self.state.update(bytes);
     }
 
     fn write_u8(&mut self, v: u8) {
@@ -337,8 +350,8 @@ impl Digest {
         }
     }
 
-    fn finish(self) -> [u8; 16] {
-        self.state.to_be_bytes()
+    fn finish(self) -> [u8; 32] {
+        self.state.finish()
     }
 }
 

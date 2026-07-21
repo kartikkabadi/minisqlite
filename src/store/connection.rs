@@ -36,6 +36,15 @@ pub(crate) fn open_existing(path: &Path) -> Result<Connection, StorageError> {
     Ok(conn)
 }
 
+/// Open an existing SQLite database at `path` as a pooled read-only connection.
+pub(crate) fn open_reader(path: &Path) -> Result<Connection, StorageError> {
+    let conn = open_existing(path)?;
+    // Belt and braces on top of the read-only open flags.
+    conn.execute_batch("PRAGMA query_only=ON;")
+        .map_err(StorageError::from_sqlite)?;
+    Ok(conn)
+}
+
 pub(crate) fn apply_pragmas(conn: &Connection, durability: Durability) -> Result<(), StorageError> {
     // journal_mode returns the resulting mode as a row, so it needs pragma_update-style query.
     let _mode: String = conn

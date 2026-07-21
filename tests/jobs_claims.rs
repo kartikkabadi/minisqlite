@@ -3,7 +3,7 @@
 
 use minisqlite::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, CommitBatch, ControlPlaneStore, Id, JobSpec,
-    JobState, LeaseError,
+    JobState, LeaseConflict, LeaseError,
 };
 
 fn store() -> (tempfile::TempDir, ControlPlaneStore) {
@@ -234,25 +234,25 @@ fn extend_lease_rules() {
         store
             .extend_lease(Id::from(9u128), claimed.lease_token, 20_000, 3_000)
             .unwrap_err(),
-        LeaseError::JobNotFound(Id::from(9u128))
+        LeaseError::Conflict(LeaseConflict::JobNotFound(Id::from(9u128)))
     );
     // Wrong token.
     assert_eq!(
         store
             .extend_lease(id, Id::from(8u128), 20_000, 3_000)
             .unwrap_err(),
-        LeaseError::InvalidToken { job_id: id }
+        LeaseError::Conflict(LeaseConflict::InvalidToken { job_id: id })
     );
     // Expiry must strictly increase.
     assert_eq!(
         store
             .extend_lease(id, claimed.lease_token, 12_000, 3_000)
             .unwrap_err(),
-        LeaseError::ExpiryNotLater {
+        LeaseError::Conflict(LeaseConflict::ExpiryNotLater {
             job_id: id,
             current_ms: 12_000,
             requested_ms: 12_000,
-        }
+        })
     );
     // Success: expiry extended, attempt unchanged, durable.
     let receipt = store
@@ -271,10 +271,10 @@ fn extend_lease_rules() {
         store
             .extend_lease(id, claimed.lease_token, 30_000, 5_000)
             .unwrap_err(),
-        LeaseError::NotLeased {
+        LeaseError::Conflict(LeaseConflict::NotLeased {
             job_id: id,
             state: JobState::Succeeded,
-        }
+        })
     );
 }
 
@@ -357,4 +357,77 @@ fn claim_request_validation() {
             minisqlite::ClaimError::Validation(_)
         ));
     }
+}
+
+#[test]
+fn lease_at_exact_expiry_is_current_everywhere() {
+    // Expired iff lease_expires_at_ms < now_ms: at now == expiry the lease is
+    // NOT reclaimed by maintenance, IS extendable, and IS recoverable.
+    let (_dir, store) = store();
+    enqueue(&store, 1, "a");
+    let id = Id::from(1u128);
+    let outcome = store.claim_jobs(&request(2_000, 1)).unwrap();
+    let claims = match outcome {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    let claimed = claims.jobs()[0].clone();
+    let expiry = claimed.lease_expires_at_ms;
+
+    // Maintenance at now == expiry does not reclaim the lease.
+    assert_eq!(
+        store.claim_jobs(&request(expiry, 10)).unwrap(),
+        ClaimOutcome::Noop
+    );
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Leased);
+
+    // Recovery at now == expiry still returns the lease as current.
+    match store
+        .recover_claim(claims.transaction_id(), expiry)
+        .unwrap()
+    {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs().len(), 1);
+            assert!(recovered.stale_jobs().is_empty());
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // Extension at now == expiry succeeds.
+    let receipt = store
+        .extend_lease(id, claimed.lease_token, expiry + 1_000, expiry)
+        .unwrap();
+    assert_eq!(receipt.lease_expires_at_ms(), expiry + 1_000);
+
+    // One tick past expiry, maintenance reclaims the lease.
+    let outcome = store.claim_jobs(&request(expiry + 1_000 + 1, 0)).unwrap();
+    assert!(matches!(outcome, ClaimOutcome::MaintenanceCommitted(_)));
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Uncertain);
+}
+
+#[test]
+fn jobs_page_paginates_by_enqueue_sequence() {
+    let (_dir, store) = store();
+    for id in 1..=5u128 {
+        enqueue(&store, id, "a");
+    }
+    let (first, cursor) = store.jobs_page(Some("q"), None, 0, 2).unwrap();
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[0].job_id, Id::from(1u128));
+    assert_eq!(first[1].job_id, Id::from(2u128));
+    let (second, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0].job_id, Id::from(3u128));
+    let (last, cursor) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert_eq!(last.len(), 1);
+    assert_eq!(last[0].job_id, Id::from(5u128));
+    // An exhausted cursor returns an empty page and an unchanged cursor.
+    let (empty, done) = store.jobs_page(Some("q"), None, cursor, 2).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(done, cursor);
+    // State filters apply within the page.
+    let (pending, _) = store
+        .jobs_page(Some("q"), Some(JobState::Leased), 0, 10)
+        .unwrap();
+    assert!(pending.is_empty());
 }
