@@ -47,8 +47,10 @@ CREATE INDEX jobs_transaction_idx ON jobs(updated_transaction_id);
 ",
 }];
 
-/// FNV-1a-128 checksum of the migration SQL text (same hash family as the request
-/// digest; see `CommitBatch::request_digest` for rationale).
+/// FNV-1a-128 checksum of the migration SQL text. Migration SQL is compiled into
+/// this trusted binary, so the checksum only detects accidental drift between the
+/// binary and an applied schema, not adversarial tampering; changing the algorithm
+/// would invalidate checksums recorded by existing stores.
 pub(crate) fn checksum(sql: &str) -> [u8; 16] {
     const OFFSET_BASIS: u128 = 0x6c62272e07bb014262b821756295c58d;
     const PRIME: u128 = 0x0000000001000000000000000000013b;

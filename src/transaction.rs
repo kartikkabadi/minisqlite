@@ -168,14 +168,12 @@ impl CommitBatch {
 
     /// Compute the canonical request digest for idempotent resubmission checks.
     ///
-    /// The digest is FNV-1a-128 over a canonical, length-prefixed byte serialization of
+    /// The digest is SHA-256 over a canonical, length-prefixed byte serialization of
     /// (committed_at_ms, correlation_id, metadata, expected stream versions in the order
-    /// given, ordered operations). FNV-1a is not cryptographic, but the digest only guards
-    /// a trusted local caller against accidentally reusing a transaction ID with different
-    /// content; adversarial collisions are out of scope. The serialization uses fixed-width
-    /// big-endian integers and explicit tags, so it is stable across process runs and
-    /// platforms.
-    pub(crate) fn request_digest(&self) -> [u8; 16] {
+    /// given, ordered operations), so collisions are cryptographically infeasible even
+    /// for adversarial content. The serialization uses fixed-width big-endian integers
+    /// and explicit tags, so it is stable across process runs and platforms.
+    pub(crate) fn request_digest(&self) -> [u8; 32] {
         let mut d = Digest::new();
         d.write_i64(self.committed_at_ms);
         d.write_opt_id(self.correlation_id);
@@ -301,26 +299,20 @@ fn digest_operation(d: &mut Digest, op: &Operation) {
     }
 }
 
-/// FNV-1a-128 incremental hasher over canonical length-prefixed input.
+/// SHA-256 incremental hasher over canonical length-prefixed input.
 struct Digest {
-    state: u128,
+    state: crate::sha256::Sha256,
 }
 
 impl Digest {
-    const OFFSET_BASIS: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-
     fn new() -> Self {
         Self {
-            state: Self::OFFSET_BASIS,
+            state: crate::sha256::Sha256::new(),
         }
     }
 
     fn write_raw(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= u128::from(b);
-            self.state = self.state.wrapping_mul(Self::PRIME);
-        }
+        self.state.update(bytes);
     }
 
     fn write_u8(&mut self, v: u8) {
@@ -358,8 +350,8 @@ impl Digest {
         }
     }
 
-    fn finish(self) -> [u8; 16] {
-        self.state.to_be_bytes()
+    fn finish(self) -> [u8; 32] {
+        self.state.finish()
     }
 }
 

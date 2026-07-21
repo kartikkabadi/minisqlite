@@ -21,6 +21,7 @@ mod event;
 mod id;
 mod jobs;
 mod projection;
+mod sha256;
 mod store;
 mod transaction;
 
