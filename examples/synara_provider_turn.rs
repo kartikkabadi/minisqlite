@@ -89,6 +89,20 @@ fn request_turn(
     Ok(job_id)
 }
 
+/// Worker heartbeat: durably extend the lease so no other worker can claim the job.
+fn heartbeat(
+    store: &ControlPlaneStore,
+    job: &ClaimedJob,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let now = now_ms();
+    let receipt = store.extend_lease(job.job_id, job.lease_token, now + 30_000, now)?;
+    println!(
+        "[lease]  heartbeat extended lease for {} to now+30s (attempt {})",
+        job.partition_key, receipt.attempt
+    );
+    Ok(())
+}
+
 /// Step 6: the external provider effect, simulated.
 fn call_provider(job: &ClaimedJob) {
     println!(
@@ -170,6 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let store = ControlPlaneStore::open(&db)?;
         request_turn(&store, "t-100")?;
         let (_tx, job) = claim_one(&store, "worker-1")?;
+        heartbeat(&store, &job)?;
         call_provider(&job);
         complete_turn(&store, "t-100", &job)?;
         println!(
@@ -203,6 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 claims.len()
             );
             for job in claims {
+                heartbeat(&store, &job)?;
                 call_provider(&job); // exactly once, under the recovered lease
                 complete_turn(&store, "t-200", &job)?;
             }
