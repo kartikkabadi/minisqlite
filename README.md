@@ -17,6 +17,15 @@ It is built for local-first, single-node control planes — agent harnesses, des
 
 ## Install
 
+`0.3.0-alpha.1` is not yet published to crates.io; the latest published release is `0.2.1`, which is the prior SQL-engine implementation, not the control-plane kernel described here. Until `0.3.0-alpha.1` is released, use a git dependency:
+
+```toml
+[dependencies]
+minisqlite = { git = "https://github.com/kartikkabadi/minisqlite" }
+```
+
+Once `0.3.0-alpha.1` is published, the crates.io dependency applies:
+
 ```toml
 [dependencies]
 minisqlite = "0.3.0-alpha.1"
