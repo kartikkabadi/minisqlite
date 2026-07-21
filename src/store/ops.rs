@@ -229,6 +229,60 @@ fn semantic_checks(conn: &Connection, findings: &mut Vec<VerifyFinding>) -> Resu
         });
     }
 
+    // Applied migrations must match this build's migration SQL.
+    for status in migrations::status(conn)? {
+        if !status.checksum_ok {
+            findings.push(VerifyFinding {
+                check: "migration_checksums".into(),
+                detail: format!("migration {} checksum mismatch", status.version),
+            });
+        }
+    }
+
+    // Leased jobs must carry complete lease fields.
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT job_id FROM jobs WHERE state = {}
+         AND (lease_token IS NULL OR worker_id IS NULL OR lease_expires_at_ms IS NULL)",
+            JobState::Leased.encode(),
+        ))
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(StorageError::from_sqlite)?;
+    for row in rows {
+        let job_id = row.map_err(StorageError::from_sqlite)?;
+        findings.push(VerifyFinding {
+            check: "leased_jobs".into(),
+            detail: format!("leased job {} is missing lease fields", hex(&job_id)),
+        });
+    }
+
+    // Claim receipts must reference existing jobs (no FK enforces this).
+    let mut stmt = conn
+        .prepare(
+            "SELECT cr.transaction_id, cr.job_id FROM claim_receipts cr
+         LEFT JOIN jobs j ON j.job_id = cr.job_id
+         WHERE j.job_id IS NULL",
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(StorageError::from_sqlite)?;
+    for row in rows {
+        let (transaction_id, job_id) = row.map_err(StorageError::from_sqlite)?;
+        findings.push(VerifyFinding {
+            check: "claim_receipts".into(),
+            detail: format!(
+                "claim receipt in transaction {} references missing job {}",
+                hex(&transaction_id),
+                hex(&job_id)
+            ),
+        });
+    }
+
     // Claim receipts must reference existing transactions.
     let mut stmt = conn
         .prepare(
