@@ -94,10 +94,11 @@ fn heartbeat(
     store: &ControlPlaneStore,
     job: &ClaimedJob,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Must be strictly later than the current expiry (claim lease was now+30s).
     let now = now_ms();
-    let receipt = store.extend_lease(job.job_id, job.lease_token, now + 30_000, now)?;
+    let receipt = store.extend_lease(job.job_id, job.lease_token, now + 60_000, now)?;
     println!(
-        "[lease]  heartbeat extended lease for {} to now+30s (attempt {})",
+        "[lease]  heartbeat extended lease for {} to now+60s (attempt {})",
         job.partition_key, receipt.attempt
     );
     Ok(())
