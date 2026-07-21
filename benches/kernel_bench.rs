@@ -13,8 +13,9 @@
 //!
 //! Each run also emits a machine-readable report blob (§5) to
 //! `target/kernel-bench/report.json`. Set `KERNEL_BENCH_COLD=1` to request a
-//! cold-cache run: OS caches are dropped before open-time measurements when
-//! `/proc/sys/vm/drop_caches` is writable; without root the run stays warm
+//! cold-cache run: OS caches are dropped before open-time and every read
+//! workload measurement when `/proc/sys/vm/drop_caches` is writable; without
+//! root the run stays warm
 //! and is labeled `cold mode unavailable (requires root)` per §1.
 
 use std::path::{Path, PathBuf};
@@ -86,7 +87,8 @@ struct Profile {
     txn_iters: usize,
     /// Measured iterations for batch-claim workloads (T5 variants).
     claim_iters: usize,
-    /// Drop OS caches before open-time measurements (requires root).
+    /// Drop OS caches before open-time and read-workload measurements
+    /// (requires root).
     cold: bool,
     event_populations: Vec<u64>,
     terminal_job_populations: Vec<u64>,
@@ -264,7 +266,7 @@ fn print_environment(root: &Path, profile: &Profile) {
         "per scale section / workload group, on 'db state' lines below",
     );
     let cache = if profile.cold {
-        "cold (drop_caches before open-time measurements)".to_string()
+        "cold (drop_caches before open-time and every read workload)".to_string()
     } else if std::env::var("KERNEL_BENCH_COLD").is_ok_and(|v| v == "1") {
         "warm; cold mode unavailable (requires root to write /proc/sys/vm/drop_caches)".to_string()
     } else {
@@ -1039,6 +1041,9 @@ fn scale_event_history(root: &Path, profile: &Profile) {
         let store = open_store(&path, Durability::Relaxed);
 
         // O2: read 100 events from one stream.
+        if profile.cold {
+            drop_caches();
+        }
         run_workload(
             &format!("O2 stream read 100 @ {population} events"),
             WARMUP,
@@ -1050,6 +1055,9 @@ fn scale_event_history(root: &Path, profile: &Profile) {
         );
 
         // O3: global pagination over the full history in 256-event pages.
+        if profile.cold {
+            drop_caches();
+        }
         let mut pages = Vec::new();
         let mut cursor = 0u64;
         loop {
@@ -1073,6 +1081,9 @@ fn scale_event_history(root: &Path, profile: &Profile) {
         );
 
         // O8: integrity verification.
+        if profile.cold {
+            drop_caches();
+        }
         let t = Instant::now();
         let verify = store.verify().expect("O8 verify");
         report_single(
@@ -1082,6 +1093,9 @@ fn scale_event_history(root: &Path, profile: &Profile) {
         );
 
         // O9: paged diagnostic export of the full history.
+        if profile.cold {
+            drop_caches();
+        }
         let t = Instant::now();
         let export = store.diagnostic_export().expect("O9 export");
         report_single(
@@ -1145,6 +1159,9 @@ fn scale_terminal_jobs(root: &Path, profile: &Profile) {
 
         // O6: page through the whole terminal history with a moving cursor
         // (like O3/O5), never refetching the first page.
+        if profile.cold {
+            drop_caches();
+        }
         let mut pages = Vec::new();
         let mut cursor = 0u64;
         loop {
@@ -1259,6 +1276,9 @@ fn operational_projections(root: &Path, profile: &Profile) {
     }
     let store = open_store(&path, Durability::Relaxed);
 
+    if profile.cold {
+        drop_caches();
+    }
     let mut n = 0u64;
     run_workload(
         "O4 projection point read",
@@ -1274,6 +1294,9 @@ fn operational_projections(root: &Path, profile: &Profile) {
         },
     );
 
+    if profile.cold {
+        drop_caches();
+    }
     let mut pages = Vec::new();
     let mut after: Option<Vec<u8>> = None;
     loop {
