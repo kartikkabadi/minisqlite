@@ -23,8 +23,8 @@ use crate::error::{
 use crate::id::Id;
 use crate::jobs::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommittedClaims, IndeterminateClaim,
-    JobAck, JobCancellation, JobInfo, JobResolution, JobSpec, JobState, LeaseExtensionReceipt,
-    MaintenanceReceipt, Resolution,
+    JobAck, JobCancellation, JobInfo, JobResolution, JobSpec, JobState, LeaseExtension,
+    LeaseExtensionReceipt, MaintenanceReceipt, Resolution,
 };
 
 /// Default retry delay applied when a `JobFailure` does not specify `retry_after_ms`.
@@ -810,7 +810,32 @@ pub(crate) fn extend_lease(
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(StorageError::from_sqlite)?;
-    let job = load_job(&tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
+    let receipt = apply_extend_lease(
+        &tx,
+        &LeaseExtension {
+            job_id,
+            lease_token,
+            new_expiry_ms,
+        },
+        now_ms,
+    )?;
+    tx.commit().map_err(StorageError::from_sqlite)?;
+    Ok(receipt)
+}
+
+/// Apply a lease extension inside an open transaction (also used by
+/// `Operation::ExtendLease` in the commit pipeline; plan §6.1).
+pub(crate) fn apply_extend_lease(
+    tx: &Transaction<'_>,
+    extension: &LeaseExtension,
+    now_ms: i64,
+) -> Result<LeaseExtensionReceipt, LeaseError> {
+    let LeaseExtension {
+        job_id,
+        lease_token,
+        new_expiry_ms,
+    } = *extension;
+    let job = load_job(tx, job_id)?.ok_or(LeaseError::JobNotFound(job_id))?;
     if job.state != JobState::Leased {
         return Err(LeaseError::NotLeased {
             job_id,
@@ -851,7 +876,6 @@ pub(crate) fn extend_lease(
         ],
     )
     .map_err(StorageError::from_sqlite)?;
-    tx.commit().map_err(StorageError::from_sqlite)?;
     Ok(LeaseExtensionReceipt {
         job_id,
         attempt: job.attempt,

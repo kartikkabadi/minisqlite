@@ -1,6 +1,8 @@
 use crate::event::Event;
 use crate::id::Id;
-use crate::jobs::{JobAck, JobCancellation, JobFailure, JobResolution, JobSpec, Resolution};
+use crate::jobs::{
+    JobAck, JobCancellation, JobFailure, JobResolution, JobSpec, LeaseExtension, Resolution,
+};
 use crate::projection::{ProjectionMutation, ProjectionPatch};
 
 /// One logical operation within a [`CommitBatch`].
@@ -20,6 +22,8 @@ pub enum Operation {
     CancelJob(JobCancellation),
     /// Resolve an uncertain job outcome.
     ResolveJob(JobResolution),
+    /// Extend an active lease.
+    ExtendLease(LeaseExtension),
 }
 
 /// A precondition that `stream_id` is at exactly `version` before the commit applies.
@@ -143,6 +147,17 @@ impl CommitBatch {
     pub fn resolve_uncertain_job(mut self, job_id: Id, resolution: Resolution) -> Self {
         self.operations
             .push(Operation::ResolveJob(JobResolution { job_id, resolution }));
+        self
+    }
+
+    /// Extend an active lease atomically with the rest of the batch. Requires the
+    /// current lease token; `committed_at_ms` is used as "now" for expiry checks.
+    pub fn extend_lease(mut self, job_id: Id, lease_token: Id, new_expiry_ms: i64) -> Self {
+        self.operations.push(Operation::ExtendLease(LeaseExtension {
+            job_id,
+            lease_token,
+            new_expiry_ms,
+        }));
         self
     }
 
@@ -276,6 +291,12 @@ fn digest_operation(d: &mut Digest, op: &Operation) {
                 Resolution::MarkSucceeded => 2,
                 Resolution::MarkDead => 3,
             });
+        }
+        Operation::ExtendLease(e) => {
+            d.write_u8(8);
+            d.write_id(e.job_id);
+            d.write_id(e.lease_token);
+            d.write_i64(e.new_expiry_ms);
         }
     }
 }
