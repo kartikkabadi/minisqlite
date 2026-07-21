@@ -301,6 +301,7 @@ impl<'a> IntoIterator for &'a CommittedClaims {
 pub struct IndeterminateClaim {
     pub(crate) transaction_id: Id,
     pub(crate) proposed_jobs: Vec<Id>,
+    pub(crate) storage_error: String,
 }
 
 impl IndeterminateClaim {
@@ -312,6 +313,11 @@ impl IndeterminateClaim {
     /// The job IDs that were proposed for leasing, for verification only.
     pub fn proposed_jobs_for_verification(&self) -> &[Id] {
         &self.proposed_jobs
+    }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
     }
 }
 

@@ -573,10 +573,11 @@ pub(crate) fn claim_jobs(
     }
 
     let proposed_jobs: Vec<Id> = claimed.iter().map(|job| job.job_id).collect();
-    tx.commit().map_err(|_| {
+    tx.commit().map_err(|e| {
         ClaimError::Indeterminate(IndeterminateClaim {
             transaction_id,
             proposed_jobs,
+            storage_error: StorageError::from_sqlite(e).to_string(),
         })
     })?;
 

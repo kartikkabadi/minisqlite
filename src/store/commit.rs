@@ -139,9 +139,10 @@ pub(crate) fn commit(
 
     // Any failure of the COMMIT step itself may or may not have persisted; report
     // indeterminacy and let the caller recover via `recover_transaction`.
-    tx.commit().map_err(|_| {
+    tx.commit().map_err(|e| {
         CommitError::Indeterminate(IndeterminateCommit {
             transaction_id: batch.transaction_id,
+            storage_error: StorageError::from_sqlite(e).to_string(),
         })
     })?;
 

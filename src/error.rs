@@ -153,10 +153,22 @@ impl std::error::Error for Conflict {}
 
 /// A commit may or may not have become durable. Recover with
 /// [`ControlPlaneStore::recover_transaction`](crate::ControlPlaneStore::recover_transaction).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndeterminateCommit {
+    pub(crate) transaction_id: Id,
+    pub(crate) storage_error: String,
+}
+
+impl IndeterminateCommit {
     /// The transaction ID whose durability is unknown.
-    pub transaction_id: Id,
+    pub fn transaction_id(&self) -> Id {
+        self.transaction_id
+    }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
+    }
 }
 
 /// Errors returned by [`ControlPlaneStore::commit`](crate::ControlPlaneStore::commit).
