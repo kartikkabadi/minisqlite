@@ -1,8 +1,9 @@
 //! # minisqlite
 //!
-//! A typed embedded control-plane state kernel on SQLite.
+//! Commit events, current state, and background jobs in one atomic SQLite
+//! transaction, with explicit crash recovery.
 //!
-//! One atomic transaction coordinates four concerns that control planes otherwise
+//! One atomic transaction coordinates four concerns that applications otherwise
 //! stitch together by hand:
 //!
 //! - **Domain events**, appended to versioned streams with optimistic concurrency.

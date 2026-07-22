@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use minisqlite::{CommitBatch, ControlPlaneStore, Id, JobState, Resolution};
 
 const USAGE: &str = "\
-minisqlite — control-plane state kernel CLI
+minisqlite — atomic events, state, and jobs on SQLite
 
 USAGE:
     minisqlite [store] <command> --db <path> [options]
