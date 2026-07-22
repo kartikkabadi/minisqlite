@@ -54,9 +54,17 @@ pub enum StorageError {
     /// An error reported by SQLite.
     Sqlite(String),
     /// A migration row's stored checksum does not match this build's migration SQL.
-    MigrationChecksumMismatch { version: u32 },
+    MigrationChecksumMismatch {
+        /// The migration version whose checksum mismatched.
+        version: u32,
+    },
     /// The database schema version is newer than this build understands.
-    SchemaTooNew { version: u32, supported: u32 },
+    SchemaTooNew {
+        /// The schema version recorded in the database.
+        version: u32,
+        /// The highest schema version this build supports.
+        supported: u32,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -105,20 +113,29 @@ impl std::error::Error for ValidationError {}
 pub enum Conflict {
     /// An expected stream version did not match the durable stream version.
     StreamVersion {
+        /// The stream whose version was checked.
         stream_id: String,
+        /// The version the caller expected.
         expected: u64,
+        /// The durable version actually found.
         actual: u64,
     },
     /// A projection patch's expected version did not match the durable projection version.
     ProjectionVersion {
+        /// The projection whose version was checked.
         projection: String,
+        /// The version the caller expected.
         expected: u64,
+        /// The durable version actually found.
         actual: u64,
     },
     /// A job operation requested an invalid state transition.
     JobTransition {
+        /// The job whose transition was rejected.
         job_id: Id,
+        /// The job's durable state at the time of the operation.
         from: JobState,
+        /// The state the operation attempted to move to.
         to: JobState,
     },
     /// A lease extension conflicted with the job's durable lease state.
@@ -301,19 +318,33 @@ pub enum LeaseConflict {
     /// The requested job does not exist.
     JobNotFound(Id),
     /// The supplied lease token is not the job's current lease token.
-    InvalidToken { job_id: Id },
+    InvalidToken {
+        /// The job whose lease token was rejected.
+        job_id: Id,
+    },
     /// The job is not in the `Leased` state (terminal jobs are always rejected).
-    NotLeased { job_id: Id, state: JobState },
+    NotLeased {
+        /// The job that is not leased.
+        job_id: Id,
+        /// The job's durable state at the time of the request.
+        state: JobState,
+    },
     /// The requested new expiry is not strictly later than the current expiry.
     ExpiryNotLater {
+        /// The job whose extension was rejected.
         job_id: Id,
+        /// The lease's current durable expiry.
         current_ms: i64,
+        /// The rejected requested expiry.
         requested_ms: i64,
     },
     /// The lease already expired; an expired lease cannot be revived by extension.
     Expired {
+        /// The job whose lease expired.
         job_id: Id,
+        /// When the lease expired.
         lease_expires_at_ms: i64,
+        /// The caller-supplied current time.
         now_ms: i64,
     },
 }
