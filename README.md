@@ -6,12 +6,19 @@
 
 A minimal, from-scratch SQLite-like relational database engine written in Rust.
 
-`minisqlite` is intentionally tiny: **zero external dependencies**, **pure safe Rust**, and a page-based storage engine with a custom file format. It is built for situations where linking to C SQLite is overkill or impossible:
+> **Direction:** the project is pivoting to a SQLite-backed control-plane
+> state kernel. See [ADR-001](docs/ADR-001.md) for the storage substrate
+> decision, plus the [roadmap](docs/ROADMAP.md) and [scope](docs/SCOPE.md).
+>
+> **Fate of the SQL engine:** the from-scratch SQL engine and its public SQL
+> API described below are frozen at **v0.2.1** — preserved on
+> [crates.io](https://crates.io/crates/minisqlite/0.2.1) and in this
+> repository's history — and are **removed in the 0.3 control-plane pivot**.
+> The 0.3 kernel links against C SQLite and exposes a typed API, not
+> arbitrary SQL. (The intermediate custom-journal rewrite is archived at
+> `archive/append-only-journal-v1`, tag `journal-v1-experimental`.)
 
-- **WASM / browser targets** – no `libsqlite3-sys` to emscripten.
-- **Embedded / IoT** – easy to audit, easy to cross-compile.
-- **Education and prototyping** – the whole engine fits in a few thousand lines and a single crate.
-- **Serverless edge functions** – self-contained file storage with no native shared library.
+The remainder of this README describes the **v0.2.1 SQL engine**: a page-based storage engine with a custom file format, zero external dependencies, pure safe Rust.
 
 ## Install
 
