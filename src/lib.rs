@@ -25,6 +25,7 @@
 //! after a process restart — without depending on the state of the writer that
 //! observed the failure.
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 mod config;
 mod error;

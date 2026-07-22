@@ -29,7 +29,9 @@ pub enum Operation {
 /// A precondition that `stream_id` is at exactly `version` before the commit applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpectedStreamVersion {
+    /// The stream whose version is checked.
     pub stream_id: String,
+    /// The exact version the stream must be at.
     pub version: u64,
 }
 

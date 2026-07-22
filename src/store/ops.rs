@@ -15,7 +15,9 @@ use crate::store::migrations;
 /// which check failed and a human-readable detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifyFinding {
+    /// The name of the check that failed.
     pub check: String,
+    /// Human-readable description of the inconsistency.
     pub detail: String,
 }
 
@@ -23,10 +25,12 @@ pub struct VerifyFinding {
 /// consistent.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VerifyReport {
+    /// All inconsistencies found; empty when the store is consistent.
     pub findings: Vec<VerifyFinding>,
 }
 
 impl VerifyReport {
+    /// Whether the verification pass found no inconsistencies.
     pub fn is_ok(&self) -> bool {
         self.findings.is_empty()
     }
@@ -35,16 +39,28 @@ impl VerifyReport {
 /// Store-wide statistics.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreStats {
+    /// Number of committed transactions.
     pub transactions: u64,
+    /// Number of persisted events.
     pub events: u64,
+    /// Number of event streams.
     pub streams: u64,
+    /// Number of projections.
     pub projections: u64,
+    /// Total number of entries across all projections.
     pub projection_entries: u64,
+    /// Job counts keyed by state name.
     pub jobs_by_state: BTreeMap<String, u64>,
+    /// Number of partitions with nonterminal work.
     pub active_partitions: u64,
+    /// Size of the database file in bytes.
     pub file_size_bytes: u64,
+    /// The highest applied schema migration version.
     pub migration_version: u32,
+    /// The earliest lease expiry among leased jobs, if any are leased.
     pub oldest_active_lease_ms: Option<i64>,
+    /// Commit time of the transaction that made the oldest uncertain job
+    /// uncertain, if any jobs are uncertain.
     pub oldest_uncertain_job_ms: Option<i64>,
 }
 

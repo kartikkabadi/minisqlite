@@ -65,8 +65,11 @@ pub(crate) fn checksum(sql: &str) -> [u8; 16] {
 /// A row from `schema_migrations`, for status reporting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationStatus {
+    /// The migration's version number.
     pub version: u32,
+    /// When the migration was applied.
     pub applied_at_ms: i64,
+    /// Whether the stored checksum matches this build's migration SQL.
     pub checksum_ok: bool,
 }
 
