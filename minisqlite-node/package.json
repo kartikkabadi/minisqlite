@@ -1,0 +1,20 @@
+{
+  "name": "minisqlite-node",
+  "version": "0.0.0",
+  "private": true,
+  "description": "napi-rs bindings for the minisqlite control-plane kernel (spike)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "name": "minisqlite"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "bun test",
+    "example": "node examples/synara_provider_turn.mjs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  }
+}
