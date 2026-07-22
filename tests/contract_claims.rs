@@ -6,7 +6,7 @@ mod common;
 use common::{db_path, id, open, open_in, temp_dir};
 use minisqlite::{
     ClaimOutcome, ClaimRecovery, ClaimRequest, ClaimedJob, CommitBatch, ControlPlaneStore, Id,
-    IndeterminateClaim, JobSpec, JobState, LeaseError, Resolution,
+    IndeterminateClaim, JobSpec, JobState, LeaseConflict, LeaseError, Resolution,
 };
 
 const NOW: i64 = 10_000;
@@ -66,7 +66,7 @@ fn duplicate_job_id_in_new_transaction_is_rejected() {
     // The original job is untouched and the failed transaction left no trace.
     let info = store.job(id(10)).unwrap().unwrap();
     assert_eq!(info.state, JobState::Pending);
-    assert_eq!(info.spec.partition_key, "p");
+    assert_eq!(info.spec.partition_key(), "p");
 }
 
 #[test]
@@ -310,17 +310,16 @@ fn cancellation_of_pending_and_leased_jobs() {
     enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p1", vec![]));
     enqueue(&store, 2, JobSpec::reconcilable(id(11), "q", "p2", vec![]));
 
-    // Only leased jobs may be cancelled; a pending job is rejected.
-    assert!(store
+    // A pending job may be cancelled without a token (spec A5.6).
+    store
         .commit(&CommitBatch::new(id(3), NOW).cancel_job(id(10), None))
-        .is_err());
-    assert_eq!(job_state(&store, id(10)), JobState::Pending);
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Cancelled);
 
     // A leased job requires its current lease token.
     let mut jobs = claim_all(&store, "q", NOW);
-    assert_eq!(jobs.len(), 2);
-    jobs.sort_by_key(|j| j.job_id);
-    let claimed = jobs.remove(1);
+    assert_eq!(jobs.len(), 1);
+    let claimed = jobs.remove(0);
     assert_eq!(claimed.job_id, id(11));
     assert!(store
         .commit(&CommitBatch::new(id(4), NOW).cancel_job(id(11), None))
@@ -376,6 +375,28 @@ fn uncertain_jobs_resolve_to_retry_succeeded_or_dead() {
         .is_err());
 }
 
+#[test]
+fn retry_resolution_dead_letters_when_max_attempts_exhausted() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(
+        &store,
+        1,
+        JobSpec::reconcilable(id(10), "q", "p", vec![]).with_max_attempts(1),
+    );
+    claim_all(&store, "q", NOW);
+    // Expire the lease into Uncertain; the single attempt is spent.
+    store
+        .claim_jobs(&claim_request("q", NOW + LEASE_MS + 1))
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Uncertain);
+
+    store
+        .commit(&CommitBatch::new(id(100), NOW).resolve_uncertain_job(id(10), Resolution::Retry))
+        .unwrap();
+    assert_eq!(job_state(&store, id(10)), JobState::Dead);
+}
+
 // ----- lease extension -----
 
 #[test]
@@ -391,7 +412,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), id(999), expiry + 1_000, NOW)
             .unwrap_err(),
-        LeaseError::InvalidToken { .. }
+        LeaseError::Conflict(LeaseConflict::InvalidToken { .. })
     ));
 
     // The new expiry must be strictly later than the current expiry.
@@ -399,7 +420,7 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), claimed.lease_token, expiry, NOW)
             .unwrap_err(),
-        LeaseError::ExpiryNotLater { .. }
+        LeaseError::Conflict(LeaseConflict::ExpiryNotLater { .. })
     ));
 
     // Unknown jobs are rejected.
@@ -407,16 +428,16 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(404), claimed.lease_token, expiry + 1_000, NOW)
             .unwrap_err(),
-        LeaseError::JobNotFound(_)
+        LeaseError::Conflict(LeaseConflict::JobNotFound(_))
     ));
 
     // A valid extension moves the expiry without incrementing the attempt.
     let receipt = store
         .extend_lease(id(10), claimed.lease_token, expiry + 1_000, NOW)
         .unwrap();
-    assert_eq!(receipt.job_id, id(10));
-    assert_eq!(receipt.attempt, claimed.attempt);
-    assert_eq!(receipt.lease_expires_at_ms, expiry + 1_000);
+    assert_eq!(receipt.job_id(), id(10));
+    assert_eq!(receipt.attempt(), claimed.attempt);
+    assert_eq!(receipt.lease_expires_at_ms(), expiry + 1_000);
     let info = store.job(id(10)).unwrap().unwrap();
     assert_eq!(info.attempt, claimed.attempt);
     assert_eq!(info.lease_expires_at_ms, Some(expiry + 1_000));
@@ -429,8 +450,88 @@ fn lease_extension_rules() {
         store
             .extend_lease(id(10), claimed.lease_token, expiry + 2_000, NOW)
             .unwrap_err(),
-        LeaseError::NotLeased { .. }
+        LeaseError::Conflict(LeaseConflict::NotLeased { .. })
     ));
+}
+
+#[test]
+fn batched_lease_extension_commits_atomically() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", NOW);
+    let expiry = claimed.lease_expires_at_ms;
+
+    // A batch with a wrong token rejects atomically: no extension, no event.
+    let bad = CommitBatch::new(id(2), NOW)
+        .append_event(common::event(100, "s", "t"))
+        .extend_lease(id(10), id(999), expiry + 1_000);
+    assert!(store.commit(&bad).is_err());
+    assert_eq!(store.stream_version("s").unwrap(), 0);
+    let info = store.job(id(10)).unwrap().unwrap();
+    assert_eq!(info.lease_expires_at_ms, Some(expiry));
+
+    // A valid batched extension moves the expiry together with the event.
+    let good = CommitBatch::new(id(3), NOW)
+        .append_event(common::event(101, "s", "t"))
+        .extend_lease(id(10), claimed.lease_token, expiry + 1_000);
+    store.commit(&good).unwrap();
+    assert_eq!(store.stream_version("s").unwrap(), 1);
+    let info = store.job(id(10)).unwrap().unwrap();
+    assert_eq!(info.lease_expires_at_ms, Some(expiry + 1_000));
+    assert_eq!(info.attempt, claimed.attempt);
+
+    // Zero lease tokens are rejected at validation time.
+    let zero = CommitBatch::new(id(4), NOW).extend_lease(id(10), Id::ZERO, expiry + 2_000);
+    assert!(store.commit(&zero).is_err());
+
+    // Extensions past the batch's committed_at_ms "now" are rejected as expired.
+    let late = CommitBatch::new(id(5), expiry + 2_000 + 1).extend_lease(
+        id(10),
+        claimed.lease_token,
+        expiry + 3_000,
+    );
+    assert!(store.commit(&late).is_err());
+}
+
+#[test]
+fn extending_an_expired_lease_fails() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", NOW);
+    let expiry = claimed.lease_expires_at_ms;
+
+    // Past the expiry, the lease is dead; extension must not revive it.
+    assert!(matches!(
+        store
+            .extend_lease(id(10), claimed.lease_token, expiry + 10_000, expiry + 1)
+            .unwrap_err(),
+        LeaseError::Conflict(LeaseConflict::Expired { .. })
+    ));
+}
+
+#[test]
+fn recover_claim_returns_the_extended_expiry_after_extension() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claims = match store.claim_jobs(&claim_request("q", NOW)).unwrap() {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed, got {other:?}"),
+    };
+    let claimed = claims.jobs()[0].clone();
+    let extended = claimed.lease_expires_at_ms + 5_000;
+    store
+        .extend_lease(id(10), claimed.lease_token, extended, NOW)
+        .unwrap();
+
+    match store.recover_claim(claims.transaction_id(), NOW).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs()[0].lease_expires_at_ms, extended);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
 }
 
 // ----- claim recovery -----
@@ -451,7 +552,7 @@ fn recover_claim_reports_committed_with_original_tokens_and_absent() {
     // Recovery works from a fresh handle and reconstructs the original tokens.
     drop(store);
     let store = open(&path);
-    match store.recover_claim(transaction_id).unwrap() {
+    match store.recover_claim(transaction_id, NOW).unwrap() {
         ClaimRecovery::Committed(recovered) => {
             assert_eq!(recovered.transaction_id(), transaction_id);
             assert_eq!(recovered.jobs().len(), original.len());
@@ -461,7 +562,56 @@ fn recover_claim_reports_committed_with_original_tokens_and_absent() {
         other => panic!("expected committed recovery, got {other:?}"),
     }
 
-    assert_eq!(store.recover_claim(id(404)).unwrap(), ClaimRecovery::Absent);
+    assert_eq!(
+        store.recover_claim(id(404), NOW).unwrap(),
+        ClaimRecovery::Absent
+    );
+}
+
+#[test]
+fn recover_claim_reports_expired_or_resolved_leases_as_stale() {
+    let dir = temp_dir();
+    let store = open_in(&dir);
+    enqueue(&store, 1, JobSpec::reconcilable(id(10), "q", "p", vec![]));
+    let claims = match store.claim_jobs(&claim_request("q", NOW)).unwrap() {
+        ClaimOutcome::Committed(claims) => claims,
+        other => panic!("expected committed claims, got {other:?}"),
+    };
+    let txn = claims.transaction_id();
+
+    // Still current: recoverable as executable.
+    match store.recover_claim(txn, NOW).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert_eq!(recovered.jobs().len(), 1);
+            assert!(recovered.stale_jobs().is_empty());
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // After expiry: the lease must not be handed back as executable.
+    match store.recover_claim(txn, NOW + LEASE_MS + 1).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert!(recovered.jobs().is_empty());
+            assert_eq!(recovered.stale_jobs(), &[id(10)]);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
+
+    // After acknowledgement the lease is resolved: also stale.
+    store
+        .commit(&CommitBatch::new(id(100), NOW).acknowledge_job(
+            id(10),
+            claims.jobs()[0].lease_token,
+            None,
+        ))
+        .unwrap();
+    match store.recover_claim(txn, NOW).unwrap() {
+        ClaimRecovery::Committed(recovered) => {
+            assert!(recovered.jobs().is_empty());
+            assert_eq!(recovered.stale_jobs(), &[id(10)]);
+        }
+        other => panic!("expected committed recovery, got {other:?}"),
+    }
 }
 
 // ----- indeterminate claim API shape (compile-time) -----

@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::error::StorageError;
 
@@ -28,10 +28,29 @@ CREATE TABLE queue_cursors (queue TEXT PRIMARY KEY, last_partition_key TEXT);
 CREATE TABLE active_partitions (queue TEXT NOT NULL, partition_key TEXT NOT NULL, first_active_sequence INTEGER NOT NULL, PRIMARY KEY(queue, partition_key));
 CREATE TABLE claim_receipts (transaction_id BLOB NOT NULL REFERENCES transactions(transaction_id), job_id BLOB NOT NULL, lease_token BLOB NOT NULL, attempt INTEGER NOT NULL, worker_id TEXT NOT NULL, lease_expires_at_ms INTEGER NOT NULL, PRIMARY KEY(transaction_id, job_id));
 ",
+},
+// v2 rebuilds `jobs` with CHECK constraints enforcing the job state machine's
+// row invariants (states 0..=6 per JobState::encode): leased rows carry a full
+// lease, non-leased rows carry none, retry-wait rows carry a retry time, and
+// terminal rows carry a terminal timestamp.
+Migration {
+    version: 2,
+    sql: "\
+CREATE TABLE jobs_v2 (job_id BLOB PRIMARY KEY, enqueue_sequence INTEGER NOT NULL UNIQUE, enqueue_transaction_id BLOB NOT NULL REFERENCES transactions(transaction_id), queue TEXT NOT NULL, partition_key TEXT NOT NULL, payload BLOB NOT NULL, not_before_ms INTEGER NOT NULL, max_attempts INTEGER NOT NULL CHECK (max_attempts > 0), effect_mode INTEGER NOT NULL, idempotency_key TEXT, state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 6), attempt INTEGER NOT NULL CHECK (attempt >= 0), lease_token BLOB, worker_id TEXT, lease_expires_at_ms INTEGER, retry_after_ms INTEGER, terminal_at_ms INTEGER, result_digest BLOB, error_summary TEXT, updated_transaction_id BLOB NOT NULL, CHECK (state <> 1 OR (lease_token IS NOT NULL AND worker_id IS NOT NULL AND lease_expires_at_ms IS NOT NULL)), CHECK (state = 1 OR (lease_token IS NULL AND worker_id IS NULL AND lease_expires_at_ms IS NULL)), CHECK (state <> 2 OR retry_after_ms IS NOT NULL), CHECK ((state IN (4, 5, 6)) = (terminal_at_ms IS NOT NULL)));
+INSERT INTO jobs_v2 SELECT * FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v2 RENAME TO jobs;
+CREATE INDEX jobs_ready_idx ON jobs(queue, partition_key, state, not_before_ms, enqueue_sequence);
+CREATE INDEX jobs_expiry_idx ON jobs(state, lease_expires_at_ms);
+CREATE INDEX jobs_queue_state_idx ON jobs(queue, state);
+CREATE INDEX jobs_transaction_idx ON jobs(updated_transaction_id);
+",
 }];
 
-/// FNV-1a-128 checksum of the migration SQL text (same hash family as the request
-/// digest; see `CommitBatch::request_digest` for rationale).
+/// FNV-1a-128 checksum of the migration SQL text. Migration SQL is compiled into
+/// this trusted binary, so the checksum only detects accidental drift between the
+/// binary and an applied schema, not adversarial tampering; changing the algorithm
+/// would invalidate checksums recorded by existing stores.
 pub(crate) fn checksum(sql: &str) -> [u8; 16] {
     const OFFSET_BASIS: u128 = 0x6c62272e07bb014262b821756295c58d;
     const PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -57,12 +76,14 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at_ms INTEGER NOT NULL, checksum BLOB NOT NULL)",
         [],
-    )?;
-    let current: u32 = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-        [],
-        |row| row.get(0),
-    )?;
+    ).map_err(StorageError::from_sqlite)?;
+    let current: u32 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
     let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
     if current > supported {
         return Err(StorageError::SchemaTooNew {
@@ -77,7 +98,8 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
                 [migration.version],
                 |row| row.get(0),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::from_sqlite)?;
         let expected = checksum(migration.sql);
         match applied {
             Some(stored) => {
@@ -88,15 +110,53 @@ pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StorageError> {
                 }
             }
             None => {
-                let tx = conn.transaction()?;
-                tx.execute_batch(migration.sql)?;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(StorageError::from_sqlite)?;
+                tx.execute_batch(migration.sql)
+                    .map_err(StorageError::from_sqlite)?;
                 tx.execute(
                     "INSERT INTO schema_migrations (version, applied_at_ms, checksum) VALUES (?1, ?2, ?3)",
                     rusqlite::params![migration.version, now_ms(), expected.as_slice()],
-                )?;
-                tx.commit()?;
+                ).map_err(StorageError::from_sqlite)?;
+                tx.commit().map_err(StorageError::from_sqlite)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Verify the schema is exactly at this build's supported version without applying
+/// anything. An older schema is an error: inspection tooling must never migrate.
+pub(crate) fn require_current(conn: &Connection) -> Result<(), StorageError> {
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?;
+    let current: u32 = if has_table == 0 {
+        0
+    } else {
+        conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StorageError::from_sqlite)?
+    };
+    let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
+    if current > supported {
+        return Err(StorageError::SchemaTooNew {
+            version: current,
+            supported,
+        });
+    }
+    if current < supported {
+        return Err(StorageError::Sqlite(format!(
+            "schema version {current} is older than supported {supported}; open the store with a writer to migrate"
+        )));
     }
     Ok(())
 }
@@ -111,7 +171,8 @@ pub(crate) fn status(conn: &Connection) -> Result<Vec<MigrationStatus>, StorageE
                 [migration.version],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .optional()?;
+            .optional()
+            .map_err(StorageError::from_sqlite)?;
         if let Some((applied_at_ms, stored)) = row {
             out.push(MigrationStatus {
                 version: migration.version,

@@ -18,12 +18,12 @@ pub(crate) fn commit(
 
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
 
     // Idempotent resubmission: a transaction ID that already committed with the same
     // digest returns the original receipt; a different digest is a hard error.
     if let Some((sequence, committed_at_ms, stored_digest)) =
-        lookup_transaction(&tx, batch.transaction_id).map_err(StorageError::from)?
+        lookup_transaction(&tx, batch.transaction_id)?
     {
         if stored_digest == digest {
             return Ok(CommitReceipt {
@@ -55,7 +55,7 @@ pub(crate) fn commit(
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(StorageError::from)? as u64;
+        .map_err(StorageError::from_sqlite)? as u64;
 
     tx.execute(
         "INSERT INTO transactions (transaction_id, transaction_sequence, committed_at_ms, correlation_id, metadata, request_digest, operation_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -63,13 +63,13 @@ pub(crate) fn commit(
             batch.transaction_id.as_bytes().as_slice(),
             sequence as i64,
             batch.committed_at_ms,
-            batch.correlation_id.map(|id| id.0.to_vec()),
+            batch.correlation_id.map(|id| id.as_bytes().to_vec()),
             batch.metadata,
             digest.as_slice(),
             batch.operations.len() as i64,
         ],
     )
-    .map_err(StorageError::from)?;
+    .map_err(StorageError::from_sqlite)?;
 
     for operation in &batch.operations {
         match operation {
@@ -126,6 +126,19 @@ pub(crate) fn commit(
                     resolution,
                 )?;
             }
+            Operation::ExtendLease(extension) => {
+                crate::store::jobs::apply_extend_lease(&tx, extension, batch.committed_at_ms)
+                    .map_err(|e| match e {
+                        crate::error::LeaseError::Conflict(c) => {
+                            CommitError::Conflict(Conflict::Lease(c))
+                        }
+                        crate::error::LeaseError::Storage(s) => CommitError::Storage(s),
+                        // apply_extend_lease never commits, so it cannot be indeterminate.
+                        crate::error::LeaseError::Indeterminate(i) => CommitError::Storage(
+                            StorageError::Sqlite(i.storage_error().to_string()),
+                        ),
+                    })?;
+            }
         }
     }
 
@@ -134,16 +147,25 @@ pub(crate) fn commit(
             "INSERT INTO streams (stream_id, current_version) VALUES (?1, ?2) ON CONFLICT(stream_id) DO UPDATE SET current_version = excluded.current_version",
             rusqlite::params![stream_id, *version as i64],
         )
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     }
 
     // Any failure of the COMMIT step itself may or may not have persisted; report
     // indeterminacy and let the caller recover via `recover_transaction`.
-    tx.commit().map_err(|_| {
+    tx.commit().map_err(|e| {
         CommitError::Indeterminate(IndeterminateCommit {
             transaction_id: batch.transaction_id,
+            storage_error: StorageError::from_sqlite(e).to_string(),
         })
     })?;
+
+    #[cfg(feature = "failpoints")]
+    if crate::store::failpoints::take_fail_commit() {
+        return Err(CommitError::Indeterminate(IndeterminateCommit {
+            transaction_id: batch.transaction_id,
+            storage_error: "failpoint: COMMIT outcome unknown".into(),
+        }));
+    }
 
     Ok(CommitReceipt {
         transaction_id: batch.transaction_id,
@@ -163,7 +185,7 @@ pub(crate) fn recover_transaction(
             [transaction_id.as_bytes().as_slice()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
-        .optional()?;
+        .optional().map_err(StorageError::from_sqlite)?;
     Ok(match row {
         Some((sequence, committed_at_ms)) => TransactionRecovery::Committed(CommitReceipt {
             transaction_id,
@@ -179,22 +201,23 @@ pub(crate) fn recover_transaction(
 fn lookup_transaction(
     tx: &Transaction<'_>,
     transaction_id: Id,
-) -> Result<Option<(u64, i64, [u8; 16])>, rusqlite::Error> {
-    tx.query_row(
-        "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
-        [transaction_id.as_bytes().as_slice()],
-        |row| {
-            let sequence: i64 = row.get(0)?;
-            let committed_at_ms: i64 = row.get(1)?;
-            let digest: Vec<u8> = row.get(2)?;
-            let mut fixed = [0u8; 16];
-            if digest.len() == 16 {
-                fixed.copy_from_slice(&digest);
-            }
-            Ok((sequence as u64, committed_at_ms, fixed))
-        },
-    )
-    .optional()
+) -> Result<Option<(u64, i64, Vec<u8>)>, StorageError> {
+    let row = tx
+        .query_row(
+            "SELECT transaction_sequence, committed_at_ms, request_digest FROM transactions WHERE transaction_id = ?1",
+            [transaction_id.as_bytes().as_slice()],
+            |row| {
+                let sequence: i64 = row.get(0)?;
+                let committed_at_ms: i64 = row.get(1)?;
+                let digest: Vec<u8> = row.get(2)?;
+                Ok((sequence, committed_at_ms, digest))
+            },
+        )
+        .optional()
+        .map_err(StorageError::from_sqlite)?;
+    // The digest is compared as an opaque blob: a row written by an older build
+    // with a different digest algorithm simply fails the resubmission match.
+    Ok(row.map(|(sequence, committed_at_ms, digest)| (sequence as u64, committed_at_ms, digest)))
 }
 
 fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, CommitError> {
@@ -205,7 +228,7 @@ fn current_stream_version(tx: &Transaction<'_>, stream_id: &str) -> Result<u64, 
             |row| row.get(0),
         )
         .optional()
-        .map_err(StorageError::from)?;
+        .map_err(StorageError::from_sqlite)?;
     Ok(version.unwrap_or(0) as u64)
 }
 
@@ -299,6 +322,11 @@ fn validate_batch(limits: &Limits, batch: &CommitBatch) -> Result<(), CommitErro
                 }
             }
             Operation::ResolveJob(_) => {}
+            Operation::ExtendLease(extension) => {
+                if extension.lease_token == Id::ZERO {
+                    return Err(ValidationError("lease token cannot be zero".into()).into());
+                }
+            }
         }
     }
     Ok(())

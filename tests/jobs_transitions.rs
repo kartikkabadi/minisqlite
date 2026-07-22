@@ -46,7 +46,7 @@ fn enqueue_creates_pending_job() {
     let info = store.job(id).unwrap().unwrap();
     assert_eq!(info.state, JobState::Pending);
     assert_eq!(info.attempt, 0);
-    assert_eq!(info.spec.payload, b"x".to_vec());
+    assert_eq!(info.spec.payload(), b"x".to_vec());
 }
 
 #[test]
@@ -151,6 +151,58 @@ fn fail_at_max_attempts_moves_to_dead() {
 }
 
 #[test]
+fn fail_with_default_retry_near_max_timestamp_is_rejected() {
+    let (_dir, store) = store();
+    let id = Id::from(1u128);
+    enqueue(
+        &store,
+        JobSpec::reconcilable(id, "q", "p", vec![]).with_max_attempts(3),
+    );
+    let claimed = claim_one(&store, "q", 2_000);
+    let tx = txid();
+    let err = store
+        .commit(&CommitBatch::new(tx, i64::MAX).fail_job(id, claimed.lease_token, "boom", None))
+        .unwrap_err();
+    assert!(matches!(err, CommitError::Validation(_)));
+    // Nothing was committed and the job is untouched.
+    assert!(matches!(
+        store.recover_transaction(tx).unwrap(),
+        minisqlite::TransactionRecovery::Absent
+    ));
+    let info = store.job(id).unwrap().unwrap();
+    assert_eq!(info.state, JobState::Leased);
+    assert_eq!(info.attempt, 1);
+    assert_eq!(info.error_summary, None);
+
+    // The largest timestamp whose default retry still fits is accepted.
+    let boundary = i64::MAX - 30_000;
+    store
+        .commit(&CommitBatch::new(txid(), boundary).fail_job(id, claimed.lease_token, "boom", None))
+        .unwrap();
+    let info = store.job(id).unwrap().unwrap();
+    assert_eq!(info.state, JobState::RetryWait);
+    assert_eq!(info.retry_after_ms, Some(i64::MAX));
+}
+
+#[test]
+fn claim_with_lease_expiry_overflow_is_rejected() {
+    let (_dir, store) = store();
+    let id = Id::from(1u128);
+    enqueue(&store, JobSpec::reconcilable(id, "q", "p", vec![]));
+    let err = store
+        .claim_jobs(&minisqlite::ClaimRequest {
+            queue: "q".into(),
+            worker_id: "w1".into(),
+            now_ms: i64::MAX,
+            lease_ms: 10_000,
+            limit: 1,
+        })
+        .unwrap_err();
+    assert!(matches!(err, minisqlite::ClaimError::Validation(_)));
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Pending);
+}
+
+#[test]
 fn cancel_leased_job_with_token() {
     let (_dir, store) = store();
     let id = Id::from(1u128);
@@ -175,18 +227,33 @@ fn cancel_leased_job_without_token_is_rejected() {
 }
 
 #[test]
-fn cancel_pending_job_is_invalid_transition() {
+fn cancel_pending_job_without_token_succeeds() {
     let (_dir, store) = store();
     let id = Id::from(1u128);
     enqueue(&store, JobSpec::reconcilable(id, "q", "p", vec![]));
-    let err = store
+    store
         .commit(&CommitBatch::new(txid(), 3_000).cancel_job(id, None))
+        .unwrap();
+    assert_eq!(store.job(id).unwrap().unwrap().state, JobState::Cancelled);
+}
+
+#[test]
+fn cancel_retry_wait_job_is_invalid_transition() {
+    let (_dir, store) = store();
+    let id = Id::from(1u128);
+    enqueue(&store, JobSpec::reconcilable(id, "q", "p", vec![]));
+    let claimed = claim_one(&store, "q", 2_000);
+    store
+        .commit(&CommitBatch::new(txid(), 3_000).fail_job(id, claimed.lease_token, "e", None))
+        .unwrap();
+    let err = store
+        .commit(&CommitBatch::new(txid(), 4_000).cancel_job(id, None))
         .unwrap_err();
     assert_eq!(
         err,
         CommitError::Conflict(Conflict::JobTransition {
             job_id: id,
-            from: JobState::Pending,
+            from: JobState::RetryWait,
             to: JobState::Cancelled,
         })
     );

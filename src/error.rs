@@ -5,6 +5,7 @@ use crate::jobs::JobState;
 
 /// The top-level error type for general store operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// A storage-layer failure.
     Storage(StorageError),
@@ -12,9 +13,6 @@ pub enum Error {
     Validation(ValidationError),
     /// A concurrency or state conflict.
     Conflict(Conflict),
-    /// Temporary variant for subsystems that are scaffolded but not yet implemented.
-    #[doc(hidden)]
-    Unimplemented(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -23,7 +21,6 @@ impl fmt::Display for Error {
             Error::Storage(e) => write!(f, "{e}"),
             Error::Validation(e) => write!(f, "{e}"),
             Error::Conflict(e) => write!(f, "{e}"),
-            Error::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
         }
     }
 }
@@ -48,14 +45,9 @@ impl From<Conflict> for Error {
     }
 }
 
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::Storage(StorageError::from(e))
-    }
-}
-
 /// A failure in the underlying SQLite storage layer or the host filesystem.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StorageError {
     /// An I/O error from the host filesystem.
     Io(String),
@@ -87,8 +79,10 @@ impl fmt::Display for StorageError {
 
 impl std::error::Error for StorageError {}
 
-impl From<rusqlite::Error> for StorageError {
-    fn from(e: rusqlite::Error) -> Self {
+impl StorageError {
+    /// Crate-private conversion from the underlying SQLite driver error. Kept out
+    /// of the public API so no rusqlite types leak into the crate's contract.
+    pub(crate) fn from_sqlite(e: rusqlite::Error) -> Self {
         StorageError::Sqlite(e.to_string())
     }
 }
@@ -107,6 +101,7 @@ impl std::error::Error for ValidationError {}
 
 /// A concurrency or state conflict detected against durable state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Conflict {
     /// An expected stream version did not match the durable stream version.
     StreamVersion {
@@ -126,6 +121,8 @@ pub enum Conflict {
         from: JobState,
         to: JobState,
     },
+    /// A lease extension conflicted with the job's durable lease state.
+    Lease(LeaseConflict),
 }
 
 impl fmt::Display for Conflict {
@@ -150,6 +147,7 @@ impl fmt::Display for Conflict {
             Conflict::JobTransition { job_id, from, to } => {
                 write!(f, "invalid job transition for {job_id}: {from:?} -> {to:?}")
             }
+            Conflict::Lease(e) => write!(f, "{e}"),
         }
     }
 }
@@ -158,14 +156,27 @@ impl std::error::Error for Conflict {}
 
 /// A commit may or may not have become durable. Recover with
 /// [`ControlPlaneStore::recover_transaction`](crate::ControlPlaneStore::recover_transaction).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndeterminateCommit {
+    pub(crate) transaction_id: Id,
+    pub(crate) storage_error: String,
+}
+
+impl IndeterminateCommit {
     /// The transaction ID whose durability is unknown.
-    pub transaction_id: Id,
+    pub fn transaction_id(&self) -> Id {
+        self.transaction_id
+    }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
+    }
 }
 
 /// Errors returned by [`ControlPlaneStore::commit`](crate::ControlPlaneStore::commit).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CommitError {
     /// A concurrency or state conflict; nothing was persisted.
     Conflict(Conflict),
@@ -177,9 +188,6 @@ pub enum CommitError {
     Indeterminate(IndeterminateCommit),
     /// A storage failure occurred before the commit step; nothing was persisted.
     Storage(StorageError),
-    /// Temporary variant for subsystems that are scaffolded but not yet implemented.
-    #[doc(hidden)]
-    Unimplemented(&'static str),
 }
 
 impl fmt::Display for CommitError {
@@ -196,7 +204,6 @@ impl fmt::Display for CommitError {
                 i.transaction_id
             ),
             CommitError::Storage(e) => write!(f, "{e}"),
-            CommitError::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
         }
     }
 }
@@ -227,23 +234,22 @@ impl From<Error> for CommitError {
             Error::Storage(s) => CommitError::Storage(s),
             Error::Validation(v) => CommitError::Validation(v),
             Error::Conflict(c) => CommitError::Conflict(c),
-            Error::Unimplemented(what) => CommitError::Unimplemented(what),
         }
     }
 }
 
 /// Errors returned by [`ControlPlaneStore::claim_jobs`](crate::ControlPlaneStore::claim_jobs).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ClaimError {
     /// The claim's durable outcome is unknown; recover with `recover_claim`.
     Indeterminate(crate::jobs::IndeterminateClaim),
     /// The claim request failed static validation; nothing was persisted.
     Validation(ValidationError),
+    /// A concurrency or state conflict; nothing was persisted.
+    Conflict(Conflict),
     /// A storage failure occurred before the commit step; nothing was persisted.
     Storage(StorageError),
-    /// Temporary variant for subsystems that are scaffolded but not yet implemented.
-    #[doc(hidden)]
-    Unimplemented(&'static str),
 }
 
 impl fmt::Display for ClaimError {
@@ -255,8 +261,8 @@ impl fmt::Display for ClaimError {
                 i.transaction_id()
             ),
             ClaimError::Validation(e) => write!(f, "{e}"),
+            ClaimError::Conflict(e) => write!(f, "{e}"),
             ClaimError::Storage(e) => write!(f, "{e}"),
-            ClaimError::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
         }
     }
 }
@@ -265,19 +271,16 @@ impl std::error::Error for ClaimError {}
 
 /// Errors returned by recovery APIs (`recover_transaction`, `recover_claim`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RecoveryError {
     /// A storage failure prevented recovery; retry after the storage layer is healthy.
     Storage(StorageError),
-    /// Temporary variant for subsystems that are scaffolded but not yet implemented.
-    #[doc(hidden)]
-    Unimplemented(&'static str),
 }
 
 impl fmt::Display for RecoveryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RecoveryError::Storage(e) => write!(f, "{e}"),
-            RecoveryError::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
         }
     }
 }
@@ -290,9 +293,11 @@ impl From<StorageError> for RecoveryError {
     }
 }
 
-/// Errors returned by [`ControlPlaneStore::extend_lease`](crate::ControlPlaneStore::extend_lease).
+/// A lease extension conflicted with the job's durable lease state; nothing was
+/// persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LeaseError {
+#[non_exhaustive]
+pub enum LeaseConflict {
     /// The requested job does not exist.
     JobNotFound(Id),
     /// The supplied lease token is not the job's current lease token.
@@ -305,24 +310,25 @@ pub enum LeaseError {
         current_ms: i64,
         requested_ms: i64,
     },
-    /// A storage failure occurred; the extension may not have persisted.
-    Storage(StorageError),
-    /// Temporary variant for subsystems that are scaffolded but not yet implemented.
-    #[doc(hidden)]
-    Unimplemented(&'static str),
+    /// The lease already expired; an expired lease cannot be revived by extension.
+    Expired {
+        job_id: Id,
+        lease_expires_at_ms: i64,
+        now_ms: i64,
+    },
 }
 
-impl fmt::Display for LeaseError {
+impl fmt::Display for LeaseConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LeaseError::JobNotFound(id) => write!(f, "job {id} not found"),
-            LeaseError::InvalidToken { job_id } => {
+            LeaseConflict::JobNotFound(id) => write!(f, "job {id} not found"),
+            LeaseConflict::InvalidToken { job_id } => {
                 write!(f, "invalid lease token for job {job_id}")
             }
-            LeaseError::NotLeased { job_id, state } => {
+            LeaseConflict::NotLeased { job_id, state } => {
                 write!(f, "job {job_id} is not leased (state {state:?})")
             }
-            LeaseError::ExpiryNotLater {
+            LeaseConflict::ExpiryNotLater {
                 job_id,
                 current_ms,
                 requested_ms,
@@ -330,8 +336,64 @@ impl fmt::Display for LeaseError {
                 f,
                 "job {job_id} lease expiry {requested_ms} is not later than current {current_ms}"
             ),
+            LeaseConflict::Expired {
+                job_id,
+                lease_expires_at_ms,
+                now_ms,
+            } => write!(
+                f,
+                "job {job_id} lease expired at {lease_expires_at_ms} (now {now_ms}); an expired lease cannot be extended"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LeaseConflict {}
+
+/// A lease extension may or may not have become durable. Recover by reading the
+/// job's current lease state via [`ControlPlaneStore::job`](crate::ControlPlaneStore::job).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndeterminateLease {
+    pub(crate) job_id: Id,
+    pub(crate) storage_error: String,
+}
+
+impl IndeterminateLease {
+    /// The job whose lease extension durability is unknown.
+    pub fn job_id(&self) -> Id {
+        self.job_id
+    }
+
+    /// The underlying storage failure reported by the COMMIT step.
+    pub fn storage_error(&self) -> &str {
+        &self.storage_error
+    }
+}
+
+/// Errors returned by [`ControlPlaneStore::extend_lease`](crate::ControlPlaneStore::extend_lease).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LeaseError {
+    /// The extension conflicted with the job's durable lease state; nothing was
+    /// persisted.
+    Conflict(LeaseConflict),
+    /// The extension outcome is unknown; verify the job's lease state with
+    /// [`ControlPlaneStore::job`](crate::ControlPlaneStore::job).
+    Indeterminate(IndeterminateLease),
+    /// A storage failure occurred before the commit step; nothing was persisted.
+    Storage(StorageError),
+}
+
+impl fmt::Display for LeaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LeaseError::Conflict(e) => write!(f, "{e}"),
+            LeaseError::Indeterminate(i) => write!(
+                f,
+                "lease extension for job {} outcome indeterminate; read the job to verify",
+                i.job_id
+            ),
             LeaseError::Storage(e) => write!(f, "{e}"),
-            LeaseError::Unimplemented(what) => write!(f, "not yet implemented: {what}"),
         }
     }
 }
@@ -341,5 +403,11 @@ impl std::error::Error for LeaseError {}
 impl From<StorageError> for LeaseError {
     fn from(e: StorageError) -> Self {
         LeaseError::Storage(e)
+    }
+}
+
+impl From<LeaseConflict> for LeaseError {
+    fn from(e: LeaseConflict) -> Self {
+        LeaseError::Conflict(e)
     }
 }

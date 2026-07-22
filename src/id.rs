@@ -1,7 +1,4 @@
 use std::fmt;
-use std::io;
-#[cfg(unix)]
-use std::io::Read;
 use std::str::FromStr;
 
 /// A 128-bit opaque identifier used for transaction IDs, event IDs, job IDs, and lease tokens.
@@ -11,7 +8,7 @@ use std::str::FromStr;
 /// restarts collide only with negligible probability. The zero ID is reserved as a sentinel
 /// and is not valid as a transaction, event, or job ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Id(pub [u8; 16]);
+pub struct Id([u8; 16]);
 
 impl Id {
     /// The zero ID. Not valid as a transaction, event, or job ID, but useful as a sentinel.
@@ -87,13 +84,14 @@ impl FromStr for Id {
 
 impl From<u128> for Id {
     fn from(value: u128) -> Self {
-        Self(value.to_le_bytes())
+        // Big-endian so numeric order matches the lexicographic byte order of `Ord`.
+        Self(value.to_be_bytes())
     }
 }
 
 impl From<Id> for u128 {
     fn from(id: Id) -> Self {
-        u128::from_le_bytes(id.0)
+        u128::from_be_bytes(id.0)
     }
 }
 
@@ -109,22 +107,8 @@ impl fmt::Display for InvalidId {
 
 impl std::error::Error for InvalidId {}
 
-fn secure_random(buf: &mut [u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut file = std::fs::File::open("/dev/urandom")?;
-        file.read_exact(buf)?;
-        Ok(())
-    }
-
-    // The crate forbids `unsafe`, so platforms without a file-based CSPRNG source
-    // are not yet supported.
-    #[cfg(not(unix))]
-    {
-        Err(io::Error::other(
-            "no secure random source for this platform",
-        ))
-    }
+fn secure_random(buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    getrandom::getrandom(buf)
 }
 
 fn hex_value(b: u8) -> Option<u8> {
@@ -154,6 +138,9 @@ mod tests {
         let a = Id::from(1u128);
         let b = Id::from(2u128);
         assert!(a < b);
+        // Multi-byte values order numerically, not by little-endian byte quirks.
+        assert!(Id::from(256u128) > Id::from(1u128));
+        assert_eq!(u128::from(Id::from(256u128)), 256u128);
     }
 
     #[test]
