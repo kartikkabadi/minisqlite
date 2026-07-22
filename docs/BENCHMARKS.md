@@ -171,12 +171,16 @@ Structural (non-latency) assertions that accompany the budgets:
 
 ## 5. Measurement harness
 
-- **Framework:** [`criterion`](https://crates.io/crates/criterion) is the
-  default harness (`benches/kernel_bench.rs`, `harness = false`). Criterion
-  provides warm-up control, iteration counts, and p50/p95/p99 estimates.
-  Workloads that criterion cannot express well (open time at scale, peak RSS,
-  backup writer stall, soak-style claim loops) use a manual `bencher`-style
-  binary that emits the same report schema.
+- **Framework:** a manual, dependency-free harness
+  (`benches/kernel_bench.rs`, `harness = false`) is the blessed measurement
+  framework for the entire suite; `criterion` is deliberately not used. The
+  harness implements warm-up control, iteration counts, and p50/p95/p99
+  reporting itself, because the suite's core requirements — fresh-process
+  isolation for peak RSS, cold-cache control before read workloads,
+  open-time-at-scale measurements, and backup writer-stall measurement —
+  cannot be expressed inside criterion's in-process measurement loop, and
+  splitting the suite between criterion and a manual binary would produce two
+  report schemas for one run.
 - **Peak RSS:** measured via `getrusage(RUSAGE_SELF).ru_maxrss` on Unix
   (documented per-platform units), sampled per workload in a fresh process so
   runs do not contaminate each other.

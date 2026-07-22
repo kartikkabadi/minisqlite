@@ -27,3 +27,7 @@ tempfile = "3"
 [features]
 # Test-only fault injection; see src/store/failpoints.rs.
 failpoints = []
+
+[[bench]]
+name = "kernel_bench"
+harness = false
