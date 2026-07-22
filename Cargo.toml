@@ -3,13 +3,13 @@ name = "minisqlite"
 version = "0.3.0-alpha.1"
 edition = "2021"
 authors = ["Kartik Kabadi <kartik@kartikkabadi.com>"]
-description = "A typed embedded control-plane state kernel on SQLite: atomic events, projections, and durable jobs"
+description = "Commit events, current state, and background jobs in one atomic SQLite transaction, with explicit crash recovery"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/kartikkabadi/minisqlite"
 homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
-keywords = ["control-plane", "event-sourcing", "jobs", "embedded", "sqlite"]
+keywords = ["job-queue", "event-sourcing", "jobs", "embedded", "sqlite"]
 categories = ["database"]
 include = ["src/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE*"]
 
