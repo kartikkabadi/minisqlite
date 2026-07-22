@@ -5,11 +5,14 @@ use crate::error::ValidationError;
 /// A single entry in a projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionEntry {
+    /// The entry's key, unique within the projection.
     pub key: Vec<u8>,
+    /// The opaque value stored under the key.
     pub value: Vec<u8>,
 }
 
 impl ProjectionEntry {
+    /// Create an entry from a key and value.
     pub fn new(key: impl Into<Vec<u8>>, value: impl Into<Vec<u8>>) -> Self {
         Self {
             key: key.into(),
@@ -22,13 +25,24 @@ impl ProjectionEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionMutation {
     /// Insert or overwrite a key.
-    Put { key: Vec<u8>, value: Vec<u8> },
+    Put {
+        /// The key to insert or overwrite.
+        key: Vec<u8>,
+        /// The value to store under the key.
+        value: Vec<u8>,
+    },
     /// Delete a key (deleting an absent key is a no-op).
-    Delete { key: Vec<u8> },
+    Delete {
+        /// The key to delete.
+        key: Vec<u8>,
+    },
     /// Remove all entries from the projection.
     Clear,
     /// Replace the entire projection contents with the given entries.
-    Replace { entries: Vec<ProjectionEntry> },
+    Replace {
+        /// The entries that become the projection's full contents.
+        entries: Vec<ProjectionEntry>,
+    },
 }
 
 /// A versioned batch of mutations to one projection.
@@ -37,9 +51,13 @@ pub enum ProjectionMutation {
 /// keys within one patch are rejected during validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionPatch {
+    /// The projection being patched.
     pub projection: String,
+    /// The durable version the projection must be at for the patch to apply.
     pub expected_version: u64,
+    /// The version the projection moves to; must be `expected_version + 1`.
     pub new_version: u64,
+    /// The mutations applied in order.
     pub mutations: Vec<ProjectionMutation>,
 }
 
