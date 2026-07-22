@@ -1,0 +1,21 @@
+[package]
+name = "minisqlite-node"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "napi-rs bindings for the minisqlite control-plane kernel (spike)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+minisqlite = { path = ".." }
+napi = { version = "2.16", default-features = false, features = ["napi8"] }
+napi-derive = "2.16"
+
+[build-dependencies]
+napi-build = "2.1"
+
+[profile.release]
+strip = "symbols"
