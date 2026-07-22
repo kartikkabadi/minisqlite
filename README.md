@@ -4,45 +4,25 @@
 [![Docs.rs](https://img.shields.io/docsrs/minisqlite?logo=rust&label=docs.rs)](https://docs.rs/minisqlite)
 [![CI](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml/badge.svg)](https://github.com/kartikkabadi/minisqlite/actions/workflows/ci.yml)
 
-A typed embedded control-plane state kernel that atomically coordinates domain events, materialized state, durable work, and uncertain external effects.
+**One commit. Whole truth.**
 
-One SQLite-backed transaction coordinates four concerns that control planes otherwise stitch together by hand:
+minisqlite commits your events, your current state, and your background jobs in one atomic SQLite transaction — and when a crash makes an outcome unknowable, it says "I don't know" and gives you tools to find out, instead of guessing.
 
-- **Domain events** appended to versioned streams with optimistic concurrency.
-- **Materialized projections** patched with strict version increments.
-- **Durable jobs** with partition-ordered claiming, leases, retries, and cancellation.
-- **Honest uncertainty**: outcomes that may or may not have persisted are reported as indeterminate and recovered explicitly, never guessed.
+## Before / after
 
-It is built for local-first, single-node control planes — agent harnesses, desktop AI clients, workflow orchestrators — where domain history, current state, and asynchronous side effects must commit together.
-
-## Install
-
-`0.3.0-alpha.1` is not yet published to crates.io; the latest published release is `0.2.1`, which is the prior SQL-engine implementation, not the control-plane kernel described here. Until `0.3.0-alpha.1` is released, use a git dependency:
-
-```toml
-[dependencies]
-minisqlite = { git = "https://github.com/kartikkabadi/minisqlite" }
-```
-
-Once `0.3.0-alpha.1` is published, the crates.io dependency applies:
-
-```toml
-[dependencies]
-minisqlite = "0.3.0-alpha.1"
-```
-
-## Usage
-
-Open a store, commit an event, a projection patch, and a job in one atomic batch, then claim the job:
+Without minisqlite, an app that records what happened, updates its state, and schedules follow-up work does it in three steps that can each fail independently:
 
 ```rust
-use minisqlite::{
-    ClaimOutcome, ClaimRequest, CommitBatch, ControlPlaneStore, Event, Id, JobSpec,
-    ProjectionPatch,
-};
+// Before: three writes, three failure points, no shared atomicity.
+event_log.append("thread.turn-requested", payload)?;   // crash here: state and job lost
+state.set("thread-42", "queued")?;                     // crash here: job lost
+job_queue.enqueue("provider-turns", "call provider")?; // did it enqueue? retry and risk duplicates
+```
 
-let store = ControlPlaneStore::open("control-plane.db")?;
+With minisqlite, all three land in one transaction — or none of them do:
 
+```rust
+// After: one commit, all-or-nothing.
 let batch = CommitBatch::new(Id::from(1u128), 1_000)
     .append_event(Event::with_json_payload(
         Id::from(2u128),
@@ -61,6 +41,41 @@ let batch = CommitBatch::new(Id::from(1u128), 1_000)
         b"call provider".to_vec(),
     ));
 let receipt = store.commit(&batch)?;
+```
+
+## What you get
+
+- **Events**: append-only, versioned streams with optimistic concurrency.
+- **State**: materialized projections patched with strict version increments.
+- **Jobs**: durable queues with partition-ordered claiming, leases, retries, and cancellation.
+- **Honest recovery**: outcomes that may or may not have persisted are reported as indeterminate and recovered explicitly, never guessed.
+
+It is built for local-first, single-node apps — agent harnesses, desktop AI clients, workflow orchestrators — where history, current state, and asynchronous side effects must commit together.
+
+## Install
+
+`0.3.0-alpha.1` is not yet published to crates.io. Until it is released, use a git dependency:
+
+```toml
+[dependencies]
+minisqlite = { git = "https://github.com/kartikkabadi/minisqlite" }
+```
+
+Once `0.3.0-alpha.1` is published, the crates.io dependency applies:
+
+```toml
+[dependencies]
+minisqlite = "0.3.0-alpha.1"
+```
+
+## Usage
+
+Open a store, commit an event, a projection patch, and a job in one atomic batch (as above), then claim the job:
+
+```rust
+use minisqlite::{ClaimOutcome, ClaimRequest, ControlPlaneStore};
+
+let store = ControlPlaneStore::open("control-plane.db")?;
 
 match store.claim_jobs(&ClaimRequest {
     queue: "provider-turns".into(),
@@ -80,6 +95,12 @@ match store.claim_jobs(&ClaimRequest {
 ```
 
 Indeterminate commits and claims are surfaced as typed errors (`CommitError::Indeterminate`, `ClaimError::Indeterminate`) that carry no executable work (no payloads or lease tokens). Recover them explicitly with `recover_transaction` and `recover_claim`.
+
+## Why not X?
+
+- **Why not Postgres with an outbox table?** If you are running a server anyway, do that. minisqlite is for single-process, local-first apps where a database server is operational overhead you don't want.
+- **Why not Redis or a hosted job queue?** Those queue jobs, but they can't commit a job atomically with the event and state change that caused it, so you're back to two-phase glue code and duplicate-delivery handling.
+- **Why not plain rusqlite and your own schema?** You can — minisqlite is that schema plus the parts that take the longest to get right: versioned streams, lease-based claiming, and explicit recovery of in-doubt outcomes after a crash.
 
 ## CLI
 
@@ -102,8 +123,6 @@ minisqlite backup backup.db --db control-plane.db
 
 Explicit non-goals: SQL exposed through the public API, distributed consensus, multi-process writers, replication, a workflow DSL, and a public multi-backend storage abstraction.
 
-The pre-0.3 custom SQL engine is preserved for reference at the [`v0.2.1`](https://github.com/kartikkabadi/minisqlite/tree/v0.2.1) tag, and the append-only journal engine on the [`archive/append-only-journal-v1`](https://github.com/kartikkabadi/minisqlite/tree/archive/append-only-journal-v1) branch.
-
 ## Test
 
 ```bash
@@ -113,6 +132,10 @@ cargo test --all-targets --all-features
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
+
+## History
+
+Before 0.3, minisqlite was a from-scratch SQL engine; the last such release is [`v0.2.1`](https://github.com/kartikkabadi/minisqlite/tree/v0.2.1), and the earlier append-only journal engine lives on [`archive/append-only-journal-v1`](https://github.com/kartikkabadi/minisqlite/tree/archive/append-only-journal-v1).
 
 ## License
 
