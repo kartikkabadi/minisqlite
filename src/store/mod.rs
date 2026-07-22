@@ -101,7 +101,8 @@ impl StoreBuilder {
     }
 }
 
-/// A typed embedded control-plane state kernel on SQLite.
+/// The store: commits events, projections, and jobs in one atomic SQLite
+/// transaction.
 ///
 /// One atomic transaction coordinates domain events, materialized projections,
 /// durable jobs, and honest uncertainty handling.

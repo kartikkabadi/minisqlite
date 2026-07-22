@@ -2,8 +2,9 @@
 
 ## 0.3.0-alpha.1 - Unreleased
 
-Complete product rewrite: minisqlite is now a typed embedded control-plane
-state kernel on SQLite, not a from-scratch SQL engine.
+Complete product rewrite: minisqlite now commits events, current state, and
+durable background jobs in one atomic SQLite transaction, replacing the
+from-scratch SQL engine.
 
 ### Added
 
