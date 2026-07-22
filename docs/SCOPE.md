@@ -1,7 +1,9 @@
-# Scope: next release
+# Scope: what's in and what's out
 
-Defines what the SQLite-backed control-plane kernel release will and will not
-contain. See [ADR-001](./ADR-001.md) and [ROADMAP.md](./ROADMAP.md).
+minisqlite commits events, current state, and background jobs in one atomic
+SQLite transaction, with explicit recovery when a crash makes an outcome
+unknowable. This document defines exactly what the next release will and will
+not contain. See [ADR-001](./ADR-001.md) and [ROADMAP.md](./ROADMAP.md).
 
 ## In scope
 
