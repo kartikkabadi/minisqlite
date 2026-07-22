@@ -237,15 +237,25 @@ impl JobState {
 /// A snapshot of a job record as of a point in time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobInfo {
+    /// The job's unique ID.
     pub job_id: Id,
+    /// The specification the job was enqueued with.
     pub spec: JobSpec,
+    /// The job's durable state at the time of the read.
     pub state: JobState,
+    /// How many times the job has been claimed.
     pub attempt: u32,
+    /// When the current lease expires, if the job is leased.
     pub lease_expires_at_ms: Option<i64>,
+    /// The worker holding the current lease, if any.
     pub worker_id: Option<String>,
+    /// When a retry-waiting job becomes claimable again, if applicable.
     pub retry_after_ms: Option<i64>,
+    /// When the job reached a terminal state, if it has.
     pub terminal_at_ms: Option<i64>,
+    /// Digest of the successful result recorded at acknowledgement, if any.
     pub result_digest: Option<Vec<u8>>,
+    /// Summary of the most recent failure, if any.
     pub error_summary: Option<String>,
 }
 
@@ -253,24 +263,38 @@ pub struct JobInfo {
 /// extend the lease.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedJob {
+    /// The claimed job's ID.
     pub job_id: Id,
+    /// The queue the job was claimed from.
     pub queue: String,
+    /// The partition key ordering the job within its queue.
     pub partition_key: String,
+    /// The opaque job payload.
     pub payload: Vec<u8>,
+    /// The worker granted the lease.
     pub worker_id: String,
+    /// Token proving lease ownership; required to ack, fail, or extend.
     pub lease_token: Id,
+    /// The attempt number this claim represents (1-based).
     pub attempt: u32,
+    /// When the granted lease expires.
     pub lease_expires_at_ms: i64,
+    /// The idempotency key, when the effect is explicitly idempotent by key.
     pub idempotency_key: Option<String>,
 }
 
 /// A request to claim ready jobs from one queue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimRequest {
+    /// The queue to claim from.
     pub queue: String,
+    /// Identifier of the claiming worker.
     pub worker_id: String,
+    /// The caller-supplied current time, used for readiness and lease expiry.
     pub now_ms: i64,
+    /// Lease duration granted to each claimed job.
     pub lease_ms: i64,
+    /// Maximum number of jobs to claim.
     pub limit: usize,
 }
 
@@ -332,10 +356,12 @@ impl CommittedClaims {
         self.jobs
     }
 
+    /// The number of claimed jobs.
     pub fn len(&self) -> usize {
         self.jobs.len()
     }
 
+    /// Whether no jobs were claimed.
     pub fn is_empty(&self) -> bool {
         self.jobs.is_empty()
     }
@@ -419,16 +445,22 @@ pub enum Resolution {
 /// Acknowledge a completed job under its current lease token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobAck {
+    /// The job being acknowledged.
     pub job_id: Id,
+    /// The lease token proving current ownership.
     pub lease_token: Id,
+    /// Optional digest of the result, recorded on the job.
     pub result_digest: Option<Vec<u8>>,
 }
 
 /// Record a job failure under its current lease token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobFailure {
+    /// The job being failed.
     pub job_id: Id,
+    /// The lease token proving current ownership.
     pub lease_token: Id,
+    /// Human-readable summary of the failure, recorded on the job.
     pub error_summary: String,
     /// `None` uses the default retry delay resolved at commit time.
     pub retry_after_ms: Option<i64>,
@@ -437,22 +469,29 @@ pub struct JobFailure {
 /// Cancel a job. A leased job requires its current lease token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobCancellation {
+    /// The job being cancelled.
     pub job_id: Id,
+    /// The current lease token; required only when the job is leased.
     pub lease_token: Option<Id>,
 }
 
 /// Resolve an uncertain job outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JobResolution {
+    /// The uncertain job being resolved.
     pub job_id: Id,
+    /// The outcome to apply.
     pub resolution: Resolution,
 }
 
 /// Request to extend an active lease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeaseExtension {
+    /// The leased job whose lease is being extended.
     pub job_id: Id,
+    /// The lease token proving current ownership.
     pub lease_token: Id,
+    /// The requested new expiry; must be strictly later than the current one.
     pub new_expiry_ms: i64,
 }
 
