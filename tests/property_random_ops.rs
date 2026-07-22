@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use common::Prng;
 use minisqlite::{
     ClaimOutcome, ClaimRequest, CommitBatch, ControlPlaneStore, Event, Id, JobSpec, JobState,
-    ProjectionPatch,
+    ProjectionMutation, ProjectionPatch, Resolution,
 };
 
 type Entries = BTreeMap<Vec<u8>, Vec<u8>>;
@@ -344,4 +344,131 @@ fn random_ops_seed_2_match_model() {
 #[test]
 fn random_ops_seed_3_match_model() {
     run_seed(0xC0DE, 400);
+}
+
+/// Structure-aware random-ops property (spec Part B, Layer 7): drive random
+/// sequences of commits, claims, acknowledgements, failures, cancellations,
+/// lease extensions, and uncertain resolutions against a fresh store. The
+/// store must never panic, and `verify` must report a consistent database.
+fn run_fuzz_ops(seed: u64, steps: u64) {
+    let dir = common::temp_dir();
+    let store = common::open(&common::db_path(&dir));
+    let mut rng = Prng::new(seed);
+    let mut next_id: u128 = 1;
+    let mut leases: Vec<(Id, Id)> = Vec::new();
+    let mut uncertain: Vec<Id> = Vec::new();
+
+    let pick = |leases: &mut Vec<(Id, Id)>, rng: &mut Prng| -> Option<(Id, Id)> {
+        if leases.is_empty() {
+            return None;
+        }
+        let idx = rng.below(leases.len() as u64) as usize;
+        Some(leases.swap_remove(idx))
+    };
+
+    for step in 0..steps {
+        let now = 1_000 + step as i64;
+        next_id += 1;
+        let txn = Id::from(next_id);
+        match rng.below(8) {
+            0 => {
+                next_id += 1;
+                let event_id = Id::from(next_id);
+                let stream = format!("s{}", rng.below(4));
+                let _ = store.commit(
+                    &CommitBatch::new(txn, now)
+                        .append_event(Event::with_json_payload(event_id, &stream, "t", now, b"{}")),
+                );
+            }
+            1 => {
+                next_id += 1;
+                let job_id = Id::from(next_id);
+                let queue = format!("q{}", rng.below(2));
+                let part = format!("p{}", rng.below(4));
+                let _ = store.commit(&CommitBatch::new(txn, now).enqueue_job(
+                    JobSpec::reconcilable(job_id, &queue, &part, vec![rng.next_u64() as u8]),
+                ));
+            }
+            2 => {
+                let queue = format!("q{}", rng.below(2));
+                if let Ok(ClaimOutcome::Committed(claims)) = store.claim_jobs(&ClaimRequest {
+                    queue,
+                    worker_id: "w".into(),
+                    now_ms: now,
+                    lease_ms: 1 + rng.below(256) as i64,
+                    limit: 1 + rng.below(4) as usize,
+                }) {
+                    for job in claims.into_jobs() {
+                        leases.push((job.job_id, job.lease_token));
+                    }
+                }
+            }
+            3 => {
+                if let Some((job_id, token)) = pick(&mut leases, &mut rng) {
+                    let _ = store
+                        .commit(&CommitBatch::new(txn, now).acknowledge_job(job_id, token, None));
+                }
+            }
+            4 => {
+                if let Some((job_id, token)) = pick(&mut leases, &mut rng) {
+                    let retry = if rng.below(2) == 0 {
+                        Some(now + rng.below(256) as i64)
+                    } else {
+                        None
+                    };
+                    let _ = store
+                        .commit(&CommitBatch::new(txn, now).fail_job(job_id, token, "e", retry));
+                }
+            }
+            5 => {
+                if let Some((job_id, token)) = pick(&mut leases, &mut rng) {
+                    let _ = store.extend_lease(job_id, token, now + rng.below(256) as i64, now);
+                    leases.push((job_id, token));
+                }
+            }
+            6 => {
+                for job in store.jobs(None, Some(JobState::Uncertain), 4).unwrap() {
+                    uncertain.push(job.job_id);
+                }
+                if let Some(job_id) = uncertain.pop() {
+                    let resolution = match rng.below(3) {
+                        0 => Resolution::Retry,
+                        1 => Resolution::MarkSucceeded,
+                        _ => Resolution::MarkDead,
+                    };
+                    let _ = store.commit(
+                        &CommitBatch::new(txn, now).resolve_uncertain_job(job_id, resolution),
+                    );
+                }
+            }
+            _ => {
+                let projection = format!("proj{}", rng.below(2));
+                let version = store.projection_version(&projection).unwrap();
+                let _ = store.commit(&CommitBatch::new(txn, now).apply_projection_patch(
+                    ProjectionPatch {
+                        projection,
+                        expected_version: version,
+                        new_version: version + 1,
+                        mutations: vec![ProjectionMutation::Put {
+                            key: vec![rng.next_u64() as u8],
+                            value: vec![rng.next_u64() as u8],
+                        }],
+                    },
+                ));
+            }
+        }
+    }
+
+    let report = store.verify().unwrap();
+    assert!(report.is_ok(), "verify findings: {:?}", report.findings);
+}
+
+#[test]
+fn fuzz_ops_property_seed_1() {
+    run_fuzz_ops(0xF00D, 600);
+}
+
+#[test]
+fn fuzz_ops_property_seed_2() {
+    run_fuzz_ops(0xFEED, 600);
 }
