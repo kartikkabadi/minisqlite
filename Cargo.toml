@@ -11,6 +11,7 @@ homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
 keywords = ["control-plane", "event-sourcing", "jobs", "embedded", "sqlite"]
 categories = ["database"]
+include = ["src/**", "Cargo.toml", "README.md", "CHANGELOG.md", "LICENSE*"]
 
 [[bin]]
 name = "minisqlite"
