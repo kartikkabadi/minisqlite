@@ -1,19 +1,28 @@
 [package]
 name = "minisqlite"
-version = "0.2.1"
+version = "0.3.0-alpha.1"
 edition = "2021"
 authors = ["Kartik Kabadi <kartik@kartikkabadi.com>"]
-description = "A minimal, from-scratch SQLite-like relational database engine in Rust"
+description = "A typed embedded control-plane state kernel on SQLite: atomic events, projections, and durable jobs"
 readme = "README.md"
 license = "MIT"
 repository = "https://github.com/kartikkabadi/minisqlite"
 homepage = "https://github.com/kartikkabadi/minisqlite"
 documentation = "https://docs.rs/minisqlite"
-keywords = ["sqlite", "database", "embedded", "sql", "rust"]
-categories = ["database-implementations"]
+keywords = ["control-plane", "event-sourcing", "jobs", "embedded", "sqlite"]
+categories = ["database"]
 
 [[bin]]
 name = "minisqlite"
 path = "src/main.rs"
 
 [dependencies]
+getrandom = "0.2"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Test-only fault injection; see src/store/failpoints.rs.
+failpoints = []
