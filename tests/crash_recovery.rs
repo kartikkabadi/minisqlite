@@ -79,7 +79,7 @@ fn child_crash_commit_worker() {
     let log_path = std::env::var("MINISQLITE_CRASH_LOG").unwrap();
     let store = ControlPlaneStore::open(&db).unwrap();
     let mut log = File::create(&log_path).unwrap();
-    for i in 1u128.. {
+    for i in 1u128..=u128::MAX {
         log_line(&mut log, &format!("start {i}"));
         let batch = CommitBatch::new(Id::from(CRASH_TXN_BASE + i), 2_000).append_event(
             Event::with_json_payload(txid(), format!("s{}", i % 4), "crash", 1_000, b"{}"),
