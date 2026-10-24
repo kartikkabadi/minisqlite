@@ -11,7 +11,7 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "bun test",
+    "test": "bun scripts/check-bun-version.js && bun test",
     "example": "node examples/synara_provider_turn.mjs"
   },
   "devDependencies": {

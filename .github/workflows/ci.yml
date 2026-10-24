@@ -9,6 +9,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  bun-bindings:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: minisqlite-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          cache: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: minisqlite-node/.bun-version
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: bun run test
+
   gate:
     strategy:
       fail-fast: false
